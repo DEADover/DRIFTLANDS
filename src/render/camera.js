@@ -15,7 +15,8 @@ import * as THREE from 'three';
  */
 export class ChaseCamera {
   constructor(aspect) {
-    this.camera = new THREE.PerspectiveCamera(26, aspect, 1, 3000);
+    this.baseFov = 26;
+    this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 1, 3000);
 
     // --- tuning ---
     this.pitch = THREE.MathUtils.degToRad(61);
@@ -74,6 +75,13 @@ export class ChaseCamera {
 
     // Speed widens the frame slightly — reads as acceleration.
     const distance = this.distance * (1 + Math.min(speed / 60, 1) * 0.14) * (opts.zoom ?? 1);
+
+    // FOV punch, driven by the feel layer.
+    const fov = this.baseFov + (opts.fovBoost ?? 0);
+    if (Math.abs(this.camera.fov - fov) > 0.001) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
 
     const yaw = this.yaw + this.followYaw * car.heading;
     const horiz = Math.cos(this.pitch) * distance;

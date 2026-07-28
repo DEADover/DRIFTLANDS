@@ -98,5 +98,16 @@ for (const id of targets) {
 
 await browser.close();
 await writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({ at: new Date().toISOString(), args, results }, null, 2));
+
+// Pointer to the newest gallery, consumed by the live progress page.
+await writeFile(
+  path.join(ROOT, 'shots/index.json'),
+  JSON.stringify({
+    at: new Date().toISOString(),
+    dir: path.relative(ROOT, outDir),
+    files: results.filter((r) => r.file).map((r) => r.file),
+    results,
+  }, null, 2)
+);
 console.log(`\n→ ${results.length} shots in ${path.relative(ROOT, outDir)}`);
 process.exit(hadError ? 1 : 0);
