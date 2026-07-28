@@ -223,6 +223,32 @@ export class Game {
     return { height: this.terrain.heightAt(x, z), normal: this.terrain.normalAt(x, z), onBridge: false };
   }
 
+  /**
+   * Ground height that keeps every WHEEL on or above the surface.
+   *
+   * The body used to be placed using the terrain height sampled at the car's
+   * centre only. On a flat-shaded heightfield the surface between facet
+   * vertices is a plane, so on any slope or facet ridge the corners of a 2.7 x
+   * 1.8 m wheelbase sit below that centre sample and the wheels visibly sink
+   * into the ground. Sampling the four contact patches and taking the highest
+   * means the car may ride a few centimetres proud on a crest — which is
+   * invisible at this camera height — instead of clipping through, which is not.
+   */
+  carGroundAt(v) {
+    const f = v.forward.clone(), r = v.right.clone();
+    let h = -Infinity;
+    let onBridge = false;
+    for (const [fwd, side] of [[1.35, 0.92], [1.35, -0.92], [-1.35, 0.92], [-1.35, -0.92]]) {
+      const x = v.position.x + f.x * fwd + r.x * side;
+      const z = v.position.z + f.z * fwd + r.z * side;
+      const g = this.groundAt(x, z);
+      if (g.height > h) h = g.height;
+      onBridge = onBridge || g.onBridge;
+    }
+    const centre = this.groundAt(v.position.x, v.position.z);
+    return { height: h, normal: centre.normal, onBridge };
+  }
+
   surfaceAt(x, z) {
     if (this.bridges.heightAt(x, z) != null) return { grip: 1.0, kind: 'bridge' };
     if (this.roads.isOnRoad(x, z)) return { grip: this.roads.gripAt(x, z), kind: 'road' };
@@ -328,7 +354,7 @@ export class Game {
 
     const v = this.vehicle;
     const g = this.groundAt(v.position.x, v.position.z);
-    this.carView.update(scaled, v, g);
+    this.carView.update(scaled, v, this.carGroundAt(v));
     this.emitFx(scaled);
     this.skid.update(scaled);
     this.particles.update(scaled);

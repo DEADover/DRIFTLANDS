@@ -48,10 +48,18 @@ export const DEFAULT_TUNE = {
   trackWidth: 1.58,
 
   // --- drivetrain ----------------------------------------------------------
-  enginePower: 16200,        // N of drive force at full throttle, low speed
+  // Longitudinal feel, retuned after play-testing. 16200 N on 1180 kg is
+  // 13.7 m/s^2 — 0-100 km/h in about two seconds, which made the car feel
+  // teleport-fast and, by contrast, made braking feel broken. 9000 N gives
+  // ~7.6 m/s^2 and a ~3.7 s 0-100: still firmly arcade, but you can place the
+  // car. Braking is grip-limited in practice (mu ~1.3 on dirt caps it near
+  // 12.7 m/s^2), so the raise mostly guarantees the tyres are the limit, not
+  // the brake, and engine braking now gives real deceleration off-throttle.
+  enginePower: 9000,         // N of drive force at full throttle, low speed
   topSpeed: 44,              // m/s (~158 km/h) — reads fast at this camera height
   driveBiasRear: 0.66,       // rear-biased AWD: launches hard, still oversteers
-  brakeForce: 21000,
+  brakeForce: 27000,
+  engineBrake: 2600,         // N of overrun drag with the throttle shut
   reverseFactor: 0.30,
   rollingResist: 210,        // N constant
   rollingSpeed: 7.5,         // N per m/s
@@ -369,6 +377,12 @@ export class Vehicle {
     if (brake > 0) {
       if (vx > 0.4) brakeF = T.brakeForce * brake;
       else reverse = T.enginePower * T.reverseFactor * brake;
+    }
+    // Overrun: lifting off should slow the car noticeably, not coast forever.
+    // Without this the only way to shed speed is the brake, which is a large
+    // part of why deceleration felt absent.
+    if (throttle <= 0.02 && brake <= 0.02 && vx > 0.5) {
+      brakeF += T.engineBrake * Math.min(1, vx / 6);
     }
     const hbF = handbrake * T.handbrakeForce * (vx > 0.2 ? 1 : 0);
 

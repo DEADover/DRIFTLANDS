@@ -34,7 +34,12 @@ export class KeyboardInput {
     return {
       throttle: this.has('KeyW', 'ArrowUp') ? 1 : 0,
       brake: this.has('KeyS', 'ArrowDown') ? 1 : 0,
-      steer: (right ? 1 : 0) - (left ? 1 : 0),
+      // Sign convention is set by entities/vehicle.js: steer > 0 points the
+      // front wheels LEFT (heading and yawRate are positive toward the car's
+      // left). This used to return right-minus-left, so D steered left and A
+      // steered right. The capture autopilot used the correct convention, which
+      // is why screenshots looked fine while the game was unplayable by hand.
+      steer: (left ? 1 : 0) - (right ? 1 : 0),
       handbrake: this.has('Space') ? 1 : 0,
       reset: this.has('KeyR'),
     };
