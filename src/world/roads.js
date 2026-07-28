@@ -533,41 +533,94 @@ function adaptToTerrain(pts, cost, opts) {
 }
 
 /**
+ * A lateral gaussian bump of amplitude A and width σ has, at its crest, radius
+ *
+ *      r = σ² / (2A)
+ *
+ * and turns the road through roughly 1.715·σ/r radians in total (out one way at
+ * the flanks, hard back at the crest, out again — which is exactly the entry /
+ * apex / exit of a corner). So a corner is specified the way a road engineer
+ * specifies one — by RADIUS — and σ follows from how much of a turn we want:
+ *
+ *      σ = shape · r        shape 1.2 → ~2 rad,   shape 1.9 → ~3.3 rad
+ *
+ * That is the whole trick. The previous plan picked σ and an amplitude ratio
+ * independently, which meant its "sweepers" came out at 130-180 m radius —
+ * indistinguishable from a straight line at a 200 m camera height — and its
+ * "hairpins" came out at 11 m and were promptly flattened by the curvature
+ * limiter. Nothing in between ever got built, and the frame had no shape.
+ */
+function corner(rng, r0, r1, shape) {
+  const r = rng.float(r0, r1);
+  const sg = shape * r;
+  return { sigma: sg, amp: (sg * sg) / (2 * r) };
+}
+
+/**
  * Step 3 — the corner plan. A rally stage is a RHYTHM: a straight to breathe,
  * a long sweeper you can hold sideways, a hairpin that demands the handbrake, a
- * chicane that flips the car the other way. Direction alternates so drifts link.
+ * chicane that flips the car the other way. Direction alternates so drifts link
+ * and so the route never reads as one big circle.
+ *
+ * ART_DIRECTION wants the road to BE the composition, so the mix is deliberately
+ * corner-heavy: at a 200 m camera height anything over ~180 m radius photographs
+ * as a straight line, so "sweeper" here means 120-170 m, not 300.
  */
 function cornerPlan(rng, L) {
   const feats = [];
   let s = rng.float(0, 60);
   let sign = rng.sign();
-  const bag = ['sweeper', 'sweeper', 'sweeper', 'hairpin', 'chicane',
-    'kink', 'hairpin', 'straight', 'kink'];
   let guard = 0;
-  while (s < L - 140 && guard++ < 200) {
-    const kind = rng.pick(bag);
-    if (kind === 'hairpin') {
-      const sg = rng.float(30, 40);
-      feats.push({ s, sigma: sg, amp: sign * rng.float(1.45, 1.85) * sg });
-      s += sg * 2 + rng.float(150, 250);
-    } else if (kind === 'chicane') {
-      const sg = rng.float(30, 42);
-      const a = rng.float(0.55, 0.85) * sg;
-      feats.push({ s, sigma: sg, amp: sign * a });
-      feats.push({ s: s + sg * 2.0, sigma: sg, amp: -sign * a });
-      s += sg * 2.0 + rng.float(160, 240);
-    } else if (kind === 'sweeper') {
-      const sg = rng.float(95, 150);
-      feats.push({ s, sigma: sg, amp: sign * rng.float(0.30, 0.52) * sg });
-      s += sg * 1.5 + rng.float(150, 300);
-    } else if (kind === 'kink') {
-      const sg = rng.float(42, 62);
-      feats.push({ s, sigma: sg, amp: sign * rng.float(0.32, 0.50) * sg });
-      s += sg * 1.6 + rng.float(140, 230);
-    } else {
-      s += rng.float(200, 320); // a genuine straight
-    }
+  const put = (c) => {
+    feats.push({ s, sigma: c.sigma, amp: sign * c.amp });
     sign = -sign;
+  };
+
+  // A stage is not a uniform sprinkle of corners — it BREATHES, alternating
+  // fast sections you can carry speed through with technical sections that
+  // demand the handbrake. Two reasons that matters here, and the second is the
+  // one that turned the frame around:
+  //
+  //  1. It is what a real stage does, and it is what the reference reads as.
+  //  2. The capture autopilot never lifts, so it reaches 42 m/s in 270 m and
+  //     can only hold ~200 m of radius by the end. On a route with corners
+  //     sprinkled evenly, almost no 270 m window is drivable at that speed and
+  //     spawn() has nothing to choose from — it was picking from 102 stations
+  //     out of 1143. A fast section long enough to spawn in, running INTO a
+  //     technical section, is the composition and the drivability at once: the
+  //     car arrives on the road, and the hairpin is a hundred metres up the
+  //     picture where nothing has to drive it.
+  while (s < L - 160 && guard++ < 300) {
+    // --- fast: long open curves, the part the shutter opens on ---------------
+    const fastEnd = s + rng.float(430, 620);
+    while (s < fastEnd && s < L - 160) {
+      if (rng.float(0, 1) < 0.34) { s += rng.float(160, 250); continue; }
+      const c = corner(rng, 190, 300, 1.05);
+      put(c);
+      s += c.sigma * 1.7 + rng.float(110, 190);
+    }
+    // --- technical: the part the picture is pointed at -----------------------
+    const techEnd = s + rng.float(270, 430);
+    while (s < techEnd && s < L - 160) {
+      const roll = rng.float(0, 1);
+      if (roll < 0.32) {
+        const c = corner(rng, 26, 35, 1.95);        // ~3.3 rad — it doubles back
+        put(c);
+        s += c.sigma * 2.0 + rng.float(70, 130);
+      } else if (roll < 0.64) {
+        // Two opposite corners sharing an exit and an entry: the S the client
+        // reference is built on. Mild individually so the pair stays drivable.
+        const c = corner(rng, 55, 78, 1.15);
+        feats.push({ s, sigma: c.sigma, amp: sign * c.amp });
+        feats.push({ s: s + c.sigma * 1.9, sigma: c.sigma, amp: -sign * c.amp });
+        sign = -sign;
+        s += c.sigma * 3.4 + rng.float(70, 130);
+      } else {
+        const c = corner(rng, 44, 88, 1.60);
+        put(c);
+        s += c.sigma * 1.9 + rng.float(70, 130);
+      }
+    }
   }
   return feats;
 }
@@ -754,13 +807,35 @@ function buildRoute(ctx, style, rng) {
   pts = repairRing(pts, ref, biome, terrain);
   stage('repair', pts);
   pts = resample(pts, 6);
-  pts = limitCurvature(pts, 17, 120);
-  pts = separate(pts, 38, 26, 16);
+  pts = limitCurvature(pts, 26, 140);
+  // 52 m, not 40. A hairpin's two legs each carry 15 m of carriageway plus a
+  // skirt, so at 40 m of separation the meadow between them is barely a car
+  // wide and the pair renders as one blob of ochre with a green splinter in it
+  // — which is exactly what the close preset showed. 52 m leaves a strip of
+  // real meadow between the legs, which is what the reference draws (and what
+  // the tree builder needs somewhere to put a clump).
+  pts = separate(pts, 52, 26, 16);
   pts = deloop(pts);
-  pts = limitCurvature(pts, 17, 60);
-  pts = smoothRing(pts, 3, 0.18);
-  stage('final', pts);
-  return resample(pts, 3.0);
+  pts = limitCurvature(pts, 26, 90);
+  pts = smoothRing(pts, 4, 0.22);
+  // THE LAST WORD ON CURVATURE, at the density the car and the mesh actually
+  // see. Limiting at 6 m spacing and then resampling to 3 m used to leave 6 m
+  // radius spikes in the finished route: the spikes live BETWEEN the stations
+  // the limiter was looking at. The mesh survives them (capU folds the inside
+  // of the section away) but the autopilot does not — it was being thrown
+  // fifteen metres into the meadow by corners that no measurement of the route
+  // admitted existed. Anything under ~22 m is not a hairpin, it is a kink.
+  let fine = resample(pts, 3.0);
+  fine = limitCurvature(fine, 24, 260);
+  fine = smoothRing(fine, 5, 0.20);
+  // Two hundred more iterations, because the limiter relaxes a spike by at most
+  // 0.42 of the local correction per pass and a hard one needs a long time to
+  // bleed out. Left at 80 it converged on the alpine seed and stalled at an
+  // 11 m radius on the lake seed — and an 11 m radius is a hole the autopilot
+  // falls into on any route it appears in, not just the one being photographed.
+  fine = limitCurvature(fine, 24, 260);
+  stage('final', fine);
+  return fine;
 }
 
 // ---------------------------------------------------------------------------
@@ -946,12 +1021,21 @@ function describe(ctx, pts, opts) {
   }
   const clearance = blurRing(clearRaw, Math.max(1, Math.round(10 / ds)), 2, closed);
 
+  // Curvature as the WORN LINE sees it: a car takes ~25 m to change its mind,
+  // so the rut drift has to be driven by a smoothed curvature or the ruts
+  // shimmy from station to station instead of swinging through the corner.
+  const kSm = blurRing(Float64Array.from(f.k), Math.max(1, Math.round(24 / ds)), 2, closed);
+
   const out = new Array(n);
   for (let i = 0; i < n; i++) {
+    const rl = rutLine(kSm[i]);
     out[i] = {
       x: pts[i].x, z: pts[i].z, s: s[i],
       y: y[i] + clearance[i] * (1 - deckMask[i]), yT: yT[i],
-      tx: f.tx[i], tz: f.tz[i], nx: f.nx[i], nz: f.nz[i], k: f.k[i],
+      tx: f.tx[i], tz: f.tz[i], nx: f.nx[i], nz: f.nz[i], k: f.k[i], ks: kSm[i],
+      rutShift: rl.shift, rutSpread: rl.spread,
+      rutL: warpU(-RUT_U, rl.shift, rl.spread),
+      rutR: warpU(RUT_U, rl.shift, rl.spread),
       bank: bank[i], surf: surf[i], hw: halfWs[i], verge,
       // a bridge deck is a level structure — no ground tilt out over the water
       tilt: deckMask[i] > 0.02 ? tilt[i] * (1 - deckMask[i]) : tilt[i],
@@ -969,7 +1053,7 @@ const LIFT = 0.12;   // above the terrain profile — just enough to beat z-figh
 const CROWN = 0.10;  // camber drop at the carriageway edge
 const BANK_MAX = 7;  // longest batter/blend skirt we will build
 const SKIRT_MIN = 1.6; // the shoulder ALWAYS gets this much soft blend
-const RUT_DEPTH = 0.07; // how deep the wheel ruts are worn in
+const RUT_DEPTH = 0.11; // how deep the wheel ruts are worn in
 
 /**
  * THE CROSS-SECTION, as fractions of the half width. Everything about how the
@@ -1000,10 +1084,43 @@ const BANDS = [
   [0.66, 1.00, 'edge'],
 ];
 
-/** Depth worn into the carriageway at a lateral fraction of the half width. */
-function rutDepth(uf) {
-  const a = Math.abs(uf);
-  const t = clamp(1 - Math.abs(a - 0.42) / 0.17, 0, 1);
+/** Nominal lateral station of the two ruts, as a fraction of the half width. */
+const RUT_U = 0.42;
+
+/**
+ * WHERE THE WHEELS ACTUALLY WENT.
+ *
+ * Two rails at a constant gauge down the middle of the carriageway is what a
+ * paint machine does, not what traffic does. Through a bend every driver turns
+ * in toward the apex, so the worn pair DRIFTS to the inside of the corner; and
+ * because they all pick slightly different lines, the pair also SPREADS. Both
+ * effects are proportional to curvature, which is what makes the ruts read as
+ * following the road rather than being ruled along it — they visibly converge
+ * and swing across the carriageway through every corner.
+ *
+ * Driven by the smoothed curvature `ks` carried on each sample, so the drift is
+ * a long lazy swing tens of metres long, not per-station dither.
+ */
+function rutLine(ks) {
+  const t = clamp(Math.abs(ks ?? 0) * 150, 0, 1);
+  return { shift: -Math.sign(ks ?? 0) * 0.22 * t, spread: 1 + 0.14 * t };
+}
+
+/**
+ * Warp a lateral station by the racing line. The window is 1 at the crown and
+ * 0 at the carriageway edge, so the ochre silhouette itself never moves — only
+ * the worn band inside it — and the cross-section stays monotonic, which it
+ * must be or the strip folds through itself and shows black slivers.
+ */
+function warpU(uf, shift, spread) {
+  const w = (1 + Math.cos(Math.PI * clamp(Math.abs(uf), 0, 1))) * 0.5;
+  return uf + (shift + uf * (spread - 1)) * w;
+}
+
+/** Depth worn into the carriageway, measured from the two rut centres. */
+function rutDepth(uf, cL, cR) {
+  const d = Math.min(Math.abs(uf - cL), Math.abs(uf - cR));
+  const t = clamp(1 - d / 0.17, 0, 1);
   return RUT_DEPTH * t * t * (3 - 2 * t);
 }
 
@@ -1033,7 +1150,8 @@ function capU(sm, u) {
 function sectionY(sm, u) {
   const t = clamp(u / sm.hw, -2, 2);
   return sm.y + LIFT + (sm.tilt ?? 0) * u - sm.bank * u
-    - CROWN * Math.min(1, t * t) - rutDepth(t);
+    - CROWN * Math.min(1, t * t)
+    - rutDepth(t, sm.rutL ?? -RUT_U, sm.rutR ?? RUT_U);
 }
 
 /** March outward until the batter face meets the terrain. */
@@ -1144,8 +1262,20 @@ function buildRibbonMesh(ctx, route, colours, name) {
    */
   const drape = (sm, u) => {
     const cu = capU(sm, u);
-    const g = terrain.heightAt(sm.x + sm.nx * cu, sm.z + sm.nz * cu) + LIFT;
-    return Math.max(sectionY(sm, cu), g);
+    const px = sm.x + sm.nx * cu, pz = sm.z + sm.nz * cu;
+    // Sampled at the vertex AND around it. A terrain triangle is ~10 m across
+    // while the carriageway quads are 3 m by 2 m, so a high ground vertex can
+    // sit BETWEEN two road stations, above the quad that spans them, and shows
+    // as a green tongue lying across the ochre. Taking the worst ground within
+    // a couple of metres closes the gap the interpolation leaves; on a 1:10
+    // slope it costs 0.16 m of extra height, which is inside the ±0.45 m the
+    // car's raw-terrain ground contact can absorb.
+    let g = terrain.heightAt(px, pz);
+    for (const [ax, az] of [[sm.nx, sm.nz], [-sm.nx, -sm.nz], [sm.tx, sm.tz], [-sm.tx, -sm.tz]]) {
+      const h = terrain.heightAt(px + ax * 1.7, pz + az * 1.7);
+      if (h > g) g = h;
+    }
+    return Math.max(sectionY(sm, cu), g + LIFT);
   };
 
   for (let i = 0; i < last; i++) {
@@ -1169,10 +1299,14 @@ function buildRibbonMesh(ctx, route, colours, name) {
     // ragged fringe pinned to it.
     const hemA = [1 + ragged(A, -1) * 0.13, 1 + ragged(A, 1) * 0.13];
     const hemB = [1 + ragged(B, -1) * 0.13, 1 + ragged(B, 1) * 0.13];
+    // Every lateral station goes through the same warp: the racing-line drift
+    // and spread from `rutLine`, plus the slow arc-length sway. The window
+    // inside `warpU` pins the outermost station, so the ochre silhouette is
+    // untouched while the worn band swings across it through the corner.
     const put = (sm, uf, sway, hem) => {
       const a = Math.abs(uf);
-      const isRut = a > 0.19 && a < 0.7;
-      let f = uf + (isRut ? sway * Math.sign(uf) : 0);
+      let f = warpU(uf, sm.rutShift ?? 0, sm.rutSpread ?? 1);
+      if (a > 0.19 && a < 0.7) f += sway * Math.sign(uf);
       if (a >= 0.999) f *= hem[uf > 0 ? 1 : 0];
       return { u: f * sm.hw, y: drape(sm, f * sm.hw) };
     };
@@ -1700,9 +1834,13 @@ export function createRoadNetwork(ctx) {
     // A rut is the same earth, damper and packed hard: darker, a touch cooler.
     // Not much darker, though — push it far and two crisp bands read as painted
     // lane markings, which is the opposite of what they are for.
-    colours[`${k}:rut`] = c.clone().multiplyScalar(0.74).lerp(new THREE.Color(palette.rockShadow), 0.13);
+    // ART_DIRECTION §3 calls the ruts "highly visible and essential". Against
+    // the target's two near-black bands ours were a suggestion; 0.66 is dark
+    // enough to read from 200 m up and still short of the painted-lane-marking
+    // look that a harder push produces.
+    colours[`${k}:rut`] = c.clone().multiplyScalar(0.66).lerp(new THREE.Color(palette.rockShadow), 0.18);
     // The feathered lip of the rut, so it has no hard boundary.
-    colours[`${k}:rutSoft`] = c.clone().multiplyScalar(0.90).lerp(new THREE.Color(palette.rockShadow), 0.05);
+    colours[`${k}:rutSoft`] = c.clone().multiplyScalar(0.84).lerp(new THREE.Color(palette.rockShadow), 0.08);
     // The strip between the ruts nobody drives on: lighter, slightly greened.
     colours[`${k}:centre`] = c.clone().lerp(grass, 0.10).multiplyScalar(1.03);
     // Thrown grit and dust piles up at the edges — the palest part of the road.
@@ -1819,47 +1957,131 @@ export function createRoadNetwork(ctx) {
    * nothing in the score cared about ALTITUDE, so the shot happened wherever
    * the tightest corner was, pale bank included.
    *
-   * So: a fast sweeper rather than a hairpin, on the green valley floor, with
-   * plenty of road folded into the surrounding 130 m — and the whole stretch
-   * the car will actually drive over the next ~300 m has to stay down there
-   * too, because that stretch is what ends up in frame.
+   * The rule NOW, measured rather than guessed (tools/route_probe.mjs reports
+   * the radius under the car and the turning inside the frame at the preset's
+   * settle time):
+   *
+   *   · the shutter opens ~230 m along the route, so score the road AROUND
+   *     THERE, not around the start;
+   *   · the car must be MID-CORNER — radius under it in the 50-120 m band. A
+   *     460 m radius is a straight line at this camera height and that is
+   *     exactly what the last round shipped;
+   *   · the ±115 m of route the camera can see has to turn ~2.6 rad, and
+   *     ideally CHANGE DIRECTION inside the frame, which is the S the client
+   *     reference is built on;
+   *   · only the first 130 m has to be gentle — that is the run-up the car
+   *     needs to get on the road and up to speed. After that a corner is not a
+   *     hazard, it is the photograph.
    */
+  let _spawnIdx = -1;
+  let _spawnDiag = null;
   const spawn = () => {
     const n = S.length;
     const half = biome.size * 0.5;
-    // A 10 s capture from a standstill covers ~350 m at rally pace. Judge the
-    // whole of it, and frame on where the car ENDS UP, not where it started.
-    const runN = Math.max(8, Math.round(380 / main.ds));
-    const endN = Math.max(4, Math.round(250 / main.ds));
+    // A 9 s capture from a standstill covers ~230-270 m at rally pace; a run
+    // with a real corner in it scrubs speed, so the shutter lands nearer 230.
+    const runN = Math.max(8, Math.round(400 / main.ds));
+    // MEASURED, not assumed: with the run-up kept open the hero tape puts the
+    // car 273 m along the route at its 9 s settle time. Get this wrong by 40 m
+    // and the whole frame is scored around the wrong piece of road.
+    const endN = Math.max(4, Math.round(272 / main.ds));
+    // Where the shutter opens, in metres along the route, for each alpine
+    // capture preset — lake_bridge settles at 7 s, hero_alpine at 9 s and
+    // wildlife at 10 s. Weighted toward the hero, which is the judged frame.
+    const SHUTTERS = [{ m: 190, w: 0.22 }, { m: 272, w: 0.56 }, { m: 315, w: 0.22 }];
     // The green band of the ground ramp. Anything much above this is the pale
     // upper alp, and the frame loses its saturation.
     const GREEN = 34;
-    // Flat out on dirt the car needs a lot of radius, so the stretch it
-    // actually DRIVES has to be gentle or it runs wide and takes the road out
-    // of frame with it. The stretch AHEAD of where it ends up is under no such
-    // obligation — nothing drives it during the capture, it only has to be
-    // photogenic — so that is where the big sweeper is allowed to live. This is
-    // the reference composition exactly: car on the exit of one corner, the
-    // next one arcing away in front of it.
-    const R_DRIVE = 88;   // the part the car covers in the capture
-    const R_MIN = 55;     // the part it only looks at
+
+    // WHAT THE CAR CAN ACTUALLY HOLD.
+    //
+    // The capture autopilot never lifts, so the car's speed is a function of one
+    // thing: how far it has run. Fitted to tools/route_trace.mjs on a clean run
+    // (d/v pairs 6/11.3, 12/16.0, 21/20.5, 45/28.2, 150/35.8, 273/41):
+    //
+    //     v(d) = V·tanh( sqrt(2·A₀·d) / V )
+    //
+    // — constant-power-ish, within a metre per second everywhere. The earlier
+    // sqrt(2·5.6·d) fit was 25% low at 30 m, which understated the lateral
+    // demand of the opening corners by half and let the run-up throw the car
+    // thirty metres into the meadow.
+    const A0 = 10.6, V_MAX = 42;
+    const vAt = (metres) =>
+      V_MAX * Math.tanh(Math.sqrt(2 * A0 * Math.max(1, metres)) / V_MAX);
+    // Every capture tape does its scripted handbrake flick in the opening
+    // seconds — the hero preset's runs from 4.4 s to 5.2 s, which lands between
+    // roughly 50 m and 130 m along the route. With the rear axle let go there is
+    // no cornering force to be had, so that stretch has to be much more open
+    // than grip alone would demand or the car spears off and never comes back.
+    const flick = (d) => (d > 45 && d < 140 ? 1.9 : 1);
+
     // THE SHAPE THAT ENDS UP IN THE PICTURE.
     //
-    // Scoring curvature over the whole 380 m run does not work: a stretch can
-    // bank up a perfectly respectable 1.6 rad of turning two hundred metres
-    // behind the car and still be ruler-straight in the frame. The camera sees
-    // roughly ±120 m around the car, so that is the window that has to bend.
-    // ~2 rad over 240 m is the long sweeping arc the client references are
-    // built on, and it is inside what a 62 m minimum radius can deliver.
-    const frameN = Math.max(4, Math.round(240 / main.ds));
-    const FRAME_TURN_WANT = 2.0;
+    // Scoring curvature over the whole run does not work: a stretch can bank up
+    // a perfectly respectable 1.6 rad of turning two hundred metres behind the
+    // car and still be ruler-straight in the frame.
+    //
+    // And the frame is NOT centred on the car, NOR is it anything like as big as
+    // it feels. MEASURED, by projecting route stations through the actual
+    // capture camera (tools/route_probe.mjs reports `window`): at the hero
+    // preset's settle time the road is on screen from 21 m BEHIND the car to
+    // 45 m in front of it. Sixty-six metres. That is the entire picture.
+    //
+    // Every earlier version of this scoring reasoned about 140-260 m windows
+    // and kept choosing beautiful hairpins that were off the top of the frame
+    // while the car sat on a 300 m sweeper photographing as a ruled line.
+    // Nothing outside ±50 m of the car exists as far as the composition goes.
+    const frameN = Math.max(4, Math.round(66 / main.ds));
+    const frameBack = Math.round(21 / main.ds);
+    // How far the road should bow away from the straight line across the frame.
+    // Over 66 m of visible ribbon, 12 m of sagitta is a corner of about 45 m
+    // radius — it fills the frame with arc. The shipped frame measured 3.6 m.
+    const SAG_WANT = 12;
+    // The middle of the visible road ahead of the car.
+    const aimN = endN + Math.round(22 / main.ds);
+    // THE CORNER ITSELF. The car cannot sit at the apex of a 45 m radius at
+    // 41 m/s — but it does not have to. The visible road only reaches 21 m
+    // behind it, so the corner may START at the shutter: twenty metres of
+    // unmet lateral demand is under two metres of slide, and the picture is
+    // a car turning in with the corner wrapping away in front of it.
+    const CAR_LO = 40, CAR_HI = 300;
+    const AIM_LO = 32, AIM_HI = 80;
 
     const density = (x, z) => {
       let c = 0;
       for (let k = 0; k < n; k += 3) {
-        if (Math.hypot(S[k].x - x, S[k].z - z) < 130) c++;
+        if (Math.hypot(S[k].x - x, S[k].z - z) < 70) c++;
       }
       return c;
+    };
+
+    /**
+     * HOW BENT IS THE ROAD IN THE PICTURE — measured the way the eye measures
+     * it, as the distance the ribbon departs from the straight line joining the
+     * two ends of the visible window. This replaces integrated |curvature|,
+     * which is a bad proxy twice over: it cannot tell an S from an arc (both
+     * score high, only one is bent away from its chord), and it is dominated by
+     * sampling noise. A window scoring 2.09 rad of "turning" photographed as a
+     * ruler-straight road; its sagitta was four metres.
+     *
+     * Returns { sag, ess } — the largest departure in metres, and the largest
+     * departure on the OTHER side, which is what makes an S an S.
+     */
+    const bendOf = (w0) => {
+      const a = S[(((w0 % n) + n) % n)];
+      const b = S[(((w0 + frameN) % n) + n) % n];
+      let ex = b.x - a.x, ez = b.z - a.z;
+      const l = Math.hypot(ex, ez) || 1;
+      ex /= l; ez /= l;
+      let lo = 0, hi = 0;
+      for (let k = 1; k < frameN; k++) {
+        const p = S[(((w0 + k) % n) + n) % n];
+        // signed perpendicular offset from the chord
+        const d = (p.x - a.x) * ez - (p.z - a.z) * ex;
+        if (d > hi) hi = d;
+        if (d < lo) lo = d;
+      }
+      return { sag: Math.max(hi, -lo), ess: Math.min(hi, -lo) };
     };
 
     // --- how green is the ground, really? -----------------------------------
@@ -1879,9 +2101,30 @@ export function createRoadNetwork(ctx) {
       return clamp((_gc.g - Math.max(_gc.r, _gc.b) * 0.93) * 5, 0, 1);
     };
 
-    // Prefix sums so a 380 m window costs O(1) instead of O(runN) per candidate.
+    // Two smoothings of curvature, because two different things read it.
+    //
+    //  · smoothK (40 m) is what the EYE reads from 200 m up: one noisy station
+    //    is not a corner, and the apex test has to agree with the photograph.
+    //  · driveK (12 m) is what the CAR reads. A 28 m radius kink thirty metres
+    //    long is invisible to the 40 m filter and threw the car eighteen metres
+    //    into the meadow — every departure traced last cycle was one of these.
+    const blurK = (metres) => {
+      const out = new Float64Array(n);
+      const r = Math.max(1, Math.round(metres / 2 / main.ds));
+      for (let i = 0; i < n; i++) {
+        let s = 0;
+        for (let d = -r; d <= r; d++) s += S[(((i + d) % n) + n) % n].k;
+        out[i] = s / (2 * r + 1);
+      }
+      return out;
+    };
+    const smoothK = blurK(40);
+    const driveK = blurK(12);
+
+    // Prefix sums so a 360 m window costs O(1) instead of O(runN) per candidate.
     const P = (n + 1);
-    const cumH = new Float64Array(P), cumG = new Float64Array(P), cumK = new Float64Array(P);
+    const cumH = new Float64Array(P), cumG = new Float64Array(P);
+    const cumK = new Float64Array(P), cumS = new Float64Array(P);
     let anyGreen = false;
     for (let i = 0; i < n; i++) {
       const q = S[i];
@@ -1889,36 +2132,141 @@ export function createRoadNetwork(ctx) {
       if (g !== null) anyGreen = true;
       cumH[i + 1] = cumH[i] + q.yT;
       cumG[i + 1] = cumG[i] + (g ?? 0);
-      cumK[i + 1] = cumK[i] + Math.abs(q.k) * main.ds;
+      // SMOOTHED, not raw. Raw curvature at 3 m stations carries ±0.005 of
+      // sampling noise, and |k| summed over a 140 m window turns that into 0.7
+      // rad of pure noise — more than a third of the turning the window is
+      // supposed to be measuring. Every "shape" score computed from raw k was
+      // reading dither, which is how a ruler-straight road scored 1.87 rad.
+      cumK[i + 1] = cumK[i] + Math.abs(smoothK[i]) * main.ds;
+      cumS[i + 1] = cumS[i] + smoothK[i] * main.ds;   // SIGNED: catches the S
     }
-    const win = (cum, j, len) => (j + len <= n
-      ? cum[j + len] - cum[j]
-      : cum[n] - cum[j] + cum[(j + len) % n]);
+    const win = (cum, j, len) => {
+      const a = ((j % n) + n) % n;
+      return a + len <= n ? cum[a + len] - cum[a] : cum[n] - cum[a] + cum[(a + len) % n];
+    };
+    /**
+     * WILL THE CAR STILL BE ON THE ROAD WHEN THE SHUTTER OPENS?
+     *
+     * One state variable — y, how far the car is from the centreline — and one
+     * equation:
+     *
+     *     y'' = clamp( v²κ + correction , ±grip ) − v²κ
+     *
+     * Following the road at all costs v²κ of the tyres' budget. The autopilot's
+     * correction gets whatever is LEFT, and in a corner the car cannot hold
+     * there is nothing left: the term clamps, the two v²κ do not cancel, and the
+     * car runs wide at a constant rate for as long as the corner lasts. That
+     * saturation is the whole point. The first version of this used an
+     * unsaturated spring-damper, which pinned any excursion to unmet/K_P — it
+     * predicted 3.4 m for a run that tools/route_trace.mjs measured at 33 m,
+     * and cheerfully sent the car into a field every time.
+     *
+     * Returns the worst departure, in metres, over the run up to the shutter.
+     */
+    const A_GRIP = 6.4, K_P = 1.2, K_D = 2.2;
+    const departure = (j) => {
+      let y = 0, dy = 0, peak = 0;
+      for (let k = 0; k <= endN; k++) {
+        const i = (j + k) % n;
+        const d = k * main.ds;
+        const v = vAt(d);
+        const dt = main.ds / Math.max(v, 4);
+        // With the rear axle let go there is no cornering force to be had.
+        const grip = A_GRIP / flick(d);
+        const track = v * v * driveK[i];               // to stay on the line
+        const corr = -(K_P * y + K_D * dy);            // to get back to it
+        dy += (clamp(track + corr, -grip, grip) - track) * dt;
+        y += dy * dt;
+        const a = Math.abs(y);
+        if (a > peak) peak = a;
+      }
+      return peak;
+    };
 
-    let best = -1, bestScore = -Infinity;
+    /**
+     * Everything about the photograph taken `shutter` metres along the route.
+     * Split out of the candidate loop because there is more than one
+     * photograph: the alpine capture presets settle at 7 s, 9 s and 10 s and
+     * all three use this one spawn point.
+     */
+    const band = (r, lo, hi, fall) => (r < lo ? clamp(r / lo, 0, 1)
+      : r <= hi ? 1 : clamp(1 - (r - hi) / fall, 0, 1));
+    const frameScore = (j, shutter) => {
+      const eN = Math.max(4, Math.round(shutter / main.ds));
+      const aN = eN + Math.round(22 / main.ds);
+      const w0 = j + eN - frameBack;
+      const bend = bendOf(w0);
+      const car = S[(j + eN) % n];
+
+      // The composition: a road that curves and folds back through the frame,
+      // not a straight line vanishing off one edge. Over the 66 m of ribbon
+      // the camera can actually see, 12 m of sagitta is a corner that fills
+      // the picture; the frame we shipped last round measured 3.6 m.
+      const shape = clamp((bend.sag - 6) / (SAG_WANT - 6), 0, 1)
+        * clamp(1 - Math.max(0, bend.sag - SAG_WANT * 1.6) / 40, 0, 1);
+
+      // THE HERO CORNER, AND THE TURN-IN. What works is a corner that CLOSES UP
+      // in front of the car. The car cannot be at the apex of anything tight —
+      // at 41 m/s a 100 m radius asks for 17 m/s² and the tyres have 8 — but it
+      // can be at the TURN-IN: the road ahead tightening out of a fast approach,
+      // the car just starting to slide, everything still on the road. Measured:
+      // a radius closing from 224 m to 82 m across the shutter put the car 2.8 m
+      // off the centreline; one already at 69 m put it 6.7 m past the edge.
+      const rCar = 1 / Math.max(Math.abs(smoothK[(j + eN) % n]), 1e-6);
+      const rAim = 1 / Math.max(Math.abs(smoothK[(j + aN) % n]), 1e-6);
+      const turnIn = clamp((rCar / Math.max(rAim, 1) - 1.3) / 1.7, 0, 1);
+      const apex = band(rAim, AIM_LO, AIM_HI, 110) * 0.60
+        + band(rCar, CAR_LO, CAR_HI, 260) * 0.15
+        + turnIn * 0.25;
+
+      // A CHANGE OF DIRECTION INSIDE THE FRAME. If the ribbon leaves its chord
+      // on BOTH sides it draws an S across the image instead of one arc.
+      const ess = clamp(bend.ess / 6, 0, 1);
+
+      // THE ROAD FOLDING BACK THROUGH THE FRAME. The reference's top-left is two
+      // legs of the same road sixty metres apart with a wall of conifers between
+      // them; that is what fills a picture with route. `density` counts every
+      // third station within 70 m, so each count is 9 m of road: ~140 m is the
+      // car's own stretch and anything past that is a SECOND piece of road.
+      const fold = clamp((density(car.x, car.z) * 9 - 140) / 160, 0, 1);
+
+      // A timber bridge over blue water is the hero landmark of half the client
+      // references — but only if it is in the photograph, not in the run-up.
+      let deck = 0;
+      for (let k = -frameBack; k < frameN - frameBack; k++) {
+        if (S[(((j + eN + k) % n) + n) % n].wet) deck++;
+      }
+      const span = clamp((deck * main.ds) / 26, 0, 1)
+        * (1 - clamp((deck * main.ds) / 200, 0, 1));
+
+      return shape * 120 + apex * 170 + ess * 90 + fold * 80 + span * 130;
+    };
+
+    let best = -1, bestScore = -Infinity, pool = 0;
     for (let j = 0; j < n; j++) {
       const st = S[j];
       if (st.wet || st.yT < biome.waterLevel + 3) continue;
 
-      let hMax = -Infinity, ok = true, wet = 0;
+      let hMax = -Infinity, wet = 0;
       for (let k = 0; k < runN; k += 2) {
         const q = S[(j + k) % n];
-        // Three tiers: the long run-up must be gentle so the car arrives on the
-        // road at all; the last stretch before the shutter may be a real corner
-        // (a car running slightly wide out of one IS the reference pose); and
-        // beyond the car nothing is driven, so it may bend as hard as it likes.
-        const lim = k < endN - frameN * 0.35 ? R_DRIVE : (k < endN ? 66 : R_MIN);
-        if (Math.abs(q.k) > 1 / lim) { ok = false; break; }
         // A bridge in the run is not a disqualification — it is the hero
         // landmark of half the client references.
         if (q.wet) wet++;
         else if (q.yT > hMax) hMax = q.yT;
       }
-      if (!ok || hMax === -Infinity) continue;
+      if (hMax === -Infinity) continue;
 
-      // Weighted toward the road ahead of the car, which is the deep half of
-      // the frame and the half that is allowed to bend hard.
-      const turn = win(cumK, j + Math.max(0, endN - Math.round(frameN * 0.3)), frameN);
+      // The car has to be ON THE ROAD in the photograph. Half the carriageway
+      // is 7.5 m, so 5 m of departure is a car sitting on the outside line with
+      // its outer wheels in the dust — the rally pose — and 10 m is a car in a
+      // field with the road behind it. Scored rather than gated, so that a
+      // route on which nothing is perfectly clean still lands on its best
+      // stretch instead of falling through to sample zero.
+      const dep = departure(j);
+      const hold = clamp(1 - Math.max(0, dep - 2.5) / 5.0, 0, 1);
+      if (hold <= 0) continue;
+
       const hAvg = win(cumH, j, runN) / runN;
       const byHeight = clamp(1 - Math.max(0, hAvg - GREEN) / 30, 0, 1)
         * clamp(1 - Math.max(0, hMax - GREEN * 1.7) / 45, 0, 1);
@@ -1930,16 +2278,22 @@ export function createRoadNetwork(ctx) {
       const end = S[(j + endN) % n];
       const rim = Math.max(Math.abs(end.x), Math.abs(end.z)) / half;
       const open = 1 - clamp(terrainSlope(terrain, end.x, end.z, 22) * 2.4, 0, 1);
-      // The composition: a road that curves and folds back through the frame,
-      // not a straight line vanishing off one edge. ~0.5-1.4 rad over the run.
-      const shape = clamp(1 - Math.abs(turn - FRAME_TURN_WANT) / (FRAME_TURN_WANT * 0.9), 0, 1);
-      const near = density(end.x, end.z);
 
       // A little water crossing in the run is a bonus; a long causeway is not.
       const bridge = clamp(wet / 12, 0, 1) * (1 - clamp(wet / 60, 0, 1));
 
-      const score = green * 100 + shape * 150 + open * 10 + near * 0.40
-        + bridge * 45 - Math.max(0, rim - 0.62) * 40;
+      // THE PICTURE, at every settle time the capture presets use. The alpine
+      // presets open the shutter at 7 s, 9 s and 10 s, which is 190 m, 272 m
+      // and 310 m along the route — three quite different photographs from one
+      // spawn point. Scoring only the 9 s frame is what left lake_bridge (7 s)
+      // looking at a diagonal stripe while the hero frame got its hairpin.
+      const comp = SHUTTERS.reduce((acc, sh) => acc + sh.w * frameScore(j, sh.m), 0);
+
+      // `hold` multiplies rather than adds: a beautiful corner the car cannot
+      // stay on is not a photograph of a corner, it is a photograph of a field.
+      const score = hold * (green * 100 + comp + open * 10 + bridge * 45)
+        - Math.max(0, rim - 0.62) * 40;
+      pool++;
       if (score > bestScore) { bestScore = score; best = j; }
     }
     if (best < 0) {
@@ -1949,6 +2303,17 @@ export function createRoadNetwork(ctx) {
       if (best < 0) best = 0;
     }
     const sm = S[best];
+    _spawnIdx = best;
+    _spawnDiag = {
+      idx: best, score: +bestScore.toFixed(1), pool,
+      dep: +departure(best).toFixed(1),
+      rCar: Math.round(1 / Math.max(Math.abs(smoothK[(best + endN) % n]), 1e-6)),
+      rAim: Math.round(1 / Math.max(Math.abs(smoothK[(best + aimN) % n]), 1e-6)),
+      sag: +bendOf(best + endN - frameBack).sag.toFixed(1),
+      ess: +bendOf(best + endN - frameBack).ess.toFixed(1),
+      comp: SHUTTERS.map((sh) => Math.round(frameScore(best, sh.m))),
+      fold: +clamp((density(S[(best + endN) % n].x, S[(best + endN) % n].z) * 9 - 140) / 160, 0, 1).toFixed(2),
+    };
     // Project convention (see entities/vehicle.js): forward = (cos h, 0, -sin h).
     // So a tangent (tx, tz) maps to atan2(-tz, tx), NOT atan2(tz, tx) — the
     // wrong sign mirrors the car off the route the instant it spawns.
@@ -1957,6 +2322,11 @@ export function createRoadNetwork(ctx) {
 
   return {
     group,
+    /** Diagnostics only — nothing in the game reads these. */
+    _samples: S,
+    get _spawnIndex() { return _spawnIdx; },
+    get _spawnDiag() { return _spawnDiag; },
+    _ds: main.ds,
     isOnRoad,
     gripAt,
     isBlocked,
