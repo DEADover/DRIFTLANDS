@@ -184,10 +184,18 @@ export class Terrain {
       // projected onto the sun bearing: positive = this plane leans into the
       // light. A few percent of lightness here separates facets that Lambert
       // would otherwise render identically.
+      //
+      // The push is MULTIPLICATIVE in linear light, i.e. a constant number of
+      // stops, not a constant lightness offset. The additive form was value-
+      // blind: on a dark green (linear l ~ 0.12) a +0.06 push is +50%, on a pale
+      // rock (l ~ 0.45) it is +13%. Measured on the alpine meadow that turned
+      // every sun-facing bank acid — albedo HSV value 52% arriving on screen at
+      // 70% — while shaded ground stayed flat. As a gain it reads the same
+      // everywhere and the facets still separate.
       const asp = nx * sx + nz * sz;
       const dl = asp * fc + (hash01(tri, tri >> 11, seed + 777) - 0.5) * gr;
       c.getHSL(hsl);
-      let l = clamp(hsl.l + dl, 0.02, 0.99);
+      let l = clamp(hsl.l * (1 + dl), 0.02, 0.99);
       if (bands) l = Math.round(l * bands) / bands; // posterise: cut-paper tell
       c.setHSL(hsl.h, hsl.s, l);
 
@@ -228,11 +236,18 @@ export class Terrain {
 
     this.mesh = new THREE.Mesh(geo, mat);
     this.mesh.receiveShadow = true;
-    // Deliberately NOT a shadow caster. With a 17-25 deg sun a 180 m valley
-    // wall throws a 500 m shadow, which at this camera scale swallows the
-    // entire drivable frame in one black wedge. Relief is carried by Lambert
-    // plus vertex colour; the long shadows that matter are the props'.
-    this.mesh.castShadow = false;
+    // SELF-SHADOWING is opt-in per biome (`biome.terrainShadow`).
+    //
+    // It used to be off everywhere, and for good reason: with a 17-25 deg sun a
+    // 180 m valley wall throws a 500 m shadow, which at this camera scale
+    // swallows the whole drivable frame in one black wedge. But that argument
+    // only holds for landforms with walls near the drive. Alpine no longer has
+    // any — its drivable band rolls ±20 m over 190 m under a 29 deg sun, so a
+    // crest throws an 18 m shadow: exactly the soft ground-modelling shading the
+    // reference frame uses to describe its rises and hollows, and the single
+    // biggest source of the value spread ours was missing (18 points against the
+    // reference's 27). Biomes that still have walls simply leave the flag off.
+    this.mesh.castShadow = !!this.biome.terrainShadow;
     this.mesh.matrixAutoUpdate = false;
     this.mesh.name = 'terrain';
     return this.mesh;

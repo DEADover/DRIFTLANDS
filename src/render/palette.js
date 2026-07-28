@@ -75,11 +75,25 @@
 
 // Legacy `ground` is kept in sync with `terrain.ramp` — some systems (dust
 // colour, prop tinting) still read it.
-// Alpine stays GREEN across the whole drivable band. In target_01 the only
-// greys in frame are boulders and cliff faces — those come from outcrops() and
-// steepness() in biomes.js, never from the altitude ramp. Putting rock grey at
-// index 4 turned every 50 m hillside into scree and washed the meadow out.
-const ALPINE_RAMP = [0x2f5936, 0x437c37, 0x5d9c40, 0x77b348, 0x93c257, 0xe8f2fb];
+//
+// ALPINE, measured off ref/target_01_alpine_meadow.png.
+//   * The meadow there is NOT a cool forest green. It is a high-chroma
+//     YELLOW-green: hue 66-70, saturation 90-99%, HSV value 50-60%
+//     (#7f9001 in sun, #738403 in shade). Our v2 ramp sat at hue 96-100 with
+//     42-60% saturation — 30 degrees too blue at half the chroma — which is
+//     precisely why the ground read "pale and desaturated".
+//   * Look at the blue channel: reference grass runs B = 0-12 out of 255. Ours
+//     ran B = 55-87, and that blue is what a blue sky ambient turns to grey.
+//     Keep it on the floor.
+//   * Hue drifts 95 (shaded hollows) -> 63 (sunlit crests) up the ramp, the same
+//     drift the reference shows between #143117 and #7f9001. Index 3 IS the
+//     measured reference meadow colour.
+//   * Authored ~14% below the target value, because the pipeline (KEY, contrast
+//     1.12, bloom) hands back about +8 points of HSV value.
+//   * Nothing in it is grey and nothing is white. Alpine's landform no longer
+//     reaches snow altitude, so index 5 is a rim-hill green, slightly duller so
+//     it sits back in the distance. Grey belongs to boulders and cliff faces.
+const ALPINE_RAMP = [0x1d3a10, 0x33540f, 0x5f7607, 0x7c8305, 0x8c920e, 0x808a30];
 const AUTUMN_RAMP = [0x3b4c28, 0x5a682e, 0x83803a, 0xac974a, 0xccb466, 0xe6d59a];
 const DESERT_RAMP = [0xe8d5a4, 0xdcb476, 0xcf8546, 0xbc5730, 0xa33c27, 0xc9713c];
 const COAST_RAMP = [0x104a46, 0x0f6f4c, 0x1e924c, 0x54a548, 0x9c9a56, 0xcfc084];
@@ -102,30 +116,34 @@ export const PALETTES = {
     ground: ALPINE_RAMP,
     terrain: {
       ramp: ALPINE_RAMP,
-      lowland: 0x2f6440,     // damp hollows by the tarns
-      patchA: 0xc9be6a,      // sun-baked alp grass, gold-green
-      patchB: 0x21503a,      // dark heath / bilberry scrub — the deep note
-      scree: 0xc3bcae,       // pale limestone scree fans
-      cliff: 0x6f6f7d,       // cool grey rock — the dark note
-      soil: 0x7d5a38,
-      sand: 0xd8cfae,
-      summit: 0xf7fbff,
-      facetContrast: 0.58,
-      grain: 0.018,
+      lowland: 0x1e3d14,     // damp draws and tarn shores
+      patchA: 0x8e991c,      // sun-bleached alp grass — brighter and YELLOWER,
+                             // not the pale khaki that used to wash the meadow
+      patchB: 0x274a12,      // dark heath / bilberry scrub — the deep note
+      scree: 0xa9a596,       // pale limestone — cliff faces ONLY, never meadow
+      cliff: 0x6a6055,       // warm grey rock (ref boulders read #605753)
+      soil: 0x8a6236,
+      sand: 0xd7c48a,
+      summit: 0xf2f7ff,      // unreachable: alpine tops out ~170 m now
+      facetContrast: 0.60,   // both are linear GAINS now, not lightness offsets
+      grain: 0.34,
       bands: 0,
     },
-    foliage: [0x2f7d43, 0x3d9451, 0x256b3a, 0x4aa85c],
+    foliage: [0x276e33, 0x31833a, 0x1c5b2b, 0x3d9440],
     trunk: 0x6b4a30,
-    rock: 0x8f9099,
-    rockShadow: 0x5f6069,
-    water: 0x2fa4d6,
-    waterDeep: 0x14608f,
+    rock: 0x7d7268,
+    rockShadow: 0x4e463f,
+    water: 0x1179bd,
+    waterDeep: 0x0a4f8c,
     waterFoam: 0xeaf7ff,
-    road: 0x8a7f6e,
-    roadEdge: 0xd9d2c2,
+    road: 0xc79a4e,          // warm ochre — ref road is #c99844 / #eebe5c
+    roadEdge: 0xdcb877,
     accents: [0xef4d4d, 0xffd23f, 0xff8fbf, 0xffffff],
     sunAzimuth: 2.35,
-    sunElevation: 0.5,
+    // 34 deg. ART_DIRECTION calls for shadows ~1-1.5x object height; 0.50 rad
+    // gave 1.8x, and with alpine's terrain now self-shadowing that turned every
+    // meadow crest into a half-frame wedge.
+    sunElevation: 0.60,
     exposure: 0.97,
   },
 

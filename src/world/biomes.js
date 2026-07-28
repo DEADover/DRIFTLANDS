@@ -112,9 +112,14 @@ function steepness(c, K, slope, soilAt, screeAt, cliffAt, m = [0.42, 0.72, 0.9])
 
 // ---------------------------------------------------------------------------
 
-// The drivable valley floor sits at 14-90 m. Keep every one of those stops on a
-// green, so the meadow reads as meadow; snow only arrives above ~190 m.
-const ALPINE_STOPS = [-26, -8, 8, 48, 135, 250];
+// ALPINE. The route loop that roads.js lays down lives at radius 350-700 m from
+// the origin (its base polar radius is 0.3 * biome.size), so EVERY altitude a
+// driver can reach has to be a green. Measured on the old field, the hero shot
+// put the car at h = 85 m inside terrain that ran to 288 m — deep into the snow
+// cap — which is where the white blow-out in the frame came from. The landform
+// below now tops out at ~170 m and does so only outside r = 700 m, so these
+// stops cover the whole world and the last two are rim-hill greens, not snow.
+const ALPINE_STOPS = [-26, -6, 12, 38, 78, 150];
 const AUTUMN_STOPS = [-34, -14, 3, 20, 40, 68];
 const DESERT_STOPS = [8, 21, 31, 50, 78, 108];
 const COAST_STOPS = [-6, 3, 18, 44, 78, 110];
@@ -122,62 +127,139 @@ const WINTER_STOPS = [-16, -6, 4, 17, 80, 190];
 
 export const BIOMES = {
   // =========================================================================
-  // 1. ALPINE — a glacial corridor you drive along.
+  // 1. ALPINE — a rolling green meadow basin with a valley threaded through it.
+  //
+  // v2 built alpine as a narrow glacial corridor with a 190 m alp and 215 m
+  // spines beyond it. The trouble is that roads.js lays its loop at r = 350-700
+  // m, which put the drive halfway up the alp: measured, the hero shot had the
+  // car at 85 m in terrain running 30-288 m, so most of the frame was above the
+  // 110 m snow line. That is where the white blow-out came from — it was never
+  // a post-processing artefact, it was a snowfield.
+  //
+  // The reference frame has no mountains at all: it is edge-to-edge meadow with
+  // a lake, a road and trees. So the grammar is now a BASIN. Long swells and a
+  // shallow meander give the drivable band real relief (banks, saddles, crests,
+  // a bowl for the lake) inside 0-60 m, and the only high ground is a ring of
+  // green hills starting at r = 720 m — beyond the route, and 60 m short of any
+  // altitude that could go white.
   // =========================================================================
   alpine: {
     id: 'alpine',
     palette: 'alpine',
     label: 'Alpine Meadows',
-    waterLevel: -17.0,
+    waterLevel: -8.0,
     size: 1700,
-    segments: 360,
-    lodBias: 0.56,
-    meshJitter: 0.42,
+    segments: 196,
+    lodBias: 0.66,
+    meshJitter: 0.36,
     treeDensity: 1.0,
     rockDensity: 0.7,
+    // The drivable band rolls +/-20 m over 190 m: crests throw 18 m shadows,
+    // not 500 m ones. See terrain.js for why this is a per-biome opt-in.
+    terrainShadow: true,
 
     height(x, z, seed) {
       const s = seed + 5;
-      const { u, v } = corridor(x, z, s, { dir: 0.46, amp: 205, wave: 1500 });
+
+      // LAKE BOWLS come FIRST, because the bowl has to mute every other band
+      // inside itself. Subtracting a cone from a noisy meadow gives a funnel
+      // with a ragged rim; damping the meadow by the bowl mask and then dropping
+      // the floor gives a flat bed, a clean shoreline and a bank you can see the
+      // water cut into. The previous version dug 44 m out of a field that was
+      // already 28-72 m up, so the whole 1700 m map came out with 0% water and
+      // there was nothing for a bridge to cross.
+      //
+      // Held off the spawn: `corridor` guarantees the origin is on the valley
+      // axis, and the car must not start in a lake.
+      const bowlRaw = bumps(x, z, 520, s + 55, { chance: 0.42, radius: 0.34 })
+        * smoothstep(70, 230, Math.hypot(x, z));
+      const bowl = Math.pow(smoothstep(0.0, 0.58, bowlRaw), 0.85);
+      const dry = 1 - bowl;
+
+      // LANDFORM — long pasture swells, 480 m across and ±22 m. Warped so the
+      // level sets meander instead of reading as circular blobs. This is the
+      // band you feel as "the ground rises away toward those trees".
+      const [wx, wz] = warped(x, z, s, 150, 0.0012);
+      let h = 28 + fbm(wx * 0.0021, wz * 0.0021, { octaves: 2, seed: s + 61 }) * 22 * (0.15 + dry * 0.85);
+
+      // A shallow meandering valley cut through the swells: a 280 m floor, then
+      // shoulders that gain 22 m over the next 300 m (a 7% bank you can lean a
+      // car on, not a wall). Plus a cross-cutting saddle every ~1800 m along it
+      // so the valley is a sequence of rooms rather than one endless trench.
+      const { u, v } = corridor(x, z, s, { dir: 0.46, amp: 300, wave: 1750 });
       const av = Math.abs(v);
+      const bank = smoothstep(140, 440, av);
+      h += bank * 22 * dry;
+      h += Math.sin(u * 0.0035 + 1.1) * 7.0 * (1 - bank) * dry;
 
-      // LANDFORM — the valley section. The floor is wide (a preset drive is
-      // ~250 m, and the car must stay in the meadow), and the bank is gentle
-      // enough to climb: 52 m over 390 m is a 13% average grade.
-      const bank = smoothstep(130, 520, av);
-      const alp = smoothstep(470, 900, av);
-      let h = Math.pow(bank, 1.45) * 52;
-      h += fbm(u * 0.0031, v * 0.0031, { octaves: 3, seed: s + 61 }) * 27 * bank;
+      // DRIVABLE — crests to launch off and hollows to dive through, 190 m and
+      // 80 m across. This is the band the camera actually sees beside the car.
+      h += fbm(x * 0.0054, z * 0.0054, { octaves: 2, seed: s + 11 }) * 11.0 * (0.2 + dry * 0.8);
+      h += fbm(x * 0.0128, z * 0.0128, { octaves: 2, seed: s + 23 }) * 4.6 * (0.2 + dry * 0.8);
 
-      // BACKDROP — the alp and the ridge spines above it.
-      h += Math.pow(alp, 1.6) * 190;
-      h += spines(x, z, 0.0021, s + 7, 2.2) * 215 * alp;
+      // ...and now the water goes in. Floor at 28 - 58 = -30 against a -8 water
+      // plane: a 22 m lake with a shoreline the road has to find a neck through,
+      // which is what puts a bridge in the frame.
+      h -= bowl * 58;
 
-      // DRIVABLE — crests to jump, hollows to dive through, banked turns where
-      // the two meet. Damped on the spines so the backdrop stays clean.
-      const k = 1 - alp * 0.72;
-      h += fbm(x * 0.0051, z * 0.0051, { octaves: 2, seed: s + 11 }) * 15.5 * k;
-      h += fbm(x * 0.0126, z * 0.0126, { octaves: 2, seed: s + 23 }) * 6.4 * k;
+      // RIM — green hills closing the distance. They begin outside the route
+      // loop and top out near 170 m: high enough to read as alp, far too low to
+      // reach the ramp's pale end, and there is no snow term at all any more.
+      const rim = smoothstep(720, 1120, Math.hypot(x, z));
+      h += Math.pow(rim, 1.35) * 105;
+      h += spines(x, z, 0.0026, s + 7, 2.0) * 115 * rim;
 
-      // Tarn basins scooped out of the floor — the lakes sit in these.
-      const basin = bumps(x, z, 540, s + 55, { chance: 0.26, radius: 0.24 });
-      h -= Math.pow(smoothstep(0, 0.8, basin), 0.7) * 24 * (1 - bank);
-
-      // TOOTH
-      h += fbm(x * 0.029, z * 0.029, { octaves: 2, seed: s + 91 }) * 2.3 * k;
-      h += fbm(x * 0.068, z * 0.068, { octaves: 1, seed: s + 93 }) * 0.8;
+      // TOOTH — hummocks, not dither. The facets are ~6 m across, so a band at
+      // 44 m / 4.2 m tilts a CLUSTER of them a coherent 10-12 deg and the next
+      // cluster the other way: that is what turns flat shading into visible
+      // planes catching the light. At 2.2 m the planes differed by three degrees
+      // and the whole meadow resolved into one wash.
+      const k = (1 - rim * 0.5) * (0.25 + dry * 0.75);
+      h += fbm(x * 0.0142, z * 0.0142, { octaves: 2, seed: s + 91 }) * 2.6 * k;
+      h += fbm(x * 0.030, z * 0.030, { octaves: 1, seed: s + 93 }) * 0.8 * k;
       return h;
     },
 
     colorAt(c, K, h, slope, x, z, seed) {
       rampAt(c, K.ramp, h, ALPINE_STOPS);
-      patches(c, K, x, z, seed, 0.0046, 0.62, 0.55, 0.09, 0.17);
-      // Limestone slabs breaking through the turf. Sparse, hard-edged, and the
-      // only cool grey in a frame that is otherwise entirely green.
-      outcrops(c, K, K.scree, x, z, seed, 0.0108, 0.33, 0.82);
-      steepness(c, K, slope, 0.05, 0.13, 0.27);
-      // Snow settles on high ground, but never on the near-vertical faces.
-      if (h > 110) c.lerp(K.summit, smoothstep(110, 200, h) * (1 - smoothstep(0.2, 0.44, slope)));
+      patches(c, K, x, z, seed, 0.0088, 0.24, 0.36, 0.04, 0.32);
+
+      // MEADOW TEXTURE. Measured, the reference's most common colour occupies
+      // 0.03% of its pixels — the grass there is never twice the same value.
+      // Ours peaked at 0.6% in one bin: big flat fields of a single green. So:
+      // three soft bands (110 m sweeps, 40 m draws, 20 m tufts) pushing hue,
+      // chroma and value TOGETHER, so a lighter area is also a warmer, yellower
+      // area — grass drying in the sun — rather than the same colour with the
+      // gain turned up. The finest band is what stops a frame that happens to
+      // sit inside one sweep coming out as a single flat acid-green field, which
+      // is exactly what the wildlife shot used to do.
+      const t = fbm(x * 0.0092, z * 0.0092, { octaves: 2, seed: seed + 211 }) * 0.56
+        + fbm(x * 0.026, z * 0.026, { octaves: 2, seed: seed + 213 }) * 0.28
+        + fbm(x * 0.055, z * 0.055, { octaves: 1, seed: seed + 217 }) * 0.20;
+      c.offsetHSL(t * -0.026, t * 0.040, t * 0.044 - 0.012);
+      // The reference's shaded grass is not a darker copy of its lit grass — it
+      // is thirty degrees GREENER (hue 93-127 against 67). So the dark half of
+      // the texture pulls toward deep heath green instead of merely losing
+      // value. That hue swing between sun and shade is most of what makes the
+      // grass look painted rather than tinted.
+      if (t < 0) c.lerp(K.patchB, Math.min(-t, 1) * 0.45);
+
+      // Damp, darker grass in the hollows and along the tarn shores.
+      const wet = smoothstep(6, -16, h);
+      if (wet > 0) c.lerp(K.lowland, wet * 0.6);
+
+      // SHORELINE. The water plane sits at -8 m; a narrow band of pale gravel
+      // right at the line is what stops a lake reading as blue paint spilled on
+      // grass. Two metres above the water it is already gone, so it never turns
+      // into a beach — the reference's tarn edges are a hard, thin rim.
+      const shore = smoothstep(-13.5, -8.5, h) * smoothstep(-3.5, -6.5, h);
+      if (shore > 0) c.lerp(K.sand, shore * 0.7);
+      // Grey belongs to boulders and genuinely vertical rock, nothing else. The
+      // old limestone outcrop field painted pale scree straight across the flat
+      // meadow (measured: #b5b4a1 at slope 0.000, right under the car) and was
+      // the single biggest cause of the washed-out ground. Soil only from ~28°,
+      // scree from ~37°, bare rock from ~45° — angles the meadow never reaches.
+      steepness(c, K, slope, 0.12, 0.20, 0.30, [0.30, 0.55, 0.85]);
       return c;
     },
   },

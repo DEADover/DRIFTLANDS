@@ -18,13 +18,13 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const BENCH = '/private/tmp/claude-501/-Users-sgryzhin-Claude-Projects-CarGame/bench';
 
 export const OWNERSHIP = {
-  'terrain-art': ['src/world/terrain.js', 'src/world/biomes.js', 'src/render/palette.js'],
+  'terrain-art': ['src/world/terrain.js', 'src/world/biomes.js', 'src/render/palette.js', 'src/world/landforms.js'],
   'roads': ['src/world/roads.js'],
   'water-bridges': ['src/world/water.js', 'src/world/bridges.js'],
-  'props-landmarks': ['src/world/props.js', 'src/world/landmarks.js'],
+  'props-landmarks': ['src/world/props.js', 'src/world/landmarks.js', 'src/world/buildkit.js'],
   'animals': ['src/entities/animals.js'],
   'vehicle-feel': ['src/entities/vehicle.js', 'src/entities/car.js', 'src/fx/feel.js'],
-  'render-post': ['src/render/renderer.js', 'src/render/post.js', 'src/render/sky.js', 'src/render/camera.js'],
+  'render-post': ['src/render/renderer.js', 'src/render/post.js', 'src/render/sky.js', 'src/render/camera.js', 'src/render/grade.js'],
   'fx': ['src/fx/particles.js', 'src/fx/skidmarks.js'],
   'hud-audio': ['src/ui/hud.js', 'src/audio/audio.js'],
 };
