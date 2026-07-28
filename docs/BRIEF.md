@@ -120,6 +120,28 @@ These are real and unfixed. Whichever is yours, fix it.
 8. Water meets land as a hard straight cut with no shoreline.
 9. Trees are too few, too small, and too samey.
 
+## SAVE YOUR WORK CONSTANTLY — this is not optional
+
+Round 1 lost nine agents to a session limit mid-edit. Anything not written to
+disk was gone. Two rules now:
+
+1. **Write to disk early and often.** Never hold a large rewrite in your head
+   across many tool calls. Land a working increment, shoot it, then improve it.
+   A file that exists and renders beats a better file that never got written.
+2. **Commit after every single iteration.** Your bench is a git repo. One line,
+   costs nothing:
+
+   ```
+   git add -A && git commit -qm "what changed"
+   ```
+
+   Do it after each change→shoot→look cycle. If you are cut off, the lead
+   recovers your last commit instead of losing the round.
+
+A background autosave also snapshots your bench every 60 s, but that is a
+backstop — your own commits carry the message describing what you tried, which
+is what makes the history worth anything.
+
 ## Reporting
 
 End your turn with a short structured report: what you changed, what the

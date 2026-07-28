@@ -41,6 +41,19 @@ if (cmd === 'create') {
   // Bake the port into the vite config so `npx vite` just works.
   const vc = await readFile(path.join(dir, 'vite.config.js'), 'utf8');
   await writeFile(path.join(dir, 'vite.config.js'), vc.replace(/5173/g, String(port)));
+
+  // Every bench is its own git repo from the first second, so autosave.mjs can
+  // snapshot it and no agent's work can be lost to a mid-edit session limit.
+  await writeFile(path.join(dir, '.gitignore'), 'node_modules\nshots\n');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+  await run('git', ['-C', dir, 'init', '-q']);
+  await run('git', ['-C', dir, 'config', 'user.email', 'builder@local']);
+  await run('git', ['-C', dir, 'config', 'user.name', 'builder']);
+  await run('git', ['-C', dir, 'add', '-A']);
+  await run('git', ['-C', dir, 'commit', '-qm', 'bench baseline']).catch(() => {});
+
   console.log(dir);
 } else if (cmd === 'collect') {
   const dir = path.join(BENCH_ROOT, name);
