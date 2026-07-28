@@ -1,9 +1,21 @@
 # DRIFTLANDS — shared brief
 
+> ## ⚠ DIRECTION CHANGE — READ `docs/ART_DIRECTION.md` FIRST
+>
+> The client supplied eight new reference frames and the target moved upward.
+> We keep art of rally's camera discipline and flat shading, but the world must
+> now be **much denser, warmer and more saturated** — a hand-painted low-poly
+> diorama, not a sparse grey hillside. The camera comes **closer and lower**,
+> the **road becomes the hero shape**, and fences, chevron markers, bridges,
+> flower patches, dust plumes and animals become mandatory recurring furniture.
+> Three new biomes are added: volcanic, tropical, blossom.
+>
+> Where this file and `ART_DIRECTION.md` disagree, **ART_DIRECTION.md wins.**
+
 Every builder and critic reads this first. It is the single source of truth for
 what we are making and how we judge it.
 
-## The bar
+## The bar (baseline discipline — see ART_DIRECTION.md for the current target)
 
 **art of rally** (Funselektor). A 2.5D top-down driving game with a steeply
 tilted, near-orthographic camera; flat-shaded untextured geometry; hard,
