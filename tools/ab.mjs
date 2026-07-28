@@ -26,7 +26,19 @@ import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const REF = path.join(ROOT, 'ref/reference_artofrally.png');
+
+/** Which client target each of our biomes is judged against. */
+export const TARGET_FOR_BIOME = {
+  alpine: 'target_01_alpine_meadow.png',
+  alpineLake: 'target_03_alpine_lake_peaks.png',
+  desert: 'target_02_desert_canyon.png',
+  autumn: 'target_04_autumn_village.png',
+  winter: 'target_05_winter_pass.png',
+  tropical: 'target_06_tropical_island.png',
+  volcanic: 'target_07_volcanic_geothermal.png',
+  blossom: 'target_08_blossom_wetland.png',
+  coast: 'target_06_tropical_island.png',
+};
 
 const args = {};
 const av = process.argv.slice(2);
@@ -36,6 +48,15 @@ const oursPath = path.isAbsolute(args.ours ?? '') ? args.ours : path.join(ROOT, 
 const outDir = path.isAbsolute(args.out ?? '') ? args.out : path.join(ROOT, args.out ?? 'ab/latest');
 const seed = Number(args.seed ?? 1);
 await mkdir(outDir, { recursive: true });
+
+// --target picks the client reference explicitly; --biome resolves it by name;
+// otherwise guess from the filename we were handed.
+const targetFile =
+  args.target ??
+  (args.biome ? TARGET_FOR_BIOME[args.biome] : null) ??
+  TARGET_FOR_BIOME[Object.keys(TARGET_FOR_BIOME).find((b) => oursPath.toLowerCase().includes(b.toLowerCase())) ?? ''] ??
+  'target_01_alpine_meadow.png';
+const REF = path.isAbsolute(targetFile) ? targetFile : path.join(ROOT, 'ref', targetFile);
 
 const toDataUrl = async (p) => 'data:image/png;base64,' + (await readFile(p)).toString('base64');
 const refUrl = await toDataUrl(REF);
@@ -47,7 +68,7 @@ const oursIsA = (Math.imul(seed, 2654435761) >>> 0) % 2 === 0;
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
 
-const out = await page.evaluate(async ({ refUrl, ourUrl, oursIsA }) => {
+const out = await page.evaluate(async ({ refUrl, ourUrl, oursIsA, refName }) => {
   const load = (src) => new Promise((res, rej) => {
     const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
   });
@@ -87,7 +108,7 @@ const out = await page.evaluate(async ({ refUrl, ourUrl, oursIsA }) => {
   const panelB = oursIsA ? refMono : ourMono;
 
   const monoPair = stack(panelA, panelB, ['PANEL A', 'PANEL B']);
-  const colourPair = stack(draw(ref, false), draw(our, false), ['REFERENCE — art of rally', 'OURS']);
+  const colourPair = stack(draw(ref, false), draw(our, false), ['TARGET — ' + refName, 'OURS']);
 
   return {
     A: panelA.toDataURL('image/png'),
@@ -95,7 +116,7 @@ const out = await page.evaluate(async ({ refUrl, ourUrl, oursIsA }) => {
     mono: monoPair.toDataURL('image/png'),
     colour: colourPair.toDataURL('image/png'),
   };
-}, { refUrl, ourUrl, oursIsA });
+}, { refUrl, ourUrl, oursIsA, refName: path.basename(REF) });
 
 await browser.close();
 
@@ -108,7 +129,7 @@ await save('pair_mono.png', out.mono);
 await save('pair_colour.png', out.colour);
 await writeFile(
   path.join(outDir, 'KEY.json'),
-  JSON.stringify({ panelA: oursIsA ? 'OURS' : 'REFERENCE', panelB: oursIsA ? 'REFERENCE' : 'OURS', ours: path.relative(ROOT, oursPath), seed }, null, 2)
+  JSON.stringify({ panelA: oursIsA ? 'OURS' : 'TARGET', panelB: oursIsA ? 'TARGET' : 'OURS', target: path.basename(REF), ours: path.relative(ROOT, oursPath), seed }, null, 2)
 );
 
 console.log(`blind pair → ${path.relative(ROOT, outDir)}/pair_mono.png  (key withheld in KEY.json)`);
