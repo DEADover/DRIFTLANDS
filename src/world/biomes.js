@@ -112,7 +112,9 @@ function steepness(c, K, slope, soilAt, screeAt, cliffAt, m = [0.42, 0.72, 0.9])
 
 // ---------------------------------------------------------------------------
 
-const ALPINE_STOPS = [-26, -8, 10, 34, 96, 210];
+// The drivable valley floor sits at 14-90 m. Keep every one of those stops on a
+// green, so the meadow reads as meadow; snow only arrives above ~190 m.
+const ALPINE_STOPS = [-26, -8, 8, 48, 135, 250];
 const AUTUMN_STOPS = [-34, -14, 3, 20, 40, 68];
 const DESERT_STOPS = [8, 21, 31, 50, 78, 108];
 const COAST_STOPS = [-6, 3, 18, 44, 78, 110];

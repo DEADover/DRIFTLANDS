@@ -27,6 +27,7 @@ export const PRESETS = {
       drive(5.2, { throttle: 0.6, steer: 1, handbrake: 1 }),
       drive(9.0, { throttle: 1, steer: -0.35 }),
     ],
+    autopilot: { aggression: 1 },
     notes: 'The postcard shot. Judge composition, colour, depth, sparsity.',
   },
 
@@ -42,6 +43,7 @@ export const PRESETS = {
       drive(12.0, { throttle: 1, steer: 0.55 }),
     ],
     camera: { zoom: 0.72 },
+    autopilot: { aggression: 1 },
     notes: 'Judge drift FX: dust volume, skid marks, car attitude, camera lead.',
   },
 
@@ -53,6 +55,7 @@ export const PRESETS = {
     warmup: 7.0,
     tape: [drive(7.0, { throttle: 1 })],
     camera: { zoom: 1.15 },
+    autopilot: { aggression: 1 },
     notes: 'Judge water, shoreline, bridge silhouette and scale.',
   },
 
@@ -63,6 +66,7 @@ export const PRESETS = {
     seed: 777,
     warmup: 8.0,
     tape: [drive(3.0, { throttle: 1 }), drive(8.0, { throttle: 1, steer: -0.4 })],
+    autopilot: { aggression: 1 },
     notes: 'Judge colour richness, canopy variety, long shadows.',
   },
 
@@ -73,6 +77,7 @@ export const PRESETS = {
     seed: 9090,
     warmup: 8.0,
     tape: [drive(8.0, { throttle: 1, steer: 0.15 })],
+    autopilot: { aggression: 1 },
     notes: 'Judge silhouette of mesas, shadow hardness, sparsity discipline.',
   },
 
@@ -83,6 +88,7 @@ export const PRESETS = {
     seed: 5150,
     warmup: 8.0,
     tape: [drive(8.0, { throttle: 1, steer: -0.2 })],
+    autopilot: { aggression: 1 },
     notes: 'Judge mood, headlight read, sea colour, silhouette separation.',
   },
 
@@ -94,6 +100,7 @@ export const PRESETS = {
     warmup: 8.0,
     tape: [drive(3.0, { throttle: 1 }), drive(8.0, { throttle: 1, steer: 0.3 })],
     camera: { zoom: 1.25 },
+    autopilot: { aggression: 1 },
     notes: 'THE A/B SHOT. Framed to match the reference image directly.',
   },
 
@@ -105,6 +112,7 @@ export const PRESETS = {
     warmup: 10.0,
     tape: [drive(10.0, { throttle: 0.8 })],
     camera: { zoom: 0.6 },
+    autopilot: { aggression: 1 },
     notes: 'Judge animal silhouettes, motion, believability of the herd.',
   },
 };

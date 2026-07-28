@@ -75,7 +75,11 @@
 
 // Legacy `ground` is kept in sync with `terrain.ramp` — some systems (dust
 // colour, prop tinting) still read it.
-const ALPINE_RAMP = [0x2f5936, 0x487f39, 0x69a244, 0x9bbb56, 0x9a99a0, 0xf2f7ff];
+// Alpine stays GREEN across the whole drivable band. In target_01 the only
+// greys in frame are boulders and cliff faces — those come from outcrops() and
+// steepness() in biomes.js, never from the altitude ramp. Putting rock grey at
+// index 4 turned every 50 m hillside into scree and washed the meadow out.
+const ALPINE_RAMP = [0x2f5936, 0x437c37, 0x5d9c40, 0x77b348, 0x93c257, 0xe8f2fb];
 const AUTUMN_RAMP = [0x3b4c28, 0x5a682e, 0x83803a, 0xac974a, 0xccb466, 0xe6d59a];
 const DESERT_RAMP = [0xe8d5a4, 0xdcb476, 0xcf8546, 0xbc5730, 0xa33c27, 0xc9713c];
 const COAST_RAMP = [0x104a46, 0x0f6f4c, 0x1e924c, 0x54a548, 0x9c9a56, 0xcfc084];

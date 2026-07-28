@@ -1413,7 +1413,47 @@ export function createRoadNetwork(ctx) {
     const n = S.length;
     const i = ((Math.floor(t * n) % n) + n) % n;
     const sm = S[i];
-    return { x: sm.x, z: sm.z, heading: Math.atan2(sm.tz, sm.tx) };
+    return { x: sm.x, z: sm.z, heading: Math.atan2(-sm.tz, sm.tx) };
+  };
+
+  /**
+   * Point `metres` further along the main route from whatever point is closest
+   * to (x, z). Used by the capture autopilot so screenshots keep the car on the
+   * road, and available to anything else that wants to follow the racing line.
+   *
+   * Search is windowed around the last hit, so repeated calls while driving are
+   * O(window) rather than O(route).
+   */
+  let _lastIdx = 0;
+  const lookAhead = (x, z, metres = 30) => {
+    const n = S.length;
+    if (!n) return null;
+    const scan = (from, to) => {
+      let bi = -1, bd = Infinity;
+      for (let k = from; k < to; k++) {
+        const i = ((k % n) + n) % n;
+        const dx = x - S[i].x, dz = z - S[i].z;
+        const d = dx * dx + dz * dz;
+        if (d < bd) { bd = d; bi = i; }
+      }
+      return { bi, bd };
+    };
+    // Try a local window first; fall back to a full scan if we have strayed.
+    const W = 90;
+    let { bi, bd } = scan(_lastIdx - W, _lastIdx + W);
+    if (bd > 140 * 140) ({ bi, bd } = scan(0, n));
+    _lastIdx = bi;
+
+    const step = Math.max(1, Math.round(metres / Math.max(0.5, main.ds)));
+    const a = S[bi];
+    const t = S[(bi + step) % n];
+    return {
+      x: t.x, z: t.z,
+      heading: Math.atan2(-t.tz, t.tx),
+      dist: Math.sqrt(bd),
+      onRoad: Math.sqrt(bd) <= a.hw + a.verge,
+      surf: a.surf,
+    };
   };
 
   /**
@@ -1453,7 +1493,10 @@ export function createRoadNetwork(ctx) {
       if (best < 0) best = 0;
     }
     const sm = S[best];
-    return { x: sm.x, z: sm.z, heading: Math.atan2(sm.tz, sm.tx) };
+    // Project convention (see entities/vehicle.js): forward = (cos h, 0, -sin h).
+    // So a tangent (tx, tz) maps to atan2(-tz, tx), NOT atan2(tz, tx) — the
+    // wrong sign mirrors the car off the route the instant it spawns.
+    return { x: sm.x, z: sm.z, heading: Math.atan2(-sm.tz, sm.tx) };
   };
 
   return {
@@ -1462,6 +1505,7 @@ export function createRoadNetwork(ctx) {
     gripAt,
     isBlocked,
     sample,
+    lookAhead,
     spawn,
     heightAt,
     surfaceAt,

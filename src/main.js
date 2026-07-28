@@ -29,7 +29,17 @@ if (shotId) {
   const warmup = params.has('t') ? Number(params.get('t')) : preset.warmup;
   const frames = Math.round(warmup / dt);
   for (let i = 0; i < frames; i++) {
-    const input = tape.sample();
+    // A preset either scripts its inputs, or hands steering to the route
+    // autopilot and only scripts throttle/handbrake on top of it.
+    const scripted = tape.sample();
+    const input = preset.autopilot
+      ? game.autopilotInput({
+          throttle: scripted.throttle,
+          brake: scripted.brake,
+          handbrake: scripted.handbrake,
+          aggression: preset.autopilot.aggression,
+        })
+      : scripted;
     tape.advance(dt);
     game.update(dt, input);
   }

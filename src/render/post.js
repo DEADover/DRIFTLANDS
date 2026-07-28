@@ -551,9 +551,22 @@ export function createPostFX(ctx) {
       renderer.info.reset();
 
       // ------------------------------------------------------------ 1. scene
+      //
+      // The composite pass below does its OWN tone map (`shoulder`) and its own
+      // sRGB encode. So the scene must land in this buffer as LINEAR, UNTONED
+      // radiance — otherwise the frame is tone-mapped twice and sRGB-encoded
+      // twice, which is exactly the milky blown-out look this used to produce.
+      const prevTone = renderer.toneMapping;
+      const prevExposure = renderer.toneMappingExposure;
+      renderer.toneMapping = THREE.NoToneMapping;
+      renderer.toneMappingExposure = 1;
+
       renderer.setRenderTarget(rtScene);
       renderer.clear(true, true, true);
       renderer.render(scene, cam);
+
+      renderer.toneMapping = prevTone;
+      renderer.toneMappingExposure = prevExposure;
 
       const tanHalf = Math.tan(THREE.MathUtils.degToRad(cam.fov * 0.5));
       projU.value.set(tanHalf * cam.aspect, tanHalf);

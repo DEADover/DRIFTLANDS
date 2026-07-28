@@ -322,6 +322,43 @@ export class Game {
     this.post.render();
   }
 
+  /**
+   * ROUTE AUTOPILOT — used by capture presets.
+   *
+   * A fixed input tape drives the car straight off the road within a couple of
+   * seconds, so every screenshot ended up in an empty field with the route
+   * nowhere in frame. This steers along the road spline instead, which is what
+   * the client references show: the car ON the road, mid-corner.
+   *
+   * @param {{throttle?:number, handbrake?:number, brake?:number, aggression?:number}} opts
+   */
+  autopilotInput(opts = {}) {
+    const v = this.vehicle;
+    const speed = Math.max(v.speed, 6);
+    // Look further ahead the faster we go, so the line stays smooth.
+    const lead = THREE.MathUtils.clamp(speed * 1.15, 14, 46);
+
+    const ahead = this.roads.lookAhead?.(v.position.x, v.position.z, lead);
+    if (!ahead) return { throttle: opts.throttle ?? 1, brake: 0, steer: 0, handbrake: 0, reset: false };
+
+    const dx = ahead.x - v.position.x, dz = ahead.z - v.position.z;
+    const want = Math.atan2(-dz, dx);
+    let err = want - v.heading;
+    while (err > Math.PI) err -= Math.PI * 2;
+    while (err < -Math.PI) err += Math.PI * 2;
+
+    const aggression = opts.aggression ?? 1;
+    const steer = THREE.MathUtils.clamp(err * 1.9 * aggression - v.yawRate * 0.22, -1, 1);
+
+    return {
+      throttle: opts.throttle ?? 1,
+      brake: opts.brake ?? 0,
+      steer,
+      handbrake: opts.handbrake ?? 0,
+      reset: false,
+    };
+  }
+
   /** Telemetry embedded in every screenshot manifest — critics read this. */
   stats() {
     const info = this.renderer.info;

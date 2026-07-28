@@ -28,9 +28,12 @@ const BASE = {
   ao: 0.55,
   aoIntensity: 1.0,
   aoTint: [0.56, 0.61, 0.70],
-  bloom: 0.30,
-  bloomWide: 0.22,
-  bloomThreshold: 0.80,
+  bloom: 0.16,
+  bloomWide: 0.11,
+  // Linear-HDR threshold. The scene buffer is untonemapped (post does its own
+  // tone map), so lit ground sits around 1.5-2.5 here, not 0-1. A 0.8 cut made
+  // the entire meadow bloom into a white star.
+  bloomThreshold: 2.6,
   dof: 0.55,
   vignette: 0.20,
   ca: 0.0016,
