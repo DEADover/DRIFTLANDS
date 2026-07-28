@@ -120,5 +120,9 @@ await writeFile(
     results,
   }, null, 2)
 );
+// Refresh the development history so the progress page can show every run,
+// not just the newest one.
+// Importing it rebuilds and writes shots/history.json as a side effect.
+await import('./gallery.mjs').catch(() => {});
 console.log(`\n→ ${results.length} shots in ${path.relative(ROOT, outDir)}`);
 process.exit(hadError ? 1 : 0);
