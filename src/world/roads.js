@@ -74,7 +74,7 @@ const GRIP = {
  * alpine reference has no tarmac anywhere in frame — it is a dirt rally road
  * from edge to edge, so alpine alternates gravel and dirt, never tarmac. */
 const STYLE = {
-  alpine: { width: 15.0, verge: 1.5, kinds: ['gravel', 'dirt'], spurs: 2 },
+  alpine: { width: 11.0, verge: 1.5, kinds: ['gravel', 'dirt'], spurs: 2 },
   autumn: { width: 7.4, verge: 1.20, kinds: ['gravel', 'dirt'], spurs: 2 },
   desert: { width: 8.6, verge: 1.60, kinds: ['dirt', 'sand'], spurs: 2 },
   coast: { width: 7.8, verge: 1.05, kinds: ['tarmac', 'gravel'], spurs: 1 },

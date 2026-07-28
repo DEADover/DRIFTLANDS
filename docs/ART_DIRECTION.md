@@ -55,7 +55,11 @@ Existing `coast` is retired in favour of `tropical`.
 
 This is the single biggest compositional difference from our current build.
 
-- Width **12–20 m** — three to five car lengths. Much wider than you think.
+- Width **10–12 m** — a little over two car lengths. (Corrected: the first
+  version of this spec said 12-20 m / three-to-five car lengths. That was
+  estimated by eye and was wrong. Measured properly against target_01: the car
+  reads ~5% of frame width at 4.5 m long, so 1% of frame is ~0.9 m; the road
+  spans ~11% of frame width, giving ~10 m.)
 - A pale warm ochre ribbon sweeping through the frame in long S-curves and
   hairpins, occupying a large fraction of the image.
 - **2–4 darker parallel wheel ruts** curve along it. Highly visible and
