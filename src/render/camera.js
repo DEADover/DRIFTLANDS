@@ -11,31 +11,49 @@ import * as THREE from 'three';
  * Tunables that matter most, in order:
  *   pitch    ~58-66 deg from horizontal (0 = side-on, 90 = straight down)
  *   fov      20-32 deg. Lower = flatter/more orthographic/more "poster".
- *   distance set so the car occupies ~3-5% of frame width.
+ *   distance set so the car occupies ~3.5-4.5% of frame width.
+ *
+ * CALIBRATION (measured, not guessed): at fov 26 / 16:9, distance 136 puts the
+ * car at ~3.8% of frame width in `hero_alpine` — measured off the actual PNG.
+ * Do not change `distance` without re-measuring.
+ *
+ * MOTION DOCTRINE: unhurried. The focus point rides a critically-damped spring,
+ * not a lerp, so it never snaps and never overshoots; the velocity lead and the
+ * drift push are smoothed on their own, slower constants so a flick of the
+ * wheel does not shove the frame. The frame is world-fixed: it must NOT rotate
+ * with the car.
  */
 export class ChaseCamera {
   constructor(aspect) {
     this.baseFov = 26;
-    this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 1, 3000);
+    // Near/far kept tight: post.js reconstructs view-space position from the
+    // depth buffer, and precision there is worth more than headroom.
+    this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 24, 1900);
 
     // --- tuning ---
     this.pitch = THREE.MathUtils.degToRad(61);
-    // Calibrated against the reference: the car should read at ~3.5-4.5% of
-    // frame width. At fov 26 that lands around here.
-    this.distance = 178;
+    this.distance = 136;
     this.height = 0;              // extra vertical offset beyond pitch
     this.yaw = Math.PI * 0.25;    // world-fixed heading (art of rally does NOT spin with the car)
     this.followYaw = 0.0;         // 0 = fully world-fixed, 1 = fully car-relative
-    this.lookAhead = 0.55;        // seconds of velocity to lead the car by
-    this.smoothing = 6.0;         // position lerp rate
-    this.driftPush = 0.35;        // slide the frame toward the drift direction
+    this.lookAhead = 0.62;        // seconds of velocity to lead the car by
+    this.leadSmooth = 2.2;        // how lazily the lead itself responds
+    this.stiffness = 3.4;         // spring omega for the focus point (low = poster-like)
+    this.driftPush = 0.40;        // slide the frame toward the drift direction
+    this.driftSmooth = 2.6;
+    this.speedWiden = 0.14;       // extra distance at speed
 
     this._pos = new THREE.Vector3();
     this._focus = new THREE.Vector3();
+    this._focusVel = new THREE.Vector3();
     this._desiredFocus = new THREE.Vector3();
+    this._lead = new THREE.Vector3();
+    this._tmp = new THREE.Vector3();
     this._shake = new THREE.Vector3();
+    this._push = 0;
     this.shakeAmount = 0;
     this._initialised = false;
+    this.camera.userData.focusDistance = this.distance;
   }
 
   setAspect(aspect) {
@@ -52,29 +70,42 @@ export class ChaseCamera {
    */
   update(dt, car, opts = {}) {
     const speed = car.velocity.length();
+    const step = Math.min(dt, 1 / 30);
 
-    // Focus point: the car, led by where it is going.
-    this._desiredFocus.copy(car.position);
-    this._desiredFocus.x += car.velocity.x * this.lookAhead;
-    this._desiredFocus.z += car.velocity.z * this.lookAhead;
+    // Lead the car by where it is going — but let the lead itself ease in, so
+    // stabs of throttle or a spin do not jolt the frame.
+    this._tmp.set(car.velocity.x * this.lookAhead, 0, car.velocity.z * this.lookAhead);
+    this._lead.lerp(this._tmp, 1 - Math.exp(-this.leadSmooth * step));
 
     // Push the frame sideways when sliding so the drift has room to breathe.
+    const slip = THREE.MathUtils.clamp(car.lateralSlip ?? 0, -1, 1);
+    this._push += (slip - this._push) * (1 - Math.exp(-this.driftSmooth * step));
+
+    this._desiredFocus.copy(car.position).add(this._lead);
     if (this.driftPush) {
       const side = Math.sin(car.heading), fwd = Math.cos(car.heading);
-      const push = THREE.MathUtils.clamp(car.lateralSlip ?? 0, -1, 1) * this.driftPush * 14;
+      const push = this._push * this.driftPush * 15;
       this._desiredFocus.x += fwd * push;
       this._desiredFocus.z -= side * push;
     }
 
     if (!this._initialised) {
       this._focus.copy(this._desiredFocus);
+      this._focusVel.set(0, 0, 0);
       this._initialised = true;
     }
-    const k = 1 - Math.exp(-this.smoothing * dt);
-    this._focus.lerp(this._desiredFocus, k);
+
+    // Critically damped spring — semi-implicit Euler, unconditionally stable
+    // at our step sizes and free of the "rubber band" feel of a raw lerp.
+    const w = this.stiffness;
+    const k = w * w, c = 2 * w;
+    this._tmp.copy(this._desiredFocus).sub(this._focus).multiplyScalar(k)
+      .addScaledVector(this._focusVel, -c);
+    this._focusVel.addScaledVector(this._tmp, step);
+    this._focus.addScaledVector(this._focusVel, step);
 
     // Speed widens the frame slightly — reads as acceleration.
-    const distance = this.distance * (1 + Math.min(speed / 60, 1) * 0.14) * (opts.zoom ?? 1);
+    const distance = this.distance * (1 + Math.min(speed / 60, 1) * this.speedWiden) * (opts.zoom ?? 1);
 
     // FOV punch, driven by the feel layer.
     const fov = this.baseFov + (opts.fovBoost ?? 0);
@@ -109,6 +140,10 @@ export class ChaseCamera {
     this.camera.position.copy(this._pos);
     this.camera.lookAt(this._focus);
     this.camera.updateMatrixWorld();
+
+    // Published for post.js: everything past this is "the distance", and that
+    // is the only thing depth of field is allowed to touch.
+    this.camera.userData.focusDistance = distance;
   }
 
   /** Instantly place the camera (capture mode — no smoothing artefacts). */
