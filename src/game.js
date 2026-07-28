@@ -70,13 +70,47 @@ export class Game {
 
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
+    this._watchSize();
   }
 
+  /**
+   * Resize is defensive on purpose.
+   *
+   * If the page is constructed while its container has zero size — a background
+   * tab, a collapsed pane, a hidden iframe — three.js bakes `width:0px;
+   * height:0px` into the canvas's inline style. Because we then resize with
+   * updateStyle=false (correct: the stylesheet should own layout), that inline
+   * 0px is never cleared and the canvas stays invisible forever, showing a
+   * black page even though the renderer is happily drawing every frame.
+   *
+   * So: never trust a zero container, and keep the canvas CSS under our control.
+   */
   resize() {
-    const w = this.container.clientWidth, h = this.container.clientHeight;
+    let w = this.container.clientWidth;
+    let h = this.container.clientHeight;
+    if (w < 2 || h < 2) { w = window.innerWidth || 1280; h = window.innerHeight || 720; }
+
+    const el = this.renderer.domElement;
+    if (el.style.width !== '100%' || el.style.height !== '100%') {
+      el.style.width = '100%';
+      el.style.height = '100%';
+    }
+
     this.renderer.setSize(w, h, false);
     this.camera.setAspect(w / h);
     this.post.setSize(w, h);
+    this._sized = { w, h };
+  }
+
+  /** Re-fit whenever the container actually gains or changes size. */
+  _watchSize() {
+    this.resize();
+    if (typeof ResizeObserver === 'undefined') return;
+    this._ro = new ResizeObserver(() => {
+      const w = this.container.clientWidth, h = this.container.clientHeight;
+      if (w > 1 && h > 1 && (w !== this._sized?.w || h !== this._sized?.h)) this.resize();
+    });
+    this._ro.observe(this.container);
   }
 
   // -------------------------------------------------------------------------
