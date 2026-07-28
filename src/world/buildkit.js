@@ -227,6 +227,35 @@ export function rockGeom(rng, opts = {}) {
   return g;
 }
 
+/**
+ * Faceted rock with a FLAT-ISH TOP — the shape that dominates the alpine
+ * reference: a half-buried block whose upper faces have been planed off, so it
+ * catches the key light as one bright polygon instead of a busy sparkle. The
+ * top is squashed toward a plane rather than cut, which keeps the silhouette
+ * irregular where it meets the grass.
+ */
+export function slabGeom(rng, opts = {}) {
+  const g = new THREE.IcosahedronGeometry(1, opts.detail ?? 0).toNonIndexed();
+  const pos = g.attributes.position;
+  const jx = opts.jitter ?? 0.40;
+  const top = opts.top ?? 0.45;      // height at which the plane starts
+  const squash = opts.squash ?? 0.22; // how much of the peak survives
+  for (let i = 0; i < pos.count; i++) {
+    let x = pos.getX(i) * rng.float(1 - jx, 1 + jx);
+    // Asymmetric about y=0 on purpose: the mass sits BELOW the origin so the
+    // caller can drop the rock at ground level and get a half-buried block,
+    // and the visible part above ground is still a full metre or two.
+    let y = pos.getY(i) * rng.float(0.75, 1.15);
+    let z = pos.getZ(i) * rng.float(1 - jx, 1 + jx);
+    if (y > top) y = top + (y - top) * squash;
+    // Flare the base outward so the rock looks bedded into the ground.
+    if (y < 0) { const k = 1 + (-y) * 0.30; x *= k; z *= k; }
+    pos.setXYZ(i, x, y, z);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
 // ---------------------------------------------------------------------------
 // Palette derivation. Landmarks and props need more materials than the Palette
 // declares (plaster, roof tile, rusted metal...). Rather than invent hexes we

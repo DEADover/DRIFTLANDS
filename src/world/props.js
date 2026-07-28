@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Rng, fbm } from '../core/rng.js';
-import { GeoBuilder, rockGeom, derivePalette } from './buildkit.js';
+import { GeoBuilder, rockGeom, slabGeom, derivePalette } from './buildkit.js';
 
 /**
  * VEGETATION & GROUND COVER.
@@ -58,10 +58,16 @@ function fir(rng, K, o = {}) {
   const tr = rng.float(0.26, 0.38) * wide;
   b.cyl(tr * 0.8, tr * 1.5, trunkH + 1.6, 5, K.bark, { y: (trunkH + 1.6) / 2 });
   let y = trunkH;
-  let r = rng.float(1.75, 2.45) * wide;
+  // Broader skirt, slightly shorter tiers than v1. Measured off target_01: the
+  // conifers there are about a third as wide as they are tall, with the lowest
+  // tier clearly the widest. Ours were nearer a fifth, which read as spikes.
+  let r = rng.float(2.45, 3.35) * wide;
   for (let i = 0; i < tiers; i++) {
-    const h = rng.float(3.8, 5.2) * tall * (1 - i * 0.05);
-    const c = K.leaf[i % K.leaf.length];
+    const h = rng.float(3.1, 4.3) * tall * (1 - i * 0.05);
+    // Dark at the skirt, lighter at the tip. The reference's conifers all read
+    // this way — a deep shadowed core with sunlit new growth on top — and it is
+    // what stops a stand of firs from being one flat green mass.
+    const c = K.leafRamp[Math.min(K.leafRamp.length - 1, Math.floor((i / Math.max(1, tiers - 1)) * K.leafRamp.length))];
     b.cone(r, h, rng.int(5, 7), c, { y: y + h / 2, ry: rng.float(0, 1.2) });
     // Snow only settles on the upper tiers — a white cap, not white frosting.
     if (o.snow && i >= tiers - 2) {
@@ -259,24 +265,38 @@ function bush(rng, K, pal) {
   return { geo: b.build(), trunkR: 0, height: R * 1.6 };
 }
 
-function flowerPatch(rng, K, colIdx) {
-  // At this camera height a flower is 3 px. What reads is the PATCH: a shallow
-  // dish of tinted meadow with a scatter of low domes just proud of it.
+function flowerPatch(rng, K, colIdx, o = {}) {
+  // Reference read: a LOOSE SPRAY of bright dots on green, not a coloured disc.
+  // The old version painted a big tinted dish that, at 3 px per bloom, turned
+  // into a pale stain on the meadow. Here the ground stays green and the blooms
+  // themselves carry the colour — that is what reads from 170 m up.
   const b = new GeoBuilder();
-  const R = rng.float(2.4, 3.8);
-  const c = K.accents[colIdx % K.accents.length];
-  const bedA = K.meadow.clone().lerp(c, 0.10);
-  const bedB = K.meadow.clone().lerp(c, 0.24);
-  b.cyl(R, R * 0.88, 0.12, 7, bedA, { y: 0.06 });
-  b.cyl(R * 0.58, R * 0.46, 0.14, 6, bedB, { y: 0.11, x: rng.float(-0.5, 0.5), z: rng.float(-0.5, 0.5) });
-  const n = rng.int(10, 15);
+  const R = rng.float(1.7, 3.1) * (o.spread ?? 1);
+  const c = o.color ?? K.accents[colIdx % K.accents.length];
+  // A whisper of tinted turf under the spray so the cluster has a footprint,
+  // but far weaker than the blooms so it never reads as painted ground.
+  const bed = K.meadow.clone().lerp(c, 0.07);
+  b.cyl(R * 0.9, R * 0.8, 0.10, 7, bed, { y: 0.045 });
+  const n = rng.int(12, 22);
   for (let i = 0; i < n; i++) {
-    const a = rng.float(0, Math.PI * 2), d = Math.sqrt(rng.float(0, 1)) * R * 0.85;
-    b.cone(rng.float(0.36, 0.62), rng.float(0.26, 0.42), 5, c, {
-      x: Math.cos(a) * d, z: Math.sin(a) * d, y: rng.float(0.2, 0.32),
-    });
+    // Skewed scatter: a dense core with stragglers, so patches interlock
+    // instead of reading as identical stamped circles.
+    const a = rng.float(0, Math.PI * 2);
+    const d = Math.pow(rng.float(0, 1), 0.62) * R;
+    const s = rng.float(0.22, 0.36);
+    const h = rng.float(0.30, 0.55);
+    // A bloom is 4-6 px on screen; a 5-sided squat cone (10 tris) is
+    // indistinguishable from an icosahedron there and a third of the cost.
+    // At 3000 patches per map that difference is a megatriangle.
+    b.cone(s, s * 1.1, 5, c, { x: Math.cos(a) * d, z: Math.sin(a) * d, y: h });
   }
-  return { geo: b.build(), trunkR: 0, height: 0.6 };
+  // Two taller stems break the flat top of the drift. More than that and the
+  // patch costs more triangles than a whole fir.
+  for (let i = 0; i < 2; i++) {
+    const a = rng.float(0, Math.PI * 2), d = rng.float(0, R * 0.7);
+    b.cone(0.10, 0.85, 4, K.grass[0], { x: Math.cos(a) * d, z: Math.sin(a) * d, y: 0.42 });
+  }
+  return { geo: b.build(), trunkR: 0, height: 0.9 };
 }
 
 function reeds(rng, K) {
@@ -322,6 +342,41 @@ function screePatch(rng, K) {
   return { geo: b.build(), trunkR: 0, height: 1 };
 }
 
+/**
+ * The alpine reference's hero rock: a pale grey block, flat-topped, bedded into
+ * the turf, with one or two smaller blocks leaning on it. Two tone steps only —
+ * a bright top plane and a cool shadow side — so it reads as one solid at
+ * distance instead of granular noise.
+ */
+function slab(rng, K, o = {}) {
+  const b = new GeoBuilder();
+  // Pale, slightly warm grey. Against a deep green meadow the rock has to be
+  // clearly LIGHTER than the grass or it disappears into it — in the reference
+  // the boulders are the brightest thing in the frame after the road.
+  // Warm pale grey, from the palette's own road-edge tone. The reference's
+  // boulders are a warm stone, not the cool blue-grey of the cliff colour, and
+  // that warmth is what separates them from the meadow shadows.
+  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.0, 0.28)).lerp(K.plasterWarm, 0.30);
+  b.raw(slabGeom(rng, { jitter: 0.42 }), body);
+  const n = rng.int(1, 3);
+  for (let i = 0; i < n; i++) {
+    const s = rng.float(0.32, 0.66);
+    const a = rng.float(0, Math.PI * 2), d = rng.float(0.7, 1.3);
+    b.pushTilt(Math.cos(a) * d, -0.15, Math.sin(a) * d, rng.float(0, 6.28),
+      rng.float(-0.2, 0.2), rng.float(-0.2, 0.2), s);
+    b.raw(slabGeom(rng, { jitter: 0.46 }),
+      K.rockDark.clone().lerp(K.rock, rng.float(0.3, 0.8)).lerp(K.plasterWarm, 0.20));
+    b.pop();
+  }
+  if (o.snow) {
+    const cap = slabGeom(rng, { jitter: 0.2, squash: 0.1 });
+    cap.scale(0.98, 0.5, 0.98);
+    cap.translate(0, 0.22, 0);
+    b.raw(cap, K.snow);
+  }
+  return { geo: b.build(), trunkR: 1, height: 1 };
+}
+
 function boulder(rng, K, o = {}) {
   const b = new GeoBuilder();
   const body = K.rock.clone().lerp(K.rockDark, rng.float(0.25, 0.75));
@@ -345,6 +400,14 @@ const MAKERS = {
   fir,
   firOld: (r, K) => fir(r, K, { tall: 1.35, wide: 1.25, tiers: 5 }),
   firYoung: (r, K) => fir(r, K, { tall: 0.62, wide: 0.72, tiers: 3 }),
+  // The bottom of the size ladder. The reference is full of knee-to-waist-high
+  // conifers filling the gaps between the hero trees; without them the meadow
+  // reads as mown.
+  firSapling: (r, K) => fir(r, K, { tall: 0.30, wide: 0.42, tiers: 3 }),
+  // Tall and slightly slim — NOT a needle. At wide: 0.72 with six tiers this
+  // came out as a 22 m green spike about three metres across, which read as
+  // litter rather than as a tree.
+  firSpire: (r, K) => fir(r, K, { tall: 1.06, wide: 0.88, tiers: 5 }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
   firSnowOld: (r, K) => fir(r, K, { snow: true, tall: 1.3, wide: 1.2, tiers: 5 }),
   scotsPine, broadleaf, birch, maple, snag, stump,
@@ -354,9 +417,19 @@ const MAKERS = {
   flowersA: (r, K) => flowerPatch(r, K, 0),
   flowersB: (r, K) => flowerPatch(r, K, 1),
   flowersC: (r, K) => flowerPatch(r, K, 2),
+  // Alpine's signature: drifts of white, and a softer cream-yellow. Derived
+  // from the palette's own accents, never a hard-coded hex.
+  flowersWhite: (r, K) => flowerPatch(r, K, 0, {
+    color: K.accents[K.accents.length - 1].clone().lerp(K.accents[1], 0.10),
+    spread: 1.15,
+  }),
+  flowersCream: (r, K) => flowerPatch(r, K, 0, {
+    color: K.accents[K.accents.length - 1].clone().lerp(K.accents[1], 0.45),
+  }),
   reeds, tussock, screePatch,
-  boulder,
+  boulder, slab,
   boulderSnow: (r, K) => boulder(r, K, { snow: true }),
+  slabSnow: (r, K) => slab(r, K, { snow: true }),
 };
 
 // ---------------------------------------------------------------------------
@@ -375,27 +448,67 @@ const MAKERS = {
 
 const MIXES = {
   alpine: {
-    canopyTarget: 3400, coverTarget: 1400, pebbleTarget: 2100, heroes: 90, moistScale: 46,
-    forest: { macro: 0.0016, meso: 0.0060, rich: 0.20, bare: 0.30, spacing: 9.4, contrast: 1.35 },
+    // Densities measured off ref/target_01: roughly 2.5k conifers and 8k ground
+    // -cover items per km², with NO bare stretch wider than about 40 m. The old
+    // numbers were a third of that and left 200 m holes in the meadow.
+    // The route runs from 6 m to 76 m above the water line (measured), while the
+    // backdrop ridges reach 350 m+. So the tree line is set at ~110-140 m: the
+    // WHOLE drivable band is wooded meadow — no more bald stretches where the
+    // road happens to climb — and the far ridges still go bare, which is where
+    // the frame gets its distance.
+    canopyTarget: 19000, coverTarget: 16000, pebbleTarget: 9000, heroes: 240, moistScale: 90,
+    forest: { macro: 0.0016, meso: 0.0060, rich: 0.30, bare: 0.07, spacing: 7.6, contrast: 0.80, coverBare: 0.04 },
     canopy: [
-      { id: 'fir', w: 5.2, alt: [1, 6, 62, 84], wet: [0, 0.15, 0.9, 1.1], flat: 0.74, size: [0.85, 1.5] },
-      { id: 'firOld', w: 1.5, alt: [2, 10, 55, 76], wet: [0, 0.2, 0.9, 1.1], flat: 0.77, size: [0.9, 1.35] },
-      { id: 'firYoung', w: 2.0, alt: [1, 6, 70, 90], wet: [0, 0.1, 0.9, 1.1], flat: 0.72, size: [1.05, 1.8] },
-      { id: 'broadleaf', w: 1.9, alt: [1, 5, 34, 52], wet: [0.2, 0.42, 1.0, 1.1], flat: 0.78, size: [0.85, 1.5] },
-      { id: 'birch', w: 1.4, alt: [2, 8, 46, 66], wet: [0.15, 0.35, 0.95, 1.1], flat: 0.78, size: [0.9, 1.4] },
-      { id: 'snag', w: 0.35, alt: [4, 14, 70, 92], wet: [0, 0, 0.7, 1.0], flat: 0.80, size: [0.8, 1.3] },
+      // Sizes calibrated against target_01: the hero conifers there stand about
+      // 20 m and 7-8 m across the skirt, roughly five car lengths tall. Our
+      // trees were topping out at 12 m, which is why the meadow looked like a
+      // model railway however many of them were placed.
+      // A base `fir` is ~17 m at scale 1, so these caps put the hero trees at
+      // 24-26 m and the young ones around 10-14 m. Measured against target_01,
+      // where the tallest conifers are about five car lengths: an earlier pass
+      // ran the cap up to 2.5 and grew 40 m trees that dwarfed the car.
+      { id: 'fir', w: 5.2, alt: [1, 5, 135, 195], wet: [0, 0.12, 0.95, 1.15], flat: 0.74, size: [0.75, 1.55] },
+      { id: 'firOld', w: 1.8, alt: [2, 8, 118, 168], wet: [0, 0.15, 0.95, 1.15], flat: 0.77, size: [0.85, 1.40] },
+      { id: 'firSpire', w: 1.6, alt: [2, 7, 135, 195], wet: [0, 0.12, 0.95, 1.15], flat: 0.76, size: [0.80, 1.45] },
+      { id: 'firYoung', w: 2.6, alt: [1, 5, 145, 210], wet: [0, 0.08, 1.0, 1.2], flat: 0.72, size: [1.0, 2.2] },
+      { id: 'firSapling', w: 2.2, alt: [1, 4, 155, 235], wet: [0, 0.05, 1.05, 1.25], flat: 0.68, size: [1.0, 2.6] },
+      // Kept deliberately low: target_01 is a conifer meadow. Round canopies
+      // are the accent, not the crop.
+      { id: 'broadleaf', w: 1.0, alt: [1, 5, 48, 72], wet: [0.15, 0.35, 1.05, 1.2], flat: 0.78, size: [0.9, 1.6] },
+      { id: 'birch', w: 0.7, alt: [2, 8, 62, 90], wet: [0.1, 0.3, 1.0, 1.2], flat: 0.78, size: [0.9, 1.5] },
+      // No snags in alpine. A dead pole reads from 200 m up as a two-tone stub
+      // — bright sunlit face, near-black shadow face — and the copse pass will
+      // happily make one the dominant species of a whole stand, which put
+      // fields of black dots through the meadow. The reference has none.
     ],
-    heroSpecies: ['firOld', 'broadleaf', 'fir'],
+    heroSpecies: ['firOld', 'firSpire', 'fir'],
     cover: [
-      { id: 'bushDark', w: 2.4, alt: [1, 4, 70, 92], wet: [0, 0.1, 1, 1.1], flat: 0.74, size: [0.7, 1.6] },
-      { id: 'bushLight', w: 1.6, alt: [1, 4, 58, 80], wet: [0.1, 0.3, 1, 1.1], flat: 0.74, size: [0.7, 1.5] },
-      { id: 'flowersA', w: 1.5, alt: [2, 6, 44, 62], wet: [0.15, 0.4, 1, 1.1], flat: 0.90, size: [0.8, 1.4] },
-      { id: 'flowersB', w: 1.1, alt: [2, 6, 50, 70], wet: [0.1, 0.35, 1, 1.1], flat: 0.90, size: [0.8, 1.4] },
-      { id: 'tussock', w: 3.0, alt: [1, 3, 74, 96], wet: [0, 0.05, 1, 1.1], flat: 0.72, size: [0.8, 1.7] },
-      { id: 'screePatch', w: 1.8, alt: [26, 52, 130, 220], wet: [0, 0, 0.55, 0.85], flat: 0.0, flatMax: 0.88, size: [0.7, 1.3] },
+      { id: 'bushDark', w: 2.4, alt: [1, 4, 150, 230], wet: [0, 0.08, 1.05, 1.2], flat: 0.74, size: [0.7, 1.6] },
+      { id: 'bushLight', w: 1.6, alt: [1, 4, 120, 180], wet: [0.05, 0.22, 1.05, 1.2], flat: 0.74, size: [0.7, 1.5] },
+      { id: 'flowersWhite', w: 4.4, alt: [1, 4, 120, 180], wet: [0, 0.12, 1.05, 1.2], flat: 0.86, size: [0.8, 1.5] },
+      { id: 'flowersCream', w: 1.7, alt: [2, 5, 110, 160], wet: [0.05, 0.2, 1.05, 1.2], flat: 0.86, size: [0.8, 1.4] },
+      { id: 'flowersA', w: 1.0, alt: [2, 5, 95, 140], wet: [0.1, 0.3, 1.05, 1.2], flat: 0.88, size: [0.8, 1.4] },
+      { id: 'tussock', w: 5.0, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.72, size: [0.8, 1.7] },
+      { id: 'screePatch', w: 1.2, alt: [120, 190, 300, 430], wet: [0, 0, 0.6, 0.9], flat: 0.0, flatMax: 0.88, size: [0.7, 1.3] },
     ],
     shore: { id: 'reeds', size: [0.8, 1.5] },
     boulder: 'boulder',
+    slab: 'slab',
+    verge: {
+      count: 3000, width: 11,
+      mix: [
+        { id: 'flowersWhite', w: 0.28 },
+        { id: 'tussock', w: 0.24 },
+        { id: 'slab', w: 0.13 },
+        { id: 'flowersCream', w: 0.10 },
+        { id: 'bushDark', w: 0.09 },
+        // Young conifers crowding the verge: in the reference the wood comes
+        // right down to the fence line, and the road's keep-out band is the
+        // only reason ours does not.
+        { id: 'firSapling', w: 0.09 },
+        { id: 'flowersA', w: 0.07 },
+      ],
+    },
   },
 
   autumn: {
@@ -549,14 +662,35 @@ export class PropScatter {
       shade(a, j + dir * 0.105, 0.06),
       shade(b2, j + dir * 0.01, -0.02),
     ];
+    // Conifer tier ramp, darkest first, sorted by luminance so it is correct
+    // whichever way the palette pushed the foliage.
+    //
+    // NOTE the offsets are TINY. THREE.Color works in linear space, so a
+    // palette green like #2f7d43 has an HSL lightness of ~0.12, not ~0.34 — a
+    // "-0.075" nudge that looks harmless in sRGB terms takes it to near-black,
+    // which is exactly what happened on the first attempt: every fir grew a
+    // black skirt. Everything here is expressed as a step off the same `dir`
+    // the leaf colours already use.
+    const lum = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const leafRamp = [
+      shade(a, j + dir * 0.005, 0.045),
+      shade(a, j + dir * 0.045, 0.02),
+      shade(b2, j + dir * 0.085, -0.01),
+      shade(b2, j + dir * 0.125, -0.045),
+    ].sort((p, q) => lum(p) - lum(q));
+
     return {
       ...D,
       leaf,
+      leafRamp,
       leafPale: leaf.map((c) => shade(c, 0.10, -0.05)),
       meadow: shade(new THREE.Color(p.ground[1]), -0.05, 0.07),
+      // Same linear-space caution as leafRamp: on a palette green whose HSL
+      // lightness is ~0.13, a +0.06 nudge is a 45% jump and turns grass tufts
+      // and flower stems into pale near-white sticks. Keep the steps small.
       grass: [
-        shade(leaf[0], 0.06, -0.06),
-        shade(new THREE.Color(p.ground[1]), -0.06, 0.04),
+        shade(leaf[0], 0.022, -0.04),
+        shade(new THREE.Color(p.ground[1]), -0.022, 0.04),
       ],
       reed: shade(leaf[0], -0.02, 0.05),
       reedTip: shade(new THREE.Color(p.ground[3]), -0.02, 0.04),
@@ -585,6 +719,8 @@ export class PropScatter {
     for (const id of mix.heroSpecies) need.add(id);
     need.add(mix.shore.id);
     need.add(mix.boulder);
+    if (mix.slab) need.add(mix.slab);
+    if (mix.verge) for (const m of mix.verge.mix) need.add(m.id);
     for (const id of need) {
       for (let v = 0; v < VARIANTS; v++) {
         const r = new Rng((strHash(id) ^ Math.imul(v + 1, 2654435761) ^ 0x9e37) >>> 0);
@@ -679,6 +815,31 @@ export class PropScatter {
     const SPAWN_CLEAR = 22;
     const nearSpawn = (x, z) => x * x + z * z < SPAWN_CLEAR * SPAWN_CLEAR;
 
+    /**
+     * A point just outside the road's keep-out band, i.e. ON THE VERGE.
+     *
+     * `isBlocked` is the only road query props are handed, so the verge is found
+     * by landing inside the band and walking out of it: sample until a point is
+     * blocked, pick a direction, step until it stops being blocked. That costs
+     * about fifteen index lookups per hit and needs nothing new from the roads
+     * contract — which matters, because the verge is where half the reference's
+     * furniture lives and a uniform scatter never puts anything there.
+     */
+    const findVerge = (jitterMax = 9) => {
+      for (let k = 0; k < 50; k++) {
+        const x0 = rng.float(-half, half), z0 = rng.float(-half, half);
+        if (!isBlocked(x0, z0)) continue;
+        const a = rng.float(0, Math.PI * 2);
+        const dx = Math.cos(a), dz = Math.sin(a);
+        let d = 0;
+        while (d < 70 && isBlocked(x0 + dx * d, z0 + dz * d)) d += 2.5;
+        if (d >= 70) continue;
+        const j = rng.float(0.5, jitterMax);
+        return { x: x0 + dx * (d + j), z: z0 + dz * (d + j) };
+      }
+      return null;
+    };
+
     const pickSpecies = (list, e, r) => {
       let total = 0;
       const ws = [];
@@ -768,8 +929,11 @@ export class PropScatter {
           const sz = spec.size;
           // Skewed toward small: many young trees, a few full-grown ones. Not
           // TOO skewed — below ~8 m a tree stops reading as a tree at this
-          // camera height and turns into visual grit.
-          let s = sz[0] + (sz[1] - sz[0]) * Math.pow(rng.float(0, 1), 1.25);
+          // camera height and turns into visual grit. Measured against
+          // target_01, where the hero conifers occupy ~8% of the frame height,
+          // the old 1.25 exponent produced a stand of near-identical mid-size
+          // trees; 1.05 keeps the young ones and lets the big ones get big.
+          let s = sz[0] + (sz[1] - sz[0]) * Math.pow(rng.float(0, 1), 1.05);
           s *= lerp(1.0, 0.80, clamp(r2, 0, 1));   // copse edge = younger
           if (rng.bool(0.07)) s *= 1.28;           // occasional veteran
           const v = rng.int(0, VARIANTS - 1);
@@ -782,8 +946,14 @@ export class PropScatter {
           // a copse into a minefield: game.js scales velocity by 0.45 for every
           // overlapping collider every fixed step, so one brush through a stand
           // parks the car. Three capture presets were finishing at 0 km/h.
+          //
+          // The gate is the tree's REAL HEIGHT, not its instance scale. Scale
+          // means nothing on its own — `firSapling` at s=2.4 is a four metre
+          // shrub while `firOld` at s=1.2 is a twenty metre tree — and gating
+          // on scale alone quietly turned every sapling stand back into a
+          // minefield the moment the size ranges were retuned.
           const entry = lib.get(`${spec.id}#${v}`);
-          if (entry.trunkR >= 0.7 && s >= 1.34) {
+          if (entry.trunkR >= 0.7 && entry.height * s >= 11) {
             this.colliders.push({ x, z, r: entry.trunkR * s * 0.42 });
           }
           placed++;
@@ -797,12 +967,41 @@ export class PropScatter {
     const D = 0.45 + 0.55 * (B.treeDensity ?? 1);
     placeClusters(mix.canopy, Math.round(mix.canopyTarget * D), {
       density: forestDensity, contrast: F.contrast ?? 1,
-      tries: 9000, sep: 34, radius: [14, 84], spacing: F.spacing, maxMembers: 170,
+      tries: 14000, sep: 26, radius: [12, 84], spacing: F.spacing, maxMembers: 190,
     });
     placeClusters(mix.cover, mix.coverTarget, {
-      density: coverDensity, contrast: 1.1,
-      tries: 8000, sep: 21, radius: [7, 26], spacing: 4.6, maxMembers: 40,
+      density: coverDensity, contrast: 1.0,
+      tries: 16000, sep: 15, radius: [6, 26], spacing: 4.2, maxMembers: 60,
     });
+
+    // ---- ROAD VERGE DRESSING --------------------------------------------
+    // In the reference the road has NO clean edge: flower drifts, grass tufts
+    // and loose stones crowd right up to the gravel, and that soft encroaching
+    // margin is most of what makes the road look driven-on rather than drawn
+    // on. A map-wide scatter can never produce it, because the verge is 3% of
+    // the map area and gets 3% of the props.
+    const VERGE = mix.verge;
+    if (VERGE) {
+      let vplaced = 0;
+      for (let i = 0; i < VERGE.count * 3 && vplaced < VERGE.count; i++) {
+        const p = findVerge(VERGE.width ?? 9);
+        if (!p) continue;
+        const e = envAt(p.x, p.z);
+        if (!e || e.ny < 0.80) continue;
+        if (isBlocked(p.x, p.z)) continue;
+        if (nearSpawn(p.x, p.z)) continue;
+        let t = rng.float(0, 1), id = VERGE.mix[VERGE.mix.length - 1].id;
+        for (const m of VERGE.mix) { t -= m.w; if (t <= 0) { id = m.id; break; } }
+        const v = rng.int(0, VARIANTS - 1);
+        const s = rng.float(0.75, 1.45);
+        emit(id, v, {
+          x: p.x, y: e.h - (id === mix.slab ? s * 0.12 : 0.12), z: p.z, s,
+          r: rng.float(0, Math.PI * 2),
+          tx: rng.gauss(0, 0.03), tz: rng.gauss(0, 0.03),
+        });
+        vplaced++;
+      }
+    }
 
     // ---- HERO TREES ------------------------------------------------------
     // Isolated giants, deliberately placed where the forest is THIN.
@@ -817,7 +1016,9 @@ export class PropScatter {
       const spec = mix.canopy.find((s) => s.id === id) ?? mix.canopy[0];
       if (fitness(spec, e) <= 0.15) continue;
       const v = rng.int(0, VARIANTS - 1);
-      const s = rng.float(1.15, 1.55);
+      // A hero is the biggest thing in its part of the frame — the lone tree in
+      // the meadow that gives the whole shot its scale. ~25-30 m.
+      const s = rng.float(1.45, 1.80);
       emit(id, v, { x, y: e.h - 0.15, z, s, r: rng.float(0, Math.PI * 2), tx: 0, tz: 0 });
       const entry = lib.get(`${id}#${v}`);
       if (entry.trunkR >= 0.6) this.colliders.push({ x, z, r: entry.trunkR * s * 0.55 });
@@ -845,32 +1046,92 @@ export class PropScatter {
     }
 
     // ---- BOULDERS & PEBBLES ---------------------------------------------
-    // The reference's ambient texture: a wide, low-density pebble scatter with
-    // occasional tight boulder groups. Small ones carry no collider.
+    // Two habits, both taken straight off the reference:
+    //
+    //   GROUPS  a big flat-topped block with two or three smaller ones fallen
+    //           around it. Sizes inside a group span pebble -> larger-than-car,
+    //           which is what gives the frame its sense of scale.
+    //   SCATTER a thin ambient sprinkle of small stones so the meadow floor is
+    //           never an empty plane between the groups.
+    //
+    // Groups are biased toward the ROAD VERGE. `isBlocked` is the only road
+    // query props are given, so the verge is found by probing outward: a point
+    // that is itself clear but has blocked ground a few metres away is a
+    // roadside. Cheap, and it needs nothing new from the roads contract.
+    const rockId = mix.slab ?? mix.boulder;
+    const nearRoad = (x, z, probe) =>
+      !isBlocked(x, z) && (
+        isBlocked(x + probe, z) || isBlocked(x - probe, z) ||
+        isBlocked(x, z + probe) || isBlocked(x, z - probe));
+
     const rockTarget = Math.round(mix.pebbleTarget * (B.rockDensity ?? 1));
     let rocks = 0;
-    for (let i = 0; i < rockTarget * 3 && rocks < rockTarget; i++) {
-      const x = rng.float(-half, half), z = rng.float(-half, half);
+
+    const dropRock = (x, z, s, id) => {
       const h = T.heightAt(x, z);
-      if (h < wl + 0.25) continue;
-      if (isBlocked(x, z)) continue;
+      if (h < wl + 0.25) return false;
+      if (isBlocked(x, z)) return false;
+      if (s > 1.6 && nearSpawn(x, z)) return false;
+      const v = rng.int(0, VARIANTS - 1);
+      // Half-buried, but only half. The slab geometry already carries most of
+      // its mass below the origin, so sinking it by the same amount as a round
+      // boulder puts the whole rock underground — which is exactly what the
+      // first version did, and why 6700 boulders were invisible.
+      const flat = id === mix.slab;
+      emit(id, v, {
+        x, y: h - s * (flat ? rng.float(0.06, 0.16) : rng.float(0.26, 0.42)), z, s,
+        r: rng.float(0, Math.PI * 2),
+        tx: rng.gauss(0, 0.07), tz: rng.gauss(0, 0.07),
+        sy: flat ? rng.float(0.75, 1.10) : rng.float(0.55, 0.95),
+      });
+      if (s > 2.4) this.colliders.push({ x, z, r: s * 0.42 });
+      rocks++;
+      return true;
+    };
+
+    // -- groups
+    const groupTarget = Math.round(rockTarget * 0.42);
+    let grouped = 0;
+    for (let i = 0; i < groupTarget * 14 && grouped < groupTarget; i++) {
+      const cx = rng.float(-half, half), cz = rng.float(-half, half);
+      const h = T.heightAt(cx, cz);
+      if (h < wl + 0.4) continue;
+      if (isBlocked(cx, cz)) continue;
+      const n = T.normalAt(cx, cz, 3.5);
+      const rocky = clamp((1 - n.y) * 6, 0, 1);
+      const field = fbm(cx * 0.0052, cz * 0.0052, { octaves: 3, seed: S + 431 });
+      // Meadow boulders matter as much as scree ones: in the reference a grey
+      // block sitting in flat green grass is the strongest scale cue in the
+      // frame. So the base rate is high enough that flat ground gets groups
+      // too, and steepness only tilts the odds.
+      const road = nearRoad(cx, cz, 7) ? 1 : 0;
+      const p = 0.22 + rocky * 0.30 + Math.max(0, field) * 0.34 + road * 0.55;
+      if (rng.float(0, 1) > p) continue;
+
+      // One anchor block, then a train of smaller ones around it. The anchor is
+      // deliberately car-sized or bigger: a boulder that is not clearly larger
+      // than the car gives the frame no sense of scale at all.
+      const big = lerp(2.0, 4.6, Math.pow(rng.float(0, 1), 1.5)) * (1 + rocky * 0.3);
+      dropRock(cx, cz, big, rockId) && grouped++;
+      const n2 = rng.int(2, 5);
+      for (let k = 0; k < n2 && grouped < groupTarget; k++) {
+        const a = rng.float(0, Math.PI * 2);
+        const d = big * rng.float(0.8, 2.4);
+        const s = big * rng.float(0.16, 0.55);
+        if (dropRock(cx + Math.cos(a) * d, cz + Math.sin(a) * d, s, rockId)) grouped++;
+      }
+    }
+
+    // -- ambient scatter
+    for (let i = 0; i < rockTarget * 4 && rocks < rockTarget; i++) {
+      const x = rng.float(-half, half), z = rng.float(-half, half);
       const n = T.normalAt(x, z, 3.5);
       const rocky = clamp((1 - n.y) * 6, 0, 1);
       const field = fbm(x * 0.0052, z * 0.0052, { octaves: 3, seed: S + 431 });
-      const p = 0.10 + rocky * 0.55 + Math.max(0, field) * 0.55;
+      const p = 0.12 + rocky * 0.55 + Math.max(0, field) * 0.5;
       if (rng.float(0, 1) > p) continue;
-      const t = Math.pow(rng.float(0, 1), 2.9);
-      const s = lerp(0.45, 3.8, t) * (1 + rocky * 0.45);
-      if (s > 1.6 && nearSpawn(x, z)) continue;
-      const v = rng.int(0, VARIANTS - 1);
-      emit(mix.boulder, v, {
-        x, y: h - s * 0.22, z, s,
-        r: rng.float(0, Math.PI * 2),
-        tx: rng.gauss(0, 0.09), tz: rng.gauss(0, 0.09),
-        sy: rng.float(0.55, 0.95),
-      });
-      if (s > 3.0) this.colliders.push({ x, z, r: s * 0.45 });
-      rocks++;
+      const s = lerp(0.5, 2.4, Math.pow(rng.float(0, 1), 2.4)) * (1 + rocky * 0.4);
+      dropRock(x, z, s, rng.bool(0.45) ? rockId : mix.boulder);
     }
 
     // ---- BAKE ------------------------------------------------------------
