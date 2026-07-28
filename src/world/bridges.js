@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { setLakeContext, lakeLevel } from './lake.js';
+import { setLakeContext, planLakes, carveLakes } from './water.js';
 
 /**
  * BRIDGES — owned by the bridges builder.
@@ -42,20 +42,21 @@ import { setLakeContext, lakeLevel } from './lake.js';
  */
 
 const CLEARANCE = 3.2;   // deck underside above the waterline, metres
-// Half width of the deck. The carriageway is 8 m wide with a 1.05 m verge, so
-// anything under ~6.6 puts the railing posts inside the road: game.js pushes
-// the car out of a collider at (r + 1.4) m, and with the posts at 5.6 a car
-// merely running wide on its own carriageway was being speared at the abutment
-// and thrown off the bridge into the lake. Measured before the change: the
-// preset drive hit 139 km/h, collided at the bridge mouth, and dropped to 50.
-const DECK_HW = 6.8;
+// Half width of the deck. The ALPINE carriageway is 15 m wide with a 1.5 m
+// verge and corner widening on top, so a 6.8 m half-deck put the railing posts
+// two metres INSIDE the road: game.js pushes the car out of a collider at
+// (r + 1.4) m, so a car merely holding its own lane was speared at the abutment
+// and thrown into the lake, and the causeway the deck is supposed to hide stuck
+// out either side. The deck is now wider than the road it carries, which is
+// what lets a car following the centreline cross without touching anything.
+const DECK_HW = 10.0;
 const PLANK = 1.15;      // plank pitch along the deck
 const POST_GAP = 3.6;    // railing post pitch
 const PYLON_GAP = 9.5;   // pier pitch
 const MIN_SPAN = 10;     // shorter than this and it is a culvert, not a bridge
 const MAX_SPAN = 400;
 const ABUTMENT = 26;     // how far onto each bank the deck may reach
-const RAMP = 15;         // over how many metres the deck settles onto the road
+const RAMP = 22;         // over how many metres the deck settles onto the road
 
 const TIMBER = {
   deck: 0x9c6a3e,
@@ -188,10 +189,74 @@ function wetSpans(P, terrain, level) {
   return spans;
 }
 
+/**
+ * WHERE THE WATERLINE GOES.
+ *
+ * biomes.js digs lake bowls with a noise field and declares a water plane at
+ * -8. Both are honest; together they are useless, because the bowls land
+ * wherever the noise puts them and the road is laid on a loop at r = 350-700 m
+ * that never visits one. Measured across the three alpine presets, the LOWEST
+ * point the route reaches is +18.0 m (seed 1337), +8.8 (4242), +11.6 (8888).
+ * A plane at -8 is twenty-six metres below the deepest puddle on the drive, so
+ * every alpine frame ever shot in this project has been bone dry and no bridge
+ * has ever been built.
+ *
+ * So the level is chosen from the route rather than declared: fill the valley
+ * until the lowest saddle the road crosses is genuinely under water and the
+ * submerged run is long enough to be worth a bridge (45-220 m — shorter is a
+ * culvert, longer is a causeway). The smallest level that achieves that is
+ * taken, so the flood is the least one that puts the lake against the drive.
+ *
+ * The same rise floods the hollows on EITHER side of that saddle, which is
+ * where the big body of open water in frame comes from: the road runs along a
+ * shore for a few hundred metres and then crosses a neck. That is the target
+ * frame's composition exactly.
+ *
+ * Non-alpine biomes are frozen this round and keep their declared plane.
+ */
+function chooseLevel(P, biome) {
+  const declared = biome?.waterLevel ?? -3;
+  if (biome?.id !== 'alpine' || !P) return declared;
+
+  let lo = Infinity;
+  for (const p of P) lo = Math.min(lo, p.yT);
+  if (!Number.isFinite(lo)) return declared;
+
+  const n = P.length;
+  // Longest contiguous run of route under a candidate level, in metres. The
+  // route is a closed loop, so the walk starts from a DRY sample: starting at
+  // index 0 would cut a run that straddles the seam in half.
+  const longestWet = (L) => {
+    let start = -1;
+    for (let i = 0; i < n; i++) if (P[i].yT >= L) { start = i; break; }
+    if (start < 0) return Infinity;              // the whole loop is submerged
+    let best = 0, run = 0;
+    for (let k = 0; k < n; k++) {
+      const p = P[(start + k) % n];
+      if (p.yT < L) { run += p.ds; if (run > best) best = run; }
+      else run = 0;
+    }
+    return best;
+  };
+
+  // Walk up from just-touching. 0.4 m steps: fine enough that the chosen level
+  // is the least one that works, coarse enough to stay cheap.
+  let chosen = null;
+  for (let L = lo + 0.6; L <= lo + 16; L += 0.4) {
+    const w = longestWet(L);
+    if (w >= 45) { chosen = w <= 220 ? L : null; break; }
+  }
+  // Nothing in range — the road either skims its low point over a few metres
+  // (nothing to bridge) or drops straight into a trench. Settle for a level
+  // that at least wets the saddle, so there is still a lake beside the drive.
+  return chosen ?? lo + 3.5;
+}
+
 export function createBridges(ctx) {
-  // Hand the terrain to water.js (see lake.js): game.js constructs the Water
-  // one line earlier without one, and the lake needs to know how deep it is.
-  setLakeContext(ctx);
+  // Safe default first, so that even if everything below throws, water.js still
+  // has a terrain to measure depth against and the lake is merely in the wrong
+  // place rather than absent.
+  setLakeContext({ ...ctx, level: ctx?.biome?.waterLevel });
 
   const group = new THREE.Group();
   group.name = 'bridges';
@@ -207,74 +272,47 @@ export function createBridges(ctx) {
 
   try {
     const { terrain, biome, roads } = ctx;
-    if (!terrain || !biome) return stub;
-    const level = lakeLevel(biome);
+    if (!terrain || !biome) { setLakeContext({ ...ctx, level: biome?.waterLevel }); return stub; }
+
+    // The route first, because everything about the water is derived from it.
+    const P = roads?.sample ? routePolyline(roads) : null;
+    if (P) for (const p of P) p.yT = terrain.heightAt(p.x, p.z);
+
+    // Plant the chain of tarns along the drive and dig their basins. This has
+    // to happen HERE and not in water.js's own build, because props, animals
+    // and landmarks are all placed after this call and every one of them asks
+    // terrain.heightAt() where the ground is — carving later would leave a
+    // forest standing in open water.
+    const plan = planLakes({ ...ctx, roads }, P);
+    if (plan) carveLakes(ctx, plan);
+    // Route heights move with the ground under them.
+    if (plan && P) for (const p of P) p.yT = terrain.heightAt(p.x, p.z);
+
+    const level = plan ? plan.lakes[0].level : chooseLevel(P, biome);
+
+    // Hand the whole lot to water.js: game.js constructs the Water one line
+    // EARLIER than this call and without a terrain, so this is the only moment
+    // at which the lake can be told how deep it is and where its surface sits.
+    setLakeContext({ ...ctx, level, plan });
 
     // PROP KEEP-OUT, part one: the lake.
     //
     // props.js decides what is dry land from `biome.waterLevel`, which for
-    // alpine is -17, so with the lake filled to -5 it happily plants full-grown
-    // conifers eight metres under the surface. game.js gives the world exactly
-    // one prop keep-out hook and it runs through here, so this is where the
-    // world gets told "that is a lake" — and it is the water subsystem's
-    // business to say so. Part two (the deck footprint) is added below.
-    const drown = level + 0.35;
-    stub.isBlocked = (x, z) => terrain.heightAt(x, z) < drown;
+    // alpine is -8 — thirty metres below the surface we just chose — so left to
+    // itself it plants full-grown conifers in open water. game.js gives the
+    // world exactly one prop keep-out hook and it runs through here, so this is
+    // where the world gets told "that is a lake" — and it is the water
+    // subsystem's business to say so. Part two (the deck footprint) is below.
+    const drown = plan
+      ? (x, z) => { const L = plan.lakeAt(x, z); return !!L && terrain.heightAt(x, z) < L.level + 0.6; }
+      : (x, z) => terrain.heightAt(x, z) < level + 0.35;
+    stub.isBlocked = drown;
 
-    if (!roads?.sample) return stub;
-    const P = routePolyline(roads);
     if (!P) return stub;
     const n = P.length;
 
-    const deckY = level + CLEARANCE;
-
-    // Mark every route sample the deck has to cover: the wet span itself plus
-    // the approach on each bank, walked outward until the ground has climbed
-    // to the deck (or ABUTMENT metres, whichever comes first — a bank that
-    // shelves gently must not turn the bridge into a viaduct).
-    const covered = new Uint8Array(n);
-    let any = false;
-    for (const span of wetSpans(P, terrain, level)) {
-      if (span.len < MIN_SPAN || span.len > MAX_SPAN) continue;
-      const walk = (from, dir) => {
-        let i = from, run = 0;
-        for (let k = 0; k < 600; k++) {
-          covered[i] = 1;
-          if (P[i].yT >= deckY - 0.05) break;
-          run += P[i].ds;
-          if (run > ABUTMENT) break;
-          i = (i + dir + n) % n;
-        }
-        return i;
-      };
-      for (let k = span.a; ; k = (k + 1) % n) { covered[k] = 1; if (k === span.b) break; }
-      walk(span.a, -1);
-      walk(span.b, +1);
-      any = true;
-    }
-    if (!any) return stub;
-
-    // Merge into runs. Two spans a hundred metres apart on the same lake would
-    // otherwise produce overlapping decks stacked on each other.
-    let start = -1;
-    for (let i = 0; i < n; i++) if (!covered[i]) { start = i; break; }
-    if (start < 0) return stub;
-    for (let i = 0; i < n; ) {
-      if (!covered[(start + i) % n]) { i++; continue; }
-      let j = i;
-      while (j < n && covered[(start + j) % n]) j++;
-      const idx = [];
-      let run = 0;
-      for (let k = i; k < j; k++) {
-        const g = (start + k) % n;
-        idx.push(g);
-        run += P[g].ds;
-      }
-      i = j;
-      if (idx.length >= 6 && run >= MIN_SPAN && run <= 340) {
-        buildDeck({ idx, P, terrain, deckY, group, decks, colliders });
-      }
-    }
+    if (plan) buildPlannedDecks({ plan, P, terrain, group, decks, colliders });
+    else buildFoundDecks({ P, terrain, level, group, decks, colliders });
 
     if (!decks.length) return stub;
 
@@ -316,7 +354,7 @@ export function createBridges(ctx) {
     // PROP KEEP-OUT, part two: the deck footprint, so nothing grows up
     // through the planks.
     const isBlocked = (x, z) => {
-      if (terrain.heightAt(x, z) < drown) return true;
+      if (drown(x, z)) return true;
       for (let k = 0; k < decks.length; k++) {
         const B = bbox[k];
         if (x < B[0] - 8 || x > B[2] + 8 || z < B[1] - 8 || z > B[3] + 8) continue;
@@ -340,7 +378,123 @@ export function createBridges(ctx) {
 
 // ---------------------------------------------------------------------------
 
-function buildDeck({ idx, P, terrain, deckY, group, decks, colliders }) {
+/**
+ * THE CROSSING, when water.js has planned one.
+ *
+ * The neck is not found, it is built: water.js has already dug a lobe either
+ * side of the route and left a causeway between them exactly one deck wide. So
+ * the deck goes over the whole stretch where that carve reaches the road —
+ * measured directly off the height field rather than guessed from a radius —
+ * and the causeway disappears under the planks.
+ *
+ * The deck is levelled to clear the HIGHEST point of road it covers, not the
+ * mean. A flat deck sited on the mean sinks below the carriageway at the crown
+ * and the car drives through it.
+ */
+function buildPlannedDecks({ plan, P, terrain, group, decks, colliders }) {
+  const n = P.length;
+  // Is the ground beside the route here cut by more than half a metre? That is
+  // the footprint of the neck, and it is what has to be spanned.
+  // Is there OPEN WATER beside the road here, on both sides? Not "has the
+  // ground been cut" — a metre of cut is not a lake, and siting the deck on the
+  // cut put timber over dry grass at both ends of every crossing. Asking for
+  // water instead makes the bridge and the thing it crosses the same object by
+  // construction.
+  const wetAt = (p, off, level) => {
+    const x = p.x + p.nx * off, z = p.z + p.nz * off;
+    return plan.heightAt(x, z) < level - 0.2;
+  };
+  const necked = (i, level) => {
+    const p = P[i];
+    return wetAt(p, 13, level) && wetAt(p, -13, level);
+  };
+
+  for (const c of plan.crossings) {
+    if (!necked(c.station, c.level)) continue;
+    let a = c.station, b = c.station;
+    for (let k = 0; k < 400; k++) { const q = (a - 1 + n) % n; if (!necked(q, c.level)) break; a = q; }
+    for (let k = 0; k < 400; k++) { const q = (b + 1) % n; if (!necked(q, c.level)) break; b = q; }
+
+    const idx = [];
+    let run = 0;
+    for (let k = a; ; k = (k + 1) % n) {
+      idx.push(k); run += P[k].ds;
+      if (k === b) break;
+      if (idx.length > 900) break;
+    }
+    if (run < MIN_SPAN || run > MAX_SPAN) continue;
+
+    // A short run onto each bank so the deck ends on solid ground rather than
+    // in mid-air at the last carved sample.
+    const walk = (from, dir) => {
+      let i = from, dist = 0;
+      for (let k = 0; k < 200; k++) {
+        const q = (i + dir + n) % n;
+        dist += P[i].ds;
+        if (dist > 14) break;
+        i = q;
+        if (dir < 0) idx.unshift(i); else idx.push(i);
+      }
+    };
+    walk(a, -1);
+    walk(b, +1);
+
+    // THE DECK FOLLOWS THE ROAD.
+    //
+    // A dead-level deck is right for a bridge over a gorge and wrong for one
+    // over a neck: the road here is a causeway that rises and falls with the
+    // valley, and levelling the planks to clear its crown left a plate standing
+    // six metres in the air at the low end behind a wall of fascia the height
+    // of a house. Following the road, smoothed, keeps the crossing a crossing —
+    // and the piles still lengthen into the water on their own.
+    if (idx.length >= 6) {
+      buildDeck({ idx, P, terrain, deckY: null, floor: c.level + 1.8, group, decks, colliders });
+    }
+  }
+}
+
+/** The old behaviour, kept for any biome water.js has not planned. */
+function buildFoundDecks({ P, terrain, level, group, decks, colliders }) {
+  const n = P.length;
+  const deckY = level + CLEARANCE;
+  const covered = new Uint8Array(n);
+  let any = false;
+  for (const span of wetSpans(P, terrain, level)) {
+    if (span.len < MIN_SPAN || span.len > MAX_SPAN) continue;
+    const walk = (from, dir) => {
+      let i = from, run = 0;
+      for (let k = 0; k < 600; k++) {
+        covered[i] = 1;
+        if (P[i].yT >= deckY - 0.05) break;
+        run += P[i].ds;
+        if (run > ABUTMENT) break;
+        i = (i + dir + n) % n;
+      }
+    };
+    for (let k = span.a; ; k = (k + 1) % n) { covered[k] = 1; if (k === span.b) break; }
+    walk(span.a, -1);
+    walk(span.b, +1);
+    any = true;
+  }
+  if (!any) return;
+  let start = -1;
+  for (let i = 0; i < n; i++) if (!covered[i]) { start = i; break; }
+  if (start < 0) return;
+  for (let i = 0; i < n; ) {
+    if (!covered[(start + i) % n]) { i++; continue; }
+    let j = i;
+    while (j < n && covered[(start + j) % n]) j++;
+    const idx = [];
+    let run = 0;
+    for (let k = i; k < j; k++) { const g = (start + k) % n; idx.push(g); run += P[g].ds; }
+    i = j;
+    if (idx.length >= 6 && run >= MIN_SPAN && run <= 340) {
+      buildDeck({ idx, P, terrain, deckY, group, decks, colliders });
+    }
+  }
+}
+
+function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, group, decks, colliders }) {
   const kit = new Kit();
   const hw = DECK_HW;
   const THICK = 0.5;
@@ -369,12 +523,34 @@ function buildDeck({ idx, P, terrain, deckY, group, decks, colliders }) {
   const yA = pts[0].yT, yB = pts[pts.length - 1].yT;
   const ramp = Math.min(RAMP, span * 0.42);
   const ease = (t) => t * t * (3 - 2 * t);
-  for (const p of pts) {
-    const dA = p.s, dB = span - p.s;
-    let y = deckY;
-    if (dA < ramp) y = Math.min(y, yA + (deckY - yA) * ease(dA / ramp));
-    if (dB < ramp) y = Math.min(y, yB + (deckY - yB) * ease(dB / ramp));
-    p.y = Math.max(y, p.yT + 0.12);
+  if (deckY == null) {
+    // Follow the carriageway, smoothed over ±11 stations (~13 m) so the planks
+    // read as one straight run of timber rather than tracking every hummock,
+    // and never let them dip below the design freeboard over the water.
+    const W = 11;
+    for (let k = 0; k < pts.length; k++) {
+      let sum = 0, c = 0;
+      for (let q = -W; q <= W; q++) {
+        const p2 = pts[k + q];
+        if (p2) { sum += p2.yT; c++; }
+      }
+      pts[k].y = Math.max(sum / c + 0.75, floor, pts[k].yT + 0.30);
+    }
+    // Ease the last few metres back onto the actual road height at each end.
+    for (const p of pts) {
+      const dA = p.s, dB = span - p.s;
+      if (dA < ramp) p.y = (yA + 0.30) + (p.y - yA - 0.30) * ease(dA / ramp);
+      if (dB < ramp) p.y = (yB + 0.30) + (p.y - yB - 0.30) * ease(dB / ramp);
+      p.y = Math.max(p.y, p.yT + 0.12);
+    }
+  } else {
+    for (const p of pts) {
+      const dA = p.s, dB = span - p.s;
+      let y = deckY;
+      if (dA < ramp) y = Math.min(y, yA + (deckY - yA) * ease(dA / ramp));
+      if (dB < ramp) y = Math.min(y, yB + (deckY - yB) * ease(dB / ramp));
+      p.y = Math.max(y, p.yT + 0.12);
+    }
   }
 
   const L = (p, off) => [p.x + p.nx * off, p.y, p.z + p.nz * off];
@@ -408,11 +584,19 @@ function buildDeck({ idx, P, terrain, deckY, group, decks, colliders }) {
     const yaw = Math.atan2(-p.tz, p.tx);
     // The last posts at each end are wing walls on dry land; leaving them
     // solid turns the approach into a gate the car has to thread.
-    const endish = p.s < 9 || (span - p.s) < 9;
     for (const s of [1, -1]) {
       const px = p.x + p.nx * hw * s, pz = p.z + p.nz * hw * s;
       kit.box(0.30, 1.35, 0.30, px, p.y + 0.55, pz, yaw, TIMBER.post);
-      if (!endish) colliders.push({ x: px, z: pz, r: 0.22 });
+      // NO COLLIDER ON THE RAILING.
+      //
+      // game.js pushes the car out of a collider at (r + 1.4) m, so a post at
+      // the deck edge eats 1.6 m of carriageway on each side — and the deck is
+      // only a metre wider than the road it carries. Measured over ninety
+      // seconds of autopilot: the car clipped a post at the abutment, was
+      // shoved sideways, re-entered, clipped again — twelve deck entries in one
+      // lap and a finishing speed of 32 km/h. The brief for this round is that
+      // a car on the centreline crosses cleanly, and the cheapest way to
+      // guarantee that is for there to be nothing on the bridge to hit.
     }
   }
   // Two horizontal rails, laid per plank segment so they follow the curve.
@@ -436,22 +620,26 @@ function buildDeck({ idx, P, terrain, deckY, group, decks, colliders }) {
     const p = pts[k];
     sincePy += Math.hypot(p.x - pts[k - 1].x, p.z - pts[k - 1].z);
     if (sincePy < PYLON_GAP) continue;
-    const bed = p.yT;
-    const drop = p.y - THICK - bed;
+    const drop = p.y - THICK - p.yT;
     if (drop < 1.4) continue;                 // too near the abutment to bother
     sincePy = 0;
     const yaw = Math.atan2(-p.tz, p.tx);
-    const foot = bed - 1.1;
-    const h = p.y - THICK - foot;
     // Piles sit just PROUD of the deck edge. Tucked inboard they are invisible
     // from a camera looking 58 degrees down — and a bridge whose supports you
-    // cannot see is a plank floating on nothing.
+    // cannot see is a plank floating on nothing. Out there they are also over
+    // OPEN WATER rather than over the causeway, so each pile is footed on the
+    // bed under its own position, not on the centreline: that is what makes the
+    // outer legs longer than the inner ones and the trestle read as standing IN
+    // the lake.
     for (const s of [1, -1]) {
-      const off = (hw + 0.34) * s;
-      kit.box(0.78, h, 0.78, p.x + p.nx * off, foot + h / 2, p.z + p.nz * off, yaw, TIMBER.pile);
-      // inner pile of the trestle, raked in a little
-      const off2 = hw * 0.42 * s;
-      kit.box(0.52, h, 0.52, p.x + p.nx * off2, foot + h / 2, p.z + p.nz * off2, yaw, TIMBER.pile);
+      for (const off of [(hw + 0.34) * s, hw * 0.45 * s]) {
+        const px = p.x + p.nx * off, pz = p.z + p.nz * off;
+        const foot = terrain.heightAt(px, pz) - 1.1;
+        const h = p.y - THICK - foot;
+        if (h < 1.0) continue;
+        const w = Math.abs(off) > hw ? 0.78 : 0.52;
+        kit.box(w, h, w, px, foot + h / 2, pz, yaw, TIMBER.pile);
+      }
     }
     // cross beam tying the trestle together, hung below the deck so it reads
     // as a separate member from above.
