@@ -28,6 +28,13 @@ const BASE = {
   gamma: [1.0, 1.0, 1.0],
   gain: [1.0, 1.0, 1.0],
   contrast: 1.08,
+  // Value the contrast rotates about. 0.5 = mid grey (the photographic
+  // default); lower it onto the picture's own key value when the subject lives
+  // well below mid grey, as a meadow does.
+  contrastPivot: 0.5,
+  // Display-space knee. Everything above it is compressed toward, but never
+  // onto, white AFTER the grade has had its way. Protects the dust plume.
+  hiKnee: 0.88,
   saturation: 1.12,
   shadowTint: [1, 1, 1],
   highTint: [1, 1, 1],
@@ -43,6 +50,16 @@ const BASE = {
   dof: 0.55,
   vignette: 0.20,
   ca: 0.0016,
+  // Broken light. See MEADOW_NOISE in post.js. `dapple` is the downward swing
+  // of the light term, `dappleWarm` the warm/cool split across the lobes and
+  // `dappleMetres` the lobe size in world metres. 0 = off.
+  dapple: 0.0,
+  dappleWarm: 0.0,
+  dappleFine: 0.0,
+  dappleMetres: 34,
+  // Screen-space dither. Its first job is to kill banding in the sky ramp; a
+  // little more than that also gives the flat facets some tooth.
+  grain: 0.0022,
 };
 
 export const GRADES = {
@@ -54,13 +71,24 @@ export const GRADES = {
   // The AO tint below is that ratio; it is why contact shading reads as cool
   // green rather than as dirt.
   //
-  // The grade is deliberately CLOSE TO NEUTRAL. The palette anchors already are
-  // the target colours (grass #5faa3c-#7cc24a, road #c9a45f), and the rig lands
-  // a lit horizontal surface at ~0.95x its albedo, so a lit meadow arrives at
-  // the composite already the right colour. Verified by hand: albedo #7cc24a
-  // through this grade comes out #76c73e. A heavier grade only pushed it into
-  // acid green. Saturation and richness are the world's job; the grade's job is
-  // warmth, a shadow that is cool rather than black, and no clipped highlight.
+  // ROUND 2 held that the grade should be CLOSE TO NEUTRAL, because the palette
+  // anchors are already the target colours and a heavier grade pushed the meadow
+  // into acid green. Round 3 measured what "close to neutral" actually produced
+  // (tools/measure.mjs, against the reference):
+  //
+  //                        reference    round 2      round 3
+  //   meadow luma p05/p95   42 / 133    55 / 111     45 / 121
+  //   meadow tonal spread   91          52           74
+  //   frame mean R/G        0.885       0.840        0.899
+  //   frame mean saturation 0.754       0.718        0.741
+  //
+  // So round 2 was right that a heavier grade is not the answer, and wrong about
+  // which knob. Turning saturation up made it acid because saturation is the
+  // wrong axis: the reference is not more saturated, it has a WIDER meadow and a
+  // WARMER key. What actually moved it was a contrast pivoted on the meadow's own
+  // median instead of on mid grey, a gain that fixes the red/green ratio at the
+  // root, a deeper shadow floor in the rig, and low-frequency broken light. The
+  // saturation knob is still where round 2 left it, near 1.05.
   'Alpine Meadows': {
     exposure: 1.0,
     shoulder: 0.82,
@@ -68,28 +96,46 @@ export const GRADES = {
     // NO CRUSHED BLACKS. Shadow is a coloured step, so the lift is small but
     // blue-weighted: it opens the darks and tints them toward the sky instead
     // of letting them collapse to neutral.
-    lift: [0.012, 0.020, 0.040],
+    lift: [0.028, 0.038, 0.066],
     gamma: [1.0, 1.0, 1.0],
-    gain: [1.0, 1.0, 1.0],
-    contrast: 1.10,
-    saturation: 1.08,
-    shadowTint: [0.93, 0.99, 1.10],
-    highTint: [1.06, 1.015, 0.93],
+    // MEASURED: the reference frame's mean is R/G = 0.885 and its lit grass is
+    // R/G = 0.868 — a yellow-green. Ours came out 0.840 and 0.756: the same
+    // value, but a PURE green. That single ratio is most of what reads as
+    // "ours is more olive / less alpine". The gain fixes the hue at the root
+    // rather than asking the split-tone to do it in the top third of the range,
+    // where a meadow does not live.
+    gain: [1.025, 0.995, 0.955],
+    contrast: 1.30,
+    contrastPivot: 0.325,
+    hiKnee: 0.72,
+    saturation: 1.065,
+    shadowTint: [0.90, 0.955, 1.17],
+    highTint: [1.055, 1.012, 0.92],
     // Objects are grounded by a soft dark pool at their base in every
     // reference frame — that pool is this, not the cast shadow.
     ao: 0.76,
-    // Measured against the AO debug buffer (post.u.uDebug = 1): at 1.15 the
-    // buffer was almost pure white — nothing was grounded. 2.4 gives the soft
-    // dark pool the references have at the base of every tree, rock and post.
-    aoIntensity: 2.4,
-    aoTint: [0.38, 0.55, 0.52],
-    bloom: 0.15,
-    bloomWide: 0.09,
+    // Measured against the AO debug buffer (?debugpost=ao): at 1.15 the buffer
+    // was almost pure white — nothing was grounded. 2.4 gave the soft dark pool
+    // the references have at the base of every tree, rock and post. 3.6 is that
+    // same pool re-levelled after the radius-scaled height gate in post.js
+    // stopped counting terrain creases as occluders.
+    aoIntensity: 3.6,
+    aoTint: [0.36, 0.48, 0.60],
+    bloom: 0.10,
+    bloomWide: 0.06,
     bloomThreshold: 0.88,
     // The reference is sharp corner to corner: only a whisper of far softening.
     dof: 0.20,
-    vignette: 0.20,
+    vignette: 0.26,
     ca: 0.0011,
+    // Alpine is the meadow biome, so it is the one that most needs the field
+    // broken up. Measured target spread 91 luma vs our flat 54 — see the essay
+    // above MEADOW_NOISE in post.js.
+    dapple: 0.22,
+    dappleWarm: 0.06,
+    dappleFine: 0.19,
+    grain: 0.006,
+    dappleMetres: 24,
   },
 
   'Ember Woodland': {

@@ -27,12 +27,23 @@ import { GRADES, gradeFor } from './grade.js';
  *                a depth-of-field that softens only the distance (diorama cue).
  *   4. bloom  -> quarter-res bright pass, two widths, restrained.
  *   5. final  -> box-resolve of the supersampled buffer (crisp facet edges, no
- *                FXAA mush) + AO + DoF + bloom + tone map + per-biome grade +
- *                vignette + chromatic falloff + dither, straight to the canvas.
+ *                FXAA mush) + DoF + BROKEN LIGHT + AO + tone map + bloom +
+ *                per-biome grade + display-space highlight knee + vignette +
+ *                chromatic falloff + dither, straight to the canvas.
  *
  * Everything preserves hard facet edges: no blur is ever applied to the
  * in-focus image, and the only spatial filter on it is a box downsample of a
  * higher-resolution render.
+ *
+ * WHAT IS SCENE-REFERRED AND WHAT IS DISPLAY-REFERRED
+ * ---------------------------------------------------
+ * Everything before `tonemap()` in the composite is LINEAR RADIANCE, and that is
+ * where anything pretending to be light belongs — the broken-light term and the
+ * AO both act there, because a cloud shadow and an occluded corner are things
+ * that happen to light, not paint applied afterwards. Everything after it is
+ * 0-1 DISPLAY values: bloom, the grade, the highlight knee and the vignette.
+ * The knee exists because the grade can (and does) push values the scene-referred
+ * shoulder already handled back up toward white; see the comment on it.
  */
 
 const TRI_VERT = /* glsl */ `
@@ -77,6 +88,7 @@ const AO_FRAG = /* glsl */ `
   uniform float uR2;          // wide cavity radius (metres)
   uniform float uIntensity;
   uniform float uBias;
+  uniform float uHBias;       // metres above the tangent plane, at the TIGHT radius
   uniform float uFade;        // distance at which AO stops mattering
   uniform float uSeed;
 
@@ -88,15 +100,35 @@ const AO_FRAG = /* glsl */ `
    * than the SAO estimator, but this is art direction, not a light transport
    * solver — and a knob that means something is worth more than one that does not.
    */
-  float occlude(vec3 P, vec3 N, vec3 S, float R) {
+  float occlude(vec3 P, vec3 N, vec3 S, float R, float hb) {
     vec3 V = S - P;
     float d = length(V);
     if (d < 1e-4) return 0.0;
-    float ndv = dot(N, V) / d;
-    // Angle bias, not a depth bias: anything within ~asin(uBias) of the tangent
-    // plane is the terrain's own faceting, not an occluder. Constant biases
-    // leave long streaks along every facet crease.
-    return smoothstep(uBias, uBias + 0.30, ndv) * (1.0 - smoothstep(R * 0.5, R, d));
+    float h = dot(N, V);        // METRES above the tangent plane
+    float ndv = h / d;
+    // TWO rejections, and the second one is the important one.
+    //
+    // The angle bias alone could not tell a terrain crease from an occluder.
+    // Our heightfield facets are ~15 m across and the depth-derived normal is
+    // simply WRONG along every crease between them, so each crease produced a
+    // constant small positive ndv and AO drew a dark line along it: a ladder of
+    // horizontal streaks across the whole meadow, plainly visible in
+    // ?debugpost=ao. Raising the angle bias far enough to reject them (0.22)
+    // also rejected the contact pools at the base of every tree.
+    //
+    // Height above the tangent plane separates them cleanly and in a unit that
+    // means something. So keep the angle bias small and gate on ABSOLUTE HEIGHT.
+    //
+    // The gate SCALES WITH THE RADIUS, and that is the whole trick. A crease
+    // sampled 2 m away lifts a sample by centimetres; the SAME crease sampled
+    // 8 m away lifts it by more than a metre, which is why the wide cavity
+    // radius was drawing all the streaks while the tight contact radius was
+    // innocent. One flat threshold cannot serve both. The caller passes the
+    // gate for its own radius: ~0.4 m for the 2.2 m contact ring, ~1.8 m for
+    // the 8 m cavity ring — and a tree, boulder or post still clears both.
+    return smoothstep(uBias, uBias + 0.30, ndv)
+         * smoothstep(hb, hb * 2.4, h)
+         * (1.0 - smoothstep(R * 0.5, R, d));
   }
 
   void main() {
@@ -133,8 +165,8 @@ const AO_FRAG = /* glsl */ `
       vec2 u2 = vUv + dir * rad2;
       float d1 = rawDepth(u1);
       float d2 = rawDepth(u2);
-      if (d1 < 0.9999) s1 += occlude(P, N, viewPos(u1, d1), uR1);
-      if (d2 < 0.9999) s2 += occlude(P, N, viewPos(u2, d2), uR2);
+      if (d1 < 0.9999) s1 += occlude(P, N, viewPos(u1, d1), uR1, uHBias);
+      if (d2 < 0.9999) s2 += occlude(P, N, viewPos(u2, d2), uR2, uHBias * (uR2 / uR1));
     }
 
     float inv = 1.0 / float(SAMPLES);
@@ -254,12 +286,70 @@ const BRIGHT_FRAG = /* glsl */ `
   }
 `;
 
+/**
+ * BROKEN LIGHT — the thing that separates a painted meadow from a rendered one.
+ *
+ * MEASURED off ref/target_01 (tools/measure.mjs): the reference's meadow runs
+ * p05 42 / p50 78 / p95 133 in luma — a spread of 91. Ours ran 55 / 85 / 109, a
+ * spread of 54. The reference is not more contrasty in the grade; it has broad,
+ * soft, LOW-FREQUENCY variation across the field — cloud shadow, dappled sun,
+ * grass that is greener in the hollows and drier on the crowns. Contrast cannot
+ * manufacture that: contrast expands what is already there, and what was there
+ * was one flat value.
+ *
+ * So the composite reconstructs WORLD XZ from the depth buffer and modulates the
+ * incident light by two octaves of value noise anchored to the world, not to the
+ * screen. It is a light term, applied in linear before the tone map, exactly
+ * where a real cloud shadow would act. Because it is world-anchored it does not
+ * crawl when the camera moves, and because it is applied before the tone map it
+ * cannot clip.
+ *
+ * The bright lobes also go WARM and the dark lobes COOL — the reference's field
+ * is yellow-green where the sun hits and blue-green in the hollows, and that
+ * warm/cool split across the field is most of why it reads as painted.
+ */
+const MEADOW_NOISE = /* glsl */ `
+  uniform mat4  uInvView;       // camera.matrixWorld
+  uniform float uDappleScale;   // cycles per metre
+  uniform float uDapple;        // amplitude of the value swing
+  uniform float uDappleWarm;    // amplitude of the warm/cool swing
+  uniform float uDappleFine;    // amplitude of the brush-scale octave
+
+  float hash21(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p + 34.345);
+    return fract(p.x * p.y);
+  }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d2 = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d2, f.x), f.y);
+  }
+  /**
+   * -1..1. Three octaves, lightly domain-warped so the lobes are not on a grid.
+   * The warp is deliberately SMALL (0.45 of a cell): at 1.7 cells it smeared the
+   * whole field into one gradient across the frame, which just relit the picture
+   * instead of breaking it up.
+   */
+  float dappleField(vec2 w) {
+    vec2 warp = (vec2(vnoise(w * 0.7 + 5.2), vnoise(w * 0.7 + 17.7)) - 0.5) * 0.45;
+    vec2 p = w + warp;
+    float n = vnoise(p) * 0.50 + vnoise(p * 2.17 + 9.1) * 0.32 + vnoise(p * 4.70 + 3.3) * 0.18;
+    return n * 2.0 - 1.0;
+  }
+`;
+
 // --------------------------------------------------------------- composite
 const COMPOSITE_FRAG = /* glsl */ `
   precision highp float;
   varying vec2 vUv;
   ${DEPTH_UTIL}
   ${TONEMAP}
+  ${MEADOW_NOISE}
   uniform sampler2D tScene;
   uniform sampler2D tAO;
   uniform sampler2D tBloom;
@@ -272,6 +362,8 @@ const COMPOSITE_FRAG = /* glsl */ `
   uniform vec3  uGamma;
   uniform vec3  uGain;
   uniform float uContrast;
+  uniform float uContrastPivot;
+  uniform float uHiKnee;
   uniform float uSaturation;
   uniform vec3  uShadowTint;
   uniform vec3  uHighTint;
@@ -329,6 +421,35 @@ const COMPOSITE_FRAG = /* glsl */ `
       col = mix(col, texture2D(tFar, vUv).rgb, uDofAmount * 0.55);
     }
 
+    // ---- broken light (linear, world-anchored — see MEADOW_NOISE above)
+    if (uDapple > 0.0001 && d < 0.9999) {
+      vec3 vp = viewPos(vUv, d);
+      vec3 wp = (uInvView * vec4(vp, 1.0)).xyz;
+      float n = dappleField(wp.xz * uDappleScale);
+      // SYMMETRIC about 1.0. An asymmetric swing (tried first: 1-a .. 1+0.55a)
+      // dimmed the whole frame by 0.225a and cost as much brightness at the top
+      // of the range as it bought darkness at the bottom — the field got no
+      // wider, only lower. smoothstep has mean 0.5 over a uniform input, so this
+      // form leaves the average exposure of the frame exactly untouched and
+      // spends the entire amplitude on RANGE.
+      float v = smoothstep(0.0, 1.0, n * 0.5 + 0.5);
+      float shade = 1.0 + uDapple * (2.0 * v - 1.0);
+      vec3 warm = vec3(1.0 + uDappleWarm, 1.0 + uDappleWarm * 0.22, 1.0 - uDappleWarm * 0.85);
+      vec3 cool = vec3(1.0 - uDappleWarm * 0.85, 1.0, 1.0 + uDappleWarm * 1.05);
+      col *= shade * mix(cool, warm, v);
+
+      // BRUSH SCALE. The lobes above are 24 m across and do nothing about the
+      // real "rendered, not painted" tell, which is that a 15 m terrain facet is
+      // one flat value from edge to edge. This octave is ~1.6 m — about 30 px at
+      // the focus — so it breaks the facet into something with tooth, the way the
+      // reference's grass does, without softening a single silhouette.
+      if (uDappleFine > 0.0001) {
+        float f = vnoise(wp.xz * (uDappleScale * 15.0)) - 0.5;
+        f += (vnoise(wp.xz * (uDappleScale * 37.0) + 4.4) - 0.5) * 0.55;
+        col *= 1.0 + f * uDappleFine;
+      }
+    }
+
     // ---- contact shading (in linear: occlusion is a light term, not a paint)
     float ao = texture2D(tAO, vUv).r;
     float occ = (1.0 - ao) * uAOStrength;
@@ -346,13 +467,43 @@ const COMPOSITE_FRAG = /* glsl */ `
 
     col = col * uGain + uLift * (1.0 - col);
     col = pow(max(col, 0.0), uGamma);
-    col = (col - 0.5) * uContrast + 0.5;
+    // CONTRAST PIVOTS ON THE PICTURE'S KEY VALUE, NOT ON MID-GREY.
+    // Measured: our meadow and target_01's meadow agree almost exactly at the
+    // median (luma 83 vs 78) and diverge only above it (p95 110 vs 133). A
+    // contrast pivoted at 0.5 sits ABOVE the whole meadow distribution, so every
+    // green in the frame gets darker and the picture loses the sunlit end
+    // instead of gaining it. Pivoting at the meadow's own median leaves the mid
+    // where it already matched and spends the contrast on the two tails.
+    col = (col - uContrastPivot) * uContrast + uContrastPivot;
     float l = dot(max(col, 0.0), LUMA);
     col = mix(vec3(l), col, uSaturation);
     col *= mix(uShadowTint, uHighTint, smoothstep(0.05, 0.95, l));
 
+    // ---- highlight roll-off, in DISPLAY space, after the grade.
+    // The scene-referred shoulder above cannot protect the top end from what the
+    // grade does to it: a contrast pivoted at 0.33 multiplies everything above
+    // the pivot, and the brightest thing in frame is the dust plume, which is
+    // exactly what must NOT grow. Same peak-channel compression as tonemap(), so
+    // it desaturates nothing — it just stops the grade printing paper white.
+    {
+      float pk = max(col.r, max(col.g, col.b));
+      if (pk > uHiKnee) {
+        float span = max(1.0 - uHiKnee, 1e-3);
+        float t = (pk - uHiKnee) / span;
+        col *= (uHiKnee + span * (t / (1.0 + t))) / pk;
+      }
+    }
+
     // ---- vignette
-    float v = 1.0 - uVignette * smoothstep(uVignetteSoft, 1.30, r2 * 1.9);
+    //
+    // MEASURED off target_01: its twelve row means run 80 / 113 / 78 top to
+    // bottom and its eight column means 77 / 119 / 73 — the reference falls off
+    // by about 30% at every edge, not just the corners. Ours fell off 10%,
+    // because the old curve did not begin until r2 * 1.9 passed 0.18, and the
+    // TOP AND BOTTOM CENTRE of a 16:9 frame only ever reach 0.475. Starting the
+    // ramp at 0.05 and ending it at 1.10 puts real falloff on all four edges
+    // while leaving the middle third untouched.
+    float v = 1.0 - uVignette * smoothstep(uVignetteSoft, 1.10, r2 * 1.9);
     col *= v;
     // Barely desaturate the corners. The references darken at the edge but stay
     // fully saturated there; a filmic edge-desaturation reads as a photograph,
@@ -435,8 +586,15 @@ export function createPostFX(ctx) {
   rtScene.depthTexture.type = THREE.UnsignedIntType;
   rtScene.texture.name = 'post.scene';
 
-  const rtAO = new THREE.WebGLRenderTarget(2, 2, { ...colorOpts, type: THREE.UnsignedByteType });
-  const rtAOb = new THREE.WebGLRenderTarget(2, 2, { ...colorOpts, type: THREE.UnsignedByteType });
+  // HALF FLOAT, NOT UNSIGNED BYTE. The green channel carries dist/far for the
+  // bilateral blur's edge test, and at far = 1500 the whole visible ground plane
+  // spans dist 115..175 — that is 0.077..0.117, i.e. TEN distinct 8-bit levels
+  // across the frame. The blur's weight, exp(-|dd| * 140), then flipped by ~0.58
+  // at every level boundary, and because depth varies with screen Y on a ground
+  // plane the boundaries were horizontal: ten grey stripes across every meadow,
+  // clearly visible in ?debugpost=ao. Half float makes the edge test exact.
+  const rtAO = new THREE.WebGLRenderTarget(2, 2, { ...colorOpts, type: THREE.HalfFloatType });
+  const rtAOb = new THREE.WebGLRenderTarget(2, 2, { ...colorOpts, type: THREE.HalfFloatType });
   const rtHalf = new THREE.WebGLRenderTarget(2, 2, colorOpts);
   const rtHalfB = new THREE.WebGLRenderTarget(2, 2, colorOpts);
   const rtQ = new THREE.WebGLRenderTarget(2, 2, colorOpts);
@@ -460,6 +618,7 @@ export function createPostFX(ctx) {
     uR2: { value: 8.0 },
     uIntensity: { value: 2.4 },
     uBias: { value: 0.10 },
+    uHBias: { value: 0.40 },
     uFade: { value: 460 },
     uSeed: { value: 0 },
   });
@@ -507,6 +666,8 @@ export function createPostFX(ctx) {
     uGamma: { value: new THREE.Vector3(1, 1, 1) },
     uGain: { value: new THREE.Vector3(1, 1, 1) },
     uContrast: { value: 1 },
+    uContrastPivot: { value: 0.5 },
+    uHiKnee: { value: 0.88 },
     uSaturation: { value: 1 },
     uShadowTint: { value: new THREE.Vector3(1, 1, 1) },
     uHighTint: { value: new THREE.Vector3(1, 1, 1) },
@@ -518,9 +679,16 @@ export function createPostFX(ctx) {
     uDofFar: { value: 900 },
     uDofAmount: { value: 0.7 },
     uVignette: { value: 0.28 },
-    uVignetteSoft: { value: 0.18 },
+    uVignetteSoft: { value: 0.05 },
     uCA: { value: 0.0016 },
     uGrain: { value: 0.0022 },
+    uInvView: { value: new THREE.Matrix4() },
+    // 1/34 cycles per metre => lobes ~34 m across, about a quarter of the
+    // frame's 83 m width at the focus. Matches the patch size in target_01.
+    uDappleScale: { value: 1 / 34 },
+    uDapple: { value: 0.0 },
+    uDappleWarm: { value: 0.0 },
+    uDappleFine: { value: 0.0 },
     uDebug: { value: DEBUG },
   });
 
@@ -574,6 +742,8 @@ export function createPostFX(ctx) {
       u.uGamma.value.fromArray(g.gamma);
       u.uGain.value.fromArray(g.gain);
       u.uContrast.value = g.contrast;
+      u.uContrastPivot.value = g.contrastPivot ?? 0.5;
+      u.uHiKnee.value = g.hiKnee ?? 0.88;
       u.uSaturation.value = g.saturation;
       u.uShadowTint.value.fromArray(g.shadowTint);
       u.uHighTint.value.fromArray(g.highTint);
@@ -584,6 +754,11 @@ export function createPostFX(ctx) {
       u.uDofAmount.value = g.dof;
       u.uVignette.value = g.vignette;
       u.uCA.value = g.ca;
+      u.uDapple.value = g.dapple ?? 0;
+      u.uDappleWarm.value = g.dappleWarm ?? 0;
+      u.uDappleFine.value = g.dappleFine ?? 0;
+      u.uGrain.value = g.grain ?? 0.0022;
+      u.uDappleScale.value = 1 / (g.dappleMetres ?? 34);
       bright.u.uThreshold.value = g.bloomThreshold;
       aoPass.u.uIntensity.value = g.aoIntensity;
     },
@@ -618,6 +793,8 @@ export function createPostFX(ctx) {
       projU.value.set(tanHalf * cam.aspect, tanHalf);
       nearU.value = cam.near;
       farU.value = cam.far;
+      // World reconstruction for the broken-light term: view -> world.
+      composite.u.uInvView.value.copy(cam.matrixWorld);
 
       // -------------------------------------------------------------- 2. AO
       aoPass.u.uAspect.value.set(1 / cam.aspect, 1);

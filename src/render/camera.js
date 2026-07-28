@@ -13,12 +13,24 @@ import * as THREE from 'three';
  *   tilt       48-55 deg from horizontal
  *   horizon    NOT IN FRAME — ground fills the picture edge to edge
  *
- * CALIBRATION (projected the car's bounding box, not eyeballed): at 16:9 with
- * the capture-time fov of ~30.4 (baseFov 26 + the feel layer's speed boost),
- * distance 136 gave 3.31% and pitch 61 deg. Frame width at the focus point is
- * 2*tan(fovx/2)*distance, so the car's share is inversely proportional to
- * distance: 136 -> 90 lands it at ~5.0%. Re-measure with
- * scratchpad measure.js if you touch fov, aspect or speedWiden.
+ * CALIBRATION — `node tools/probe.mjs hero_alpine` projects the car's actual
+ * vertex cloud through the live capture-time camera and prints its NDC box.
+ * Do not eyeball this; run the probe.
+ *
+ *   round 2, distance 90: car read 4.40% of frame width — UNDER the band.
+ *   round 3, distance 78: car reads 5.08%. That is where it sits now.
+ *
+ * Frame width at the focus point is 2*tan(fovx/2)*distance, so the car's share
+ * is inversely proportional to distance. Re-run the probe if you touch fov,
+ * aspect or speedWiden.
+ *
+ * RECESSION is independent of distance — it is sin(pitch+fovY/2)/sin(pitch-fovY/2)
+ * only. At pitch 52 / fov 29 that is 1.51x, i.e. the top of frame is half again
+ * as deep as the bottom. Measured the same ratio off target_01 by comparing
+ * conifer heights in the top and bottom eighths of the frame (175px vs 230px
+ * over three quarters of the frame height), so pitch and fov are RIGHT and the
+ * only framing error was scale. Do not widen the lens to "get more perspective":
+ * it would overshoot the reference and turn the diorama into a fisheye.
  *
  * MOTION DOCTRINE: unhurried. The focus point rides a critically-damped spring,
  * not a lerp, so it never snaps and never overshoots; the velocity lead and the
@@ -31,14 +43,14 @@ export class ChaseCamera {
     this.baseFov = 26;
     // Near/far kept tight: post.js reconstructs view-space position from the
     // depth buffer, and precision there is worth more than headroom.
-    // Near pulled in from 24 now that the camera sits at distance 90: a hillside
+    // Near pulled in from 24 now that the camera sits at distance 78: a hillside
     // rising toward the lens must not clip. Far is still tight because post.js
     // reconstructs view-space position from this depth buffer.
     this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 14, 1500);
 
     // --- tuning ---
     this.pitch = THREE.MathUtils.degToRad(52);
-    this.distance = 90;
+    this.distance = 78;
     this.height = 0;              // extra vertical offset beyond pitch
     this.yaw = Math.PI * 0.25;    // world-fixed heading (art of rally does NOT spin with the car)
     this.followYaw = 0.0;         // 0 = fully world-fixed, 1 = fully car-relative

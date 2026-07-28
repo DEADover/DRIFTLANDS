@@ -99,7 +99,16 @@ function shadowFloor(p) {
   const amb = p.ambientIntensity ?? 1;
   const share = amb / (sun + amb); // 0.22 .. 0.38 across our palettes
   // Compress into a designed band: shadow must be a clean step, never a hole.
-  return THREE.MathUtils.clamp(0.34 + 0.50 * share, 0.42, 0.54);
+  //
+  // ROUND 3, MEASURED (tools/measure.mjs greenBands): shadowed grass in
+  // target_01 sits at #193217 and lit grass at #7d900c. Ours sat at #184917 —
+  // the reds and blues matched to within a value or two, but the GREEN in
+  // shadow was 73 against the reference's 50. The step down into shadow was
+  // simply not deep enough, and a shallow step is most of why the meadow read
+  // flat. Alpine's share is 0.229, so the old curve handed it 0.455; this one
+  // hands it 0.331. Still a clean coloured step, never a hole: measured darkPct
+  // (fraction of the frame below luma 18) stays at 0.16%.
+  return THREE.MathUtils.clamp(0.235 + 0.42 * share, 0.30, 0.48);
 }
 
 const _c = new THREE.Color();
@@ -187,7 +196,13 @@ export class LightRig {
     // did) is exactly how you get the grey shadows the brief rejects. Keep most
     // of the palette's sky/ground colour; `tint` still normalises luminance, so
     // this changes hue only and cannot darken the picture.
-    const desat = THREE.MathUtils.lerp(0.14, 0.34, THREE.MathUtils.clamp(this._el / 0.8, 0, 1));
+    // ROUND 3, MEASURED: in target_01 the shadow/lit ratio of meadow grass is
+    // (0.20, 0.35, 1.92) — the blue channel is nearly TWICE as strong in shadow
+    // as in light, because what fills a shadow is sky. Ours came out
+    // (0.18, 0.45, 0.96): too much surviving green, and no blue lift at all.
+    // Pulling the ambient a third less toward white keeps the palette's sky hue
+    // in the fill, which is the only thing that can produce that blue ratio.
+    const desat = THREE.MathUtils.lerp(0.10, 0.23, THREE.MathUtils.clamp(this._el / 0.8, 0, 1));
     this.hemi.color.copy(tint(p.ambientSky, desat));
     this.hemi.groundColor.copy(tint(p.ambientGround, desat + 0.06)).multiplyScalar(0.85);
     this.hemi.intensity = PI * ambTerm;
@@ -203,8 +218,8 @@ export class LightRig {
     // Shadow box. Now that the sun is held in a short-shadow band this no longer
     // has to grow for a raking dusk sun, so it stays tight and the map stays
     // sharp where it matters.
-    // Sized for what the camera can actually see: at distance 90 / 52 deg the
-    // frame covers roughly 95 m across at the focus and ~150 m at the top edge,
+    // Sized for what the camera can actually see: at distance 78 / 52 deg the
+    // frame covers roughly 83 m across at the focus and ~130 m at the top edge,
     // so a +-80 m box (biased up-sun in `follow`) covers it with room to spare.
     // Tighter box = 0.039 m per texel = contact points that stay attached.
     this._half = THREE.MathUtils.clamp(72 + 9 / Math.tan(this._el), 78, 120);
