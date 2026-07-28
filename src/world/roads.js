@@ -68,9 +68,13 @@ const GRIP = {
   ice: 0.40,
 };
 
-/** Per-biome road character: width, verge, and the two surfaces it alternates. */
+/** Per-biome road character: width, verge, and the two surfaces it alternates.
+ *
+ * ART_DIRECTION §3: the carriageway is 12-20 m, three to five car lengths. The
+ * alpine reference has no tarmac anywhere in frame — it is a dirt rally road
+ * from edge to edge, so alpine alternates gravel and dirt, never tarmac. */
 const STYLE = {
-  alpine: { width: 8.0, verge: 1.05, kinds: ['tarmac', 'gravel'], spurs: 2 },
+  alpine: { width: 15.0, verge: 1.5, kinds: ['gravel', 'dirt'], spurs: 2 },
   autumn: { width: 7.4, verge: 1.20, kinds: ['gravel', 'dirt'], spurs: 2 },
   desert: { width: 8.6, verge: 1.60, kinds: ['dirt', 'sand'], spurs: 2 },
   coast: { width: 7.8, verge: 1.05, kinds: ['tarmac', 'gravel'], spurs: 1 },
@@ -78,20 +82,27 @@ const STYLE = {
 };
 
 /**
- * All road colour derives from the palette — no new hexes leak in here. The
- * surface is the palette road colour pushed toward the rock shadow (tarmac,
- * dirt) or toward the verge colour (gravel, sand, snow, ice).
+ * The measured road colour of the client references. ART_DIRECTION §6 gives
+ * `road #c9a45f` for alpine and the same warm ochre for autumn; every dirt and
+ * gravel frame in the set sits within a few percent of it. The palettes still
+ * carry a grey-brown `road` (alpine ships 0x8a7f6e), which is the single
+ * biggest reason our ribbon reads as tarmac in a meadow, so an unsurfaced road
+ * is pulled most of the way onto the spec ochre. Sealed surfaces (tarmac) and
+ * cold ones (snow, ice) stay on the palette, where grey is correct.
  */
+const OCHRE = 0xc9a45f;   // ART_DIRECTION §6 — pale warm dirt
+
 function surfaceColour(palette, kind) {
   const road = new THREE.Color(palette.road);
   const edge = new THREE.Color(palette.roadEdge);
   const dark = new THREE.Color(palette.rockShadow);
+  const ochre = new THREE.Color(OCHRE);
   const c = road.clone();
   switch (kind) {
     case 'tarmac': return c.lerp(dark, 0.55).multiplyScalar(0.70);
-    case 'gravel': return c.lerp(edge, 0.28);
-    case 'dirt': return c.lerp(dark, 0.30).multiplyScalar(0.92);
-    case 'sand': return c.lerp(edge, 0.50);
+    case 'gravel': return c.lerp(ochre, 0.94).lerp(edge, 0.12);
+    case 'dirt': return c.lerp(ochre, 0.94).multiplyScalar(0.93);
+    case 'sand': return c.lerp(ochre, 0.55).lerp(edge, 0.40);
     case 'snow': return c.lerp(edge, 0.60);
     case 'ice': return c.lerp(edge, 0.80);
     default: return c;
@@ -234,14 +245,18 @@ function terrainSlope(terrain, x, z, e = 7) {
 function makeCost(terrain, biome, wetScale = 1) {
   const wl = biome.waterLevel;
   const lim = biome.size * 0.5 - 150;
-  const hiCap = biome.id === 'desert' ? 200 : 66;
+  // THE VALLEY FLOOR IS THE SET. Alpine's terrain ramp turns pale green above
+  // ~48 m and goes to scree and snow above ~110 m; a route that climbs the bank
+  // therefore drags the whole frame off the deep green the client asked for.
+  // Holding the ceiling down near the meadow is the cheapest colour fix we own.
+  const hiCap = biome.id === 'desert' ? 200 : 30;
   return function cost(x, z) {
     const h = terrain.heightAt(x, z);
     const s = terrainSlope(terrain, x, z, 8);
     let c = s * s * 300 + s * 12;
     const sub = wl + 2.0 - h;
     if (sub > 0) c += wetScale * (85 + sub * 9.0);
-    if (h > hiCap) c += (h - hiCap) * (h - hiCap) * 0.028 + (h - hiCap) * 1.2;
+    if (h > hiCap) c += (h - hiCap) * (h - hiCap) * 0.14 + (h - hiCap) * 4.0;
     const r = Math.max(Math.abs(x), Math.abs(z));
     if (r > lim) c += (r - lim) * (r - lim) * 0.03 + (r - lim) * 4;
     return c;
@@ -893,12 +908,53 @@ function describe(ctx, pts, opts) {
   }
   const halfWs = blurRing(halfW, Math.max(1, Math.round(12 / ds)), 2, closed);
 
+  // --- terrain cross-slope, so the bench can sit ON the hill ----------------
+  // Measured across the actual carriageway rather than at a fixed probe: what
+  // matters is the drop from one edge of THIS section to the other.
+  const tiltRaw = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const d = Math.max(3, halfWs[i]);
+    const hp = terrain.heightAt(pts[i].x + f.nx[i] * d, pts[i].z + f.nz[i] * d);
+    // 0.86 of the ground's tilt: the bench still reads as engineered, but the
+    // residual it has to bridge is small enough that the carriageway does not
+    // have to be jacked up off the hill to clear its own uphill edge.
+    const hm = terrain.heightAt(pts[i].x - f.nx[i] * d, pts[i].z - f.nz[i] * d);
+    tiltRaw[i] = clamp(((hp - hm) / (2 * d)) * 0.86, -0.26, 0.26);
+  }
+  const tilt = blurRing(tiltRaw, Math.max(1, Math.round(14 / ds)), 2, closed);
+
+  // --- clearance ------------------------------------------------------------
+  // Whatever is left after tilting, the ground still pokes through: the terrain
+  // mesh is jittered and its triangles are ~10 m across, so a single high
+  // vertex halfway to the shoulder will spear the carriageway and the road
+  // appears to be chewed into pieces. Raise each section by however much its
+  // own worst poke-through needs — no more. Capped at 0.30 m because game.js
+  // still drives the car on RAW terrain height (see the note in `describe`).
+  const clearRaw = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const hw = halfWs[i];
+    let worst = 0;
+    for (const q of [-1, -0.7, -0.4, 0.4, 0.7, 1]) {
+      const u = q * hw;
+      const g = terrain.heightAt(pts[i].x + f.nx[i] * u, pts[i].z + f.nz[i] * u);
+      // plane of the section before clearance: y + tilt*u - bank*u
+      const plane = y[i] + LIFT + tilt[i] * u - bank[i] * u;
+      const poke = g + 0.10 - plane;
+      if (poke > worst) worst = poke;
+    }
+    clearRaw[i] = clamp(worst, 0, 0.15);
+  }
+  const clearance = blurRing(clearRaw, Math.max(1, Math.round(10 / ds)), 2, closed);
+
   const out = new Array(n);
   for (let i = 0; i < n; i++) {
     out[i] = {
-      x: pts[i].x, z: pts[i].z, s: s[i], y: y[i], yT: yT[i],
+      x: pts[i].x, z: pts[i].z, s: s[i],
+      y: y[i] + clearance[i] * (1 - deckMask[i]), yT: yT[i],
       tx: f.tx[i], tz: f.tz[i], nx: f.nx[i], nz: f.nz[i], k: f.k[i],
       bank: bank[i], surf: surf[i], hw: halfWs[i], verge,
+      // a bridge deck is a level structure — no ground tilt out over the water
+      tilt: deckMask[i] > 0.02 ? tilt[i] * (1 - deckMask[i]) : tilt[i],
       wet: deckMask[i] > 0.02,
     };
   }
@@ -909,10 +965,47 @@ function describe(ctx, pts, opts) {
 // Mesh building
 // ---------------------------------------------------------------------------
 
-const LIFT = 0.16;   // above the terrain profile — kills z-fighting
-const CROWN = 0.12;  // camber drop at the carriageway edge
-const GUTTER = 0.35; // dark lip between the verge and the earthworks
-const BANK_MAX = 5;  // longest batter face we will build
+const LIFT = 0.12;   // above the terrain profile — just enough to beat z-fight
+const CROWN = 0.10;  // camber drop at the carriageway edge
+const BANK_MAX = 7;  // longest batter/blend skirt we will build
+const SKIRT_MIN = 1.6; // the shoulder ALWAYS gets this much soft blend
+const RUT_DEPTH = 0.07; // how deep the wheel ruts are worn in
+
+/**
+ * THE CROSS-SECTION, as fractions of the half width. Everything about how the
+ * road reads from above is decided by this table.
+ *
+ *  · Two wheel ruts at ±0.42 of the half width. On a 15 m road that puts their
+ *    centres 3.15 m apart from the crown — a car track — and makes them 1.3 m
+ *    wide, which is what the client references show: two dark bands you can
+ *    follow round a corner. `rut` also sinks them, so the light catches them.
+ *  · A faint centre scuff between the ruts, the strip a real dirt road keeps
+ *    slightly greener/looser because nothing drives on it.
+ *  · The outermost carriageway bands are `edge`: dustier and lighter, where
+ *    grit gets thrown out of the ruts.
+ */
+const BANDS = [
+  [-1.00, -0.66, 'edge'],
+  [-0.66, -0.55, 'road'],
+  [-0.55, -0.48, 'rutSoft'],
+  [-0.48, -0.36, 'rut'],
+  [-0.36, -0.29, 'rutSoft'],
+  [-0.29, -0.20, 'road'],
+  [-0.20, 0.20, 'centre'],
+  [0.20, 0.29, 'road'],
+  [0.29, 0.36, 'rutSoft'],
+  [0.36, 0.48, 'rut'],
+  [0.48, 0.55, 'rutSoft'],
+  [0.55, 0.66, 'road'],
+  [0.66, 1.00, 'edge'],
+];
+
+/** Depth worn into the carriageway at a lateral fraction of the half width. */
+function rutDepth(uf) {
+  const a = Math.abs(uf);
+  const t = clamp(1 - Math.abs(a - 0.42) / 0.17, 0, 1);
+  return RUT_DEPTH * t * t * (3 - 2 * t);
+}
 
 /**
  * Inside a tight corner the whole cross-section converges on the centre of
@@ -927,9 +1020,20 @@ function capU(sm, u) {
   return Math.sign(u) * Math.min(Math.abs(u), lim);
 }
 
+/**
+ * Height of the carriageway at lateral offset `u`.
+ *
+ * `sm.tilt` is the fraction of the TERRAIN's own cross-slope the section
+ * carries. A fully levelled corridor is what made the ribbon read as a slab
+ * dropped on the hillside: on any cross-slope its uphill edge buried itself and
+ * its downhill edge hung in the air by hw × slope, which at a 15 m width is
+ * most of a metre. Carrying most of the ground's tilt keeps the road ON the
+ * hill; the remainder is what still reads as a cut-and-fill bench.
+ */
 function sectionY(sm, u) {
   const t = clamp(u / sm.hw, -2, 2);
-  return sm.y + LIFT - sm.bank * u - CROWN * Math.min(1, t * t);
+  return sm.y + LIFT + (sm.tilt ?? 0) * u - sm.bank * u
+    - CROWN * Math.min(1, t * t) - rutDepth(t);
 }
 
 /** March outward until the batter face meets the terrain. */
@@ -975,9 +1079,6 @@ function jitter(base, i, amt) {
   return _jc.copy(base).multiplyScalar(1 + t);
 }
 
-/** Lateral stations across the carriageway, as fractions of the half width. */
-const LANES = [-1.0, -0.64, -0.28, 0.28, 0.64, 1.0];
-
 function buildRibbonMesh(ctx, route, colours, name) {
   const { terrain } = ctx;
   const b = new Strip();
@@ -989,7 +1090,7 @@ function buildRibbonMesh(ctx, route, colours, name) {
   const bwL = new Float64Array(n), bwR = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const sm = S[i];
-    const base = sm.hw + sm.verge + GUTTER;
+    const base = sm.hw + sm.verge;
     if (sm.wet) { bwL[i] = 1.2; bwR[i] = 1.2; continue; }
     // inside a bend the earthworks must shrink or neighbouring sections overlap
     const inner = Math.max(0, 0.45 / Math.max(Math.abs(sm.k), 1e-5) - base);
@@ -997,8 +1098,28 @@ function buildRibbonMesh(ctx, route, colours, name) {
     const capR = sm.k < 0 ? inner : BANK_MAX;
     bwL[i] = Math.min(capL, batterWidth(terrain, sm.x, sm.z, sm.nx, sm.nz, base, sectionY(sm, base), 1.05, 0.75));
     bwR[i] = Math.min(capR, batterWidth(terrain, sm.x, sm.z, -sm.nx, -sm.nz, base, sectionY(sm, -base), 1.05, 0.75));
+    // The skirt is never allowed to vanish: without a few metres of soft blend
+    // the carriageway ends in a clean straight line, which is exactly the "cut
+    // out and pasted on" look the client rejected.
+    bwL[i] = Math.max(bwL[i], Math.min(capL, SKIRT_MIN));
+    bwR[i] = Math.max(bwR[i], Math.min(capR, SKIRT_MIN));
   }
   const BL = blurRing(bwL, 3, 2, closed), BR = blurRing(bwR, 3, 2, closed);
+
+  /**
+   * Ragged-edge noise. A dirt road has no surveyed boundary — grass creeps in
+   * two metres here, a wash of grit spills out three metres there.
+   *
+   * The frequency matters more than the amplitude. Per-station hash noise (the
+   * stations are 3 m apart) just dithers the edge and, from 200 m up, averages
+   * straight back out into the ruled line we are trying to get rid of. What
+   * reads at this camera height is a SLOW wander, tens of metres long, so the
+   * noise is driven by arc length and the two sides are decorrelated.
+   */
+  const ragged = (sm, side) => {
+    const q = side > 0 ? 0 : 311.7;
+    return fbm(sm.s * 0.021 + q, side * 5.3, { octaves: 2, seed: 5471 });
+  };
 
   /** A vertex on the section, with the inside-of-corner cap applied. */
   const st = (sm, u, y) => {
@@ -1006,48 +1127,116 @@ function buildRibbonMesh(ctx, route, colours, name) {
     return [sm.x + sm.nx * cu, y === undefined ? sectionY(sm, cu) : y, sm.z + sm.nz * cu];
   };
 
+  /**
+   * DRAPE. The carriageway is a designed surface — crown, camber, ruts, the
+   * bench tilt — but the ground underneath it is a jittered mesh with ~10 m
+   * triangles, and a designed plane WILL be speared by it: a high vertex two
+   * metres off the centre line pokes a green tongue straight across the road,
+   * and the ribbon reads as chopped into pieces.
+   *
+   * Rather than jacking the whole road into the air to clear its worst bump —
+   * which we cannot afford, because game.js still stands the car on RAW terrain
+   * height (`groundAt`) and any lift is a gap under the wheels — every vertex
+   * is simply not allowed to go below the ground beneath it. Where the design
+   * clears the ground, the design wins and the section is crisp; where it does
+   * not, the road drapes over the bump like a graded dirt track actually does.
+   * Nothing can poke through, and the surface never leaves the car behind.
+   */
+  const drape = (sm, u) => {
+    const cu = capU(sm, u);
+    const g = terrain.heightAt(sm.x + sm.nx * cu, sm.z + sm.nz * cu) + LIFT;
+    return Math.max(sectionY(sm, cu), g);
+  };
+
   for (let i = 0; i < last; i++) {
     const A = S[i], B = S[(i + 1) % n];
-    const road = colours[A.surf];
-    const track = colours[`${A.surf}:track`];
+    const tone = {
+      road: colours[A.surf],
+      rut: colours[`${A.surf}:rut`],
+      rutSoft: colours[`${A.surf}:rutSoft`],
+      centre: colours[`${A.surf}:centre`],
+      edge: colours[`${A.surf}:edge`],
+    };
 
-    for (let j = 0; j < LANES.length - 1; j++) {
-      const isTrack = j === 1 || j === 3;
+    // --- carriageway, ruts included ----------------------------------------
+    // The ruts wander: a slow lateral drift with arc length, so they are never
+    // two rails at a constant gauge. Half a metre of sway over ~60 m reads, at
+    // this camera height, as tracks worn by cars that took different lines.
+    const swayA = Math.sin(A.s * 0.031) * 0.05 + Math.sin(A.s * 0.011 + 2.1) * 0.035;
+    const swayB = Math.sin(B.s * 0.031) * 0.05 + Math.sin(B.s * 0.011 + 2.1) * 0.035;
+    // The outermost station of the carriageway wanders with arc length, so the
+    // ochre silhouette itself is irregular rather than a ruled line with a
+    // ragged fringe pinned to it.
+    const hemA = [1 + ragged(A, -1) * 0.13, 1 + ragged(A, 1) * 0.13];
+    const hemB = [1 + ragged(B, -1) * 0.13, 1 + ragged(B, 1) * 0.13];
+    const put = (sm, uf, sway, hem) => {
+      const a = Math.abs(uf);
+      const isRut = a > 0.19 && a < 0.7;
+      let f = uf + (isRut ? sway * Math.sign(uf) : 0);
+      if (a >= 0.999) f *= hem[uf > 0 ? 1 : 0];
+      return { u: f * sm.hw, y: drape(sm, f * sm.hw) };
+    };
+    for (let j = 0; j < BANDS.length; j++) {
+      const [u0, u1, kind] = BANDS[j];
+      const a0 = put(A, u0, swayA, hemA), a1 = put(A, u1, swayA, hemA);
+      const b0 = put(B, u0, swayB, hemB), b1 = put(B, u1, swayB, hemB);
       b.quad(
-        st(A, LANES[j] * A.hw), st(A, LANES[j + 1] * A.hw),
-        st(B, LANES[j] * B.hw), st(B, LANES[j + 1] * B.hw),
-        jitter(isTrack ? track : road, i * 7 + j, 0.055)
+        st(A, a0.u, a0.y), st(A, a1.u, a1.y),
+        st(B, b0.u, b0.y), st(B, b1.u, b1.y),
+        jitter(tone[kind], i * 11 + j, kind === 'rut' ? 0.10 : 0.075)
       );
     }
 
     for (const side of [1, -1]) {
-      const eA = side * A.hw, eB = side * B.hw;
-      const vA = side * (A.hw + A.verge), vB = side * (B.hw + B.verge);
-      const gA = side * (A.hw + A.verge + GUTTER), gB = side * (B.hw + B.verge + GUTTER);
-      const yVA = sectionY(A, capU(A, vA)) - 0.08, yVB = sectionY(B, capU(B, vB)) - 0.08;
-      const yGA = sectionY(A, capU(A, gA)) - 0.26, yGB = sectionY(B, capU(B, gB)) - 0.26;
+      // --- shoulder: carriageway edge -> soft skirt -> untouched ground ------
+      //
+      // No gutter, no kerb lip, no vertical face. The section walks outward in
+      // three steps, each one lower and greener than the last, and the LAST one
+      // lands exactly on the terrain it is standing on. That is what stops the
+      // ribbon reading as a slab: there is nowhere left for a step to hide.
+      const hmA = side > 0 ? hemA[1] : hemA[0];
+      const hmB = side > 0 ? hemB[1] : hemB[0];
+      const eA = side * A.hw * hmA, eB = side * B.hw * hmB;
+      const rgA = 1 + ragged(A, side) * 0.5;
+      const rgB = 1 + ragged(B, side) * 0.5;
+      const wA = (side > 0 ? BL[i] : BR[i]) * rgA;
+      const wB = (side > 0 ? BL[(i + 1) % n] : BR[(i + 1) % n]) * rgB;
 
-      const DBG_V = new THREE.Color(side > 0 ? 0xff0000 : 0x0000ff);
-      const DBG_G = new THREE.Color(side > 0 ? 0xffff00 : 0x00ffff);
-      b.quad(st(A, eA), st(A, vA, yVA), st(B, eB), st(B, vB, yVB), DBG_V);
-      b.quad(st(A, vA, yVA), st(A, gA, yGA), st(B, vB, yVB), st(B, gB, yGB), DBG_G);
+      const vA = side * (A.hw * hmA + A.verge * rgA);
+      const vB = side * (B.hw * hmB + B.verge * rgB);
+      const yEA = drape(A, eA), yEB = drape(B, eB);
+      // shoulder height: half way from the carriageway edge down to the ground,
+      // and never below the ground it is standing on
+      const gvA = terrain.heightAt(A.x + A.nx * capU(A, vA), A.z + A.nz * capU(A, vA));
+      const gvB = terrain.heightAt(B.x + B.nx * capU(B, vB), B.z + B.nz * capU(B, vB));
+      const yVA = Math.max(lerp(drape(A, vA), gvA + LIFT, 0.5), gvA + 0.03);
+      const yVB = Math.max(lerp(drape(B, vB), gvB + LIFT, 0.5), gvB + 0.03);
 
-      // --- earthworks: the batter face, sampled against the ground so it can
-      // never float free of it. Two facets is enough at this camera height.
-      const wA = side > 0 ? BL[i] : BR[i];
-      const wB = side > 0 ? BL[(i + 1) % n] : BR[(i + 1) % n];
-      const baseA = A.hw + A.verge + GUTTER, baseB = B.hw + B.verge + GUTTER;
-      let pA = [gA, yGA], pB = [gB, yGB];
-      let face = colours.fill;
-      for (const f of [0.5, 1.0]) {
+      b.quad(st(A, eA, yEA), st(A, vA, yVA), st(B, eB, yEB), st(B, vB, yVB),
+        jitter(colours.shoulder, i * 5 + (side > 0 ? 0 : 3), 0.09));
+
+      // The skirt: two facets marching out to meet the ground exactly. A cut
+      // face shows raw earth, a fill face is already half grassed over.
+      const baseA = A.hw * hmA + A.verge * rgA, baseB = B.hw * hmB + B.verge * rgB;
+      let pA = [vA, yVA], pB = [vB, yVB];
+      // Three facets, not two: earth, then half-grassed, then grass. The extra
+      // step is what turns the last hard tonal edge into a gradient — with two
+      // the road still ended on a visible line at this camera height.
+      for (const f of [0.42, 0.74, 1.0]) {
         const uA = side * (baseA + wA * f), uB = side * (baseB + wB * f);
         const cA = capU(A, uA), cB = capU(B, uB);
-        const tA = terrain.heightAt(A.x + A.nx * cA, A.z + A.nz * cA) - 0.30;
-        const tB = terrain.heightAt(B.x + B.nx * cB, B.z + B.nz * cB) - 0.30;
-        const yA = lerp(yGA, tA, f), yB = lerp(yGB, tB, f);
-        if (f === 0.5) face = tA > yGA + 0.35 ? colours.cut : colours.fill;
+        const tA = terrain.heightAt(A.x + A.nx * cA, A.z + A.nz * cA);
+        const tB = terrain.heightAt(B.x + B.nx * cB, B.z + B.nz * cB);
+        // land ON the ground at the last facet, a hair above so it wins the
+        // depth test against the terrain triangle underneath it
+        const yA = f === 1 ? tA + 0.02 : Math.max(lerp(yVA, tA, f * 0.95), tA + 0.03);
+        const yB = f === 1 ? tB + 0.02 : Math.max(lerp(yVB, tB, f * 0.95), tB + 0.03);
+        const cutting = tA > yEA + 0.5;
+        const earth = cutting ? colours.cut : colours.fill;
+        const face = f === 1 ? colours.blend
+          : (f > 0.5 ? earth.clone().lerp(colours.blend, 0.55) : earth);
         b.quad(st(A, pA[0], pA[1]), st(A, uA, yA), st(B, pB[0], pB[1]), st(B, uB, yB),
-          new THREE.Color(side > 0 ? (f === 1 ? 0xff00ff : 0x880088) : (f === 1 ? 0x00ff00 : 0x008800)));
+          jitter(face, i * 13 + (side > 0 ? 1 : 2) + Math.round(f * 64), 0.10));
         pA = [uA, yA]; pB = [uB, yB];
       }
     }
@@ -1057,8 +1246,11 @@ function buildRibbonMesh(ctx, route, colours, name) {
     vertexColors: true,
     flatShading: true,
     polygonOffset: true,
-    polygonOffsetFactor: -3,
-    polygonOffsetUnits: -6,
+    // Just enough to win the depth test where the skirt lies on the ground.
+    // The old -3/-6 dragged the whole ribbon toward the camera, which is half
+    // of why it looked like a separate object hovering over the meadow.
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -4,
   });
   const mesh = new THREE.Mesh(b.geometry(), mat);
   mesh.receiveShadow = true;
@@ -1102,8 +1294,125 @@ function kerbGeom() {
   return g;
 }
 
+/**
+ * POST-AND-RAIL FENCE — ART_DIRECTION §4.1, and the single most recurring piece
+ * of furniture in the client set: warm brown timber following the road's curve,
+ * sometimes both sides, running off over a hill.
+ *
+ * Built as geometry rather than instances because every bay is a different
+ * length and a different slope: the posts are planted on the TERRAIN (not on
+ * the road plane, which is up to a third of a metre above it on a bench) and
+ * the rails are stretched between consecutive post tops, so the whole line
+ * follows the ground the way a real fence does instead of floating level.
+ */
+function buildFence(strip, routes, terrain, seed, colPost, colRail) {
+  // Stylised, not scale-accurate. At a 50-degree camera 200 m up, a real 0.15 m
+  // fence post is two pixels of nothing; the references draw chunky timber that
+  // reads instantly, so the posts are ~0.34 m square and the rails 0.24 m thick.
+  const SPACING = 4.4;      // bay length
+  const POST_H = 1.55;
+  const POST_R = 0.17;      // half-width of the square post
+  const RAILS = [0.66, 1.20];
+  const RAIL_T = 0.12;      // rail half-thickness
+  const RAIL_H = 0.17;      // rail half-height
+
+  /** An axis-aligned-to-the-road box: four sides plus the top the camera sees. */
+  const box = (strip, cx, cy, cz, ax, az, halfA, halfB, halfH, col, top) => {
+    const bx = -az, bz = ax;                       // the other horizontal axis
+    const ux = ax * halfA, uz = az * halfA;
+    const vx = bx * halfB, vz = bz * halfB;
+    const c = [
+      [cx - ux - vx, cz - uz - vz], [cx + ux - vx, cz + uz - vz],
+      [cx + ux + vx, cz + uz + vz], [cx - ux + vx, cz - uz + vz],
+    ];
+    const lo = cy - halfH, hi = cy + halfH;
+    for (let q = 0; q < 4; q++) {
+      const p = c[q], r = c[(q + 1) % 4];
+      strip.quad([p[0], hi, p[1]], [p[0], lo, p[1]], [r[0], hi, r[1]], [r[0], lo, r[1]],
+        q % 2 ? col.clone().multiplyScalar(0.84) : col);
+    }
+    strip.quad([c[0][0], hi, c[0][1]], [c[1][0], hi, c[1][1]],
+      [c[3][0], hi, c[3][1]], [c[2][0], hi, c[2][1]], top);
+  };
+
+  // A fence must never run across a carriageway. Spurs leave the main route at
+  // a T, and without this check the fence line marches straight over the
+  // junction and out the other side, which reads as a bug rather than a farm.
+  const CELL = 24;
+  const grid = new Map();
+  for (const route of routes) {
+    for (const sm of route.samples) {
+      const k = `${Math.floor(sm.x / CELL)},${Math.floor(sm.z / CELL)}`;
+      let l = grid.get(k);
+      if (!l) grid.set(k, (l = []));
+      l.push(sm);
+    }
+  }
+  const overRoad = (x, z, own) => {
+    const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+    for (let u = -1; u <= 1; u++) {
+      for (let v = -1; v <= 1; v++) {
+        const l = grid.get(`${ci + u},${cj + v}`);
+        if (!l) continue;
+        for (const sm of l) {
+          if (sm === own) continue;
+          const d = Math.hypot(sm.x - x, sm.z - z);
+          if (d < sm.hw + sm.verge + 1.6) return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  for (const route of routes) {
+    const S = route.samples;
+    const n = S.length;
+    if (n < 8) continue;
+    for (const side of [1, -1]) {
+      let prev = null;
+      let since = 1e9;
+      for (let i = 0; i < n; i++) {
+        const sm = S[i];
+        since += route.ds;
+        // Long runs with long gaps, decided by arc length so the same stretch
+        // of road always carries the same fence.
+        const on = fbm(sm.s * 0.0042 + side * 17.3, seed * 0.011,
+          { octaves: 2, seed: seed + 613 }) > -0.02;
+        if (!on || sm.wet || since < SPACING) {
+          if (!on || sm.wet) prev = null;
+          continue;
+        }
+        const u = side * (sm.hw + sm.verge + 2.3);
+        const x = sm.x + sm.nx * u, z = sm.z + sm.nz * u;
+        if (overRoad(x, z, sm)) { prev = null; continue; }
+        since = 0;
+        const g = terrain.heightAt(x, z) - 0.14;   // planted, never floating
+        const cur = { x, z, g, tx: sm.tx, tz: sm.tz };
+
+        box(strip, x, g + POST_H * 0.5, z, sm.tx, sm.tz, POST_R, POST_R, POST_H * 0.5,
+          colPost, colPost.clone().multiplyScalar(1.10));
+
+        if (prev && Math.hypot(x - prev.x, z - prev.z) < SPACING * 2.4) {
+          const dx = x - prev.x, dz = z - prev.z;
+          const l = Math.hypot(dx, dz) || 1;
+          const ax = dx / l, az = dz / l;
+          const mx = (x + prev.x) * 0.5, mz = (z + prev.z) * 0.5;
+          for (const h of RAILS) {
+            // the rail follows the ground: its centre is the mean of the two
+            // post heights, so a fence on a slope steps down with the slope
+            const my = (prev.g + g) * 0.5 + h;
+            box(strip, mx, my, mz, ax, az, l * 0.5, RAIL_T, RAIL_H,
+              colRail, colRail.clone().multiplyScalar(1.08));
+          }
+        }
+        prev = cur;
+      }
+    }
+  }
+}
+
 function buildFurniture(ctx, routes, colours) {
-  const { palette, terrain } = ctx;
+  const { palette, terrain, seed } = ctx;
   const group = new THREE.Group();
   group.name = 'road-furniture';
   const colliders = [];
@@ -1111,6 +1420,7 @@ function buildFurniture(ctx, routes, colours) {
   const boards = [];
   const kerbs = [];
   const wall = new Strip();
+  const fence = new Strip();
 
   const wallCol = new THREE.Color(palette.rock).lerp(new THREE.Color(palette.rockShadow), 0.42);
   const wallTop = new THREE.Color(palette.roadEdge).lerp(new THREE.Color(palette.rock), 0.30);
@@ -1180,6 +1490,13 @@ function buildFurniture(ctx, routes, colours) {
     }
   }
 
+  // Warm timber. The palette trunk colour is the right family but too dark and
+  // too cool on its own for sunlit rails, so it is lifted toward the measured
+  // reference timber (ART_DIRECTION §6, `timber #a8763f`).
+  const timber = new THREE.Color(palette.trunk ?? 0x6b4a30).lerp(new THREE.Color(0xa8763f), 0.85);
+  buildFence(fence, routes, terrain, seed ?? 1337,
+    timber.clone().multiplyScalar(0.86), timber);
+
   const mat = new THREE.MeshLambertMaterial({ flatShading: true });
   const dummy = new THREE.Object3D();
   const acc = palette.accents ?? [0xffffff];
@@ -1210,6 +1527,17 @@ function buildFurniture(ctx, routes, colours) {
   instance(markerGeom(), posts, (i) => (i % 3 === 0 ? red : white));
   instance(kerbGeom(), kerbs, (i) => (i % 2 ? red : white), false);
   instance(boardGeom(), boards, () => boardCol);
+
+  if (fence.count) {
+    const m = new THREE.Mesh(fence.geometry(), new THREE.MeshLambertMaterial({
+      vertexColors: true, flatShading: true, side: THREE.DoubleSide,
+    }));
+    m.castShadow = true;
+    m.receiveShadow = false;
+    m.matrixAutoUpdate = false;
+    m.name = 'road-fences';
+    group.add(m);
+  }
 
   if (wall.count) {
     const m = new THREE.Mesh(wall.geometry(), new THREE.MeshLambertMaterial({
@@ -1358,19 +1686,33 @@ export function createRoadNetwork(ctx) {
   }
 
   // ---- colours ----
+  //
+  // Grass, for everything that has to disappear into the meadow. The ground
+  // ramp runs dark-low to pale-high, so the middle of it is the colour of the
+  // turf the road actually runs through.
+  const ramp = palette.ground ?? [0x5faa3c];
+  const grass = new THREE.Color(ramp[Math.min(ramp.length - 1, 2)]);
+
   const colours = {};
   for (const k of new Set(style.kinds)) {
     const c = surfaceColour(palette, k);
     colours[k] = c;
-    const track = c.clone();
-    if (k === 'tarmac') track.multiplyScalar(0.86);
-    else track.lerp(new THREE.Color(palette.roadEdge), 0.15);
-    colours[`${k}:track`] = track;
+    // A rut is the same earth, damper and packed hard: darker, a touch cooler.
+    // Not much darker, though — push it far and two crisp bands read as painted
+    // lane markings, which is the opposite of what they are for.
+    colours[`${k}:rut`] = c.clone().multiplyScalar(0.74).lerp(new THREE.Color(palette.rockShadow), 0.13);
+    // The feathered lip of the rut, so it has no hard boundary.
+    colours[`${k}:rutSoft`] = c.clone().multiplyScalar(0.90).lerp(new THREE.Color(palette.rockShadow), 0.05);
+    // The strip between the ruts nobody drives on: lighter, slightly greened.
+    colours[`${k}:centre`] = c.clone().lerp(grass, 0.10).multiplyScalar(1.03);
+    // Thrown grit and dust piles up at the edges — the palest part of the road.
+    colours[`${k}:edge`] = c.clone().lerp(new THREE.Color(palette.roadEdge), 0.26);
   }
-  colours.verge = new THREE.Color(palette.roadEdge);
-  colours.gutter = new THREE.Color(palette.roadEdge).lerp(new THREE.Color(palette.rockShadow), 0.55);
-  colours.cut = new THREE.Color(palette.rock).lerp(new THREE.Color(palette.roadEdge), 0.20);
-  colours.fill = new THREE.Color(palette.ground[0]).lerp(new THREE.Color(palette.rock), 0.42);
+  const base = colours[style.kinds[0]];
+  colours.shoulder = base.clone().lerp(grass, 0.55);
+  colours.blend = grass.clone().lerp(base, 0.07);
+  colours.cut = new THREE.Color(palette.rock).lerp(base, 0.45);
+  colours.fill = grass.clone().lerp(base, 0.30);
 
   // ---- meshes ----
   group.add(buildRibbonMesh(ctx, main, colours, 'road-main'));
@@ -1444,46 +1786,160 @@ export function createRoadNetwork(ctx) {
     if (bd > 140 * 140) ({ bi, bd } = scan(0, n));
     _lastIdx = bi;
 
-    const step = Math.max(1, Math.round(metres / Math.max(0.5, main.ds)));
     const a = S[bi];
+    const off = Math.sqrt(bd);
+
+    // RECOVERY. The lead is how far along the route the follower aims; on the
+    // road, long is smooth. Once the car has run wide, a long lead points at a
+    // spot it can already reach without ever coming back — the follower tracks
+    // the road happily from fifty metres out in the rough and the shot has no
+    // road in it. Shortening the lead in proportion to how far off we are turns
+    // the target back into "get on the road", and it costs nothing while on it.
+    const slack = Math.max(0, off - a.hw * 0.5);
+    const m = Math.max(6, metres * clamp(1 - slack / 26, 0.20, 1));
+
+    const step = Math.max(1, Math.round(m / Math.max(0.5, main.ds)));
     const t = S[(bi + step) % n];
     return {
       x: t.x, z: t.z,
       heading: Math.atan2(-t.tz, t.tx),
-      dist: Math.sqrt(bd),
-      onRoad: Math.sqrt(bd) <= a.hw + a.verge,
+      dist: off,
+      onRoad: off <= a.hw + a.verge,
       surf: a.surf,
     };
   };
 
   /**
-   * Start on the approach to the best hairpin on the circuit. A hairpin folds
-   * the ribbon back on itself, so a single 160 m-wide frame contains the
-   * approach, the apex and the exit — the road stays in shot even when the car
-   * runs wide, and it is the art-of-rally postcard composition besides.
+   * Where the postcard is taken.
+   *
+   * The old rule was "start 135 m before the TIGHTEST corner on the circuit".
+   * Two things were wrong with it. A capture runs at full throttle, so the
+   * tightest corner on the map is precisely the one the autopilot cannot hold —
+   * the car left the road at t≈5 s and spent the hero frame in the scree. And
+   * nothing in the score cared about ALTITUDE, so the shot happened wherever
+   * the tightest corner was, pale bank included.
+   *
+   * So: a fast sweeper rather than a hairpin, on the green valley floor, with
+   * plenty of road folded into the surrounding 130 m — and the whole stretch
+   * the car will actually drive over the next ~300 m has to stay down there
+   * too, because that stretch is what ends up in frame.
    */
   const spawn = () => {
     const n = S.length;
     const half = biome.size * 0.5;
-    const lead = Math.max(6, Math.round(135 / main.ds));
-    let best = -1, bestScore = -Infinity;
+    // A 10 s capture from a standstill covers ~350 m at rally pace. Judge the
+    // whole of it, and frame on where the car ENDS UP, not where it started.
+    const runN = Math.max(8, Math.round(380 / main.ds));
+    const endN = Math.max(4, Math.round(250 / main.ds));
+    // The green band of the ground ramp. Anything much above this is the pale
+    // upper alp, and the frame loses its saturation.
+    const GREEN = 34;
+    // Flat out on dirt the car needs a lot of radius, so the stretch it
+    // actually DRIVES has to be gentle or it runs wide and takes the road out
+    // of frame with it. The stretch AHEAD of where it ends up is under no such
+    // obligation — nothing drives it during the capture, it only has to be
+    // photogenic — so that is where the big sweeper is allowed to live. This is
+    // the reference composition exactly: car on the exit of one corner, the
+    // next one arcing away in front of it.
+    const R_DRIVE = 88;   // the part the car covers in the capture
+    const R_MIN = 55;     // the part it only looks at
+    // THE SHAPE THAT ENDS UP IN THE PICTURE.
+    //
+    // Scoring curvature over the whole 380 m run does not work: a stretch can
+    // bank up a perfectly respectable 1.6 rad of turning two hundred metres
+    // behind the car and still be ruler-straight in the frame. The camera sees
+    // roughly ±120 m around the car, so that is the window that has to bend.
+    // ~2 rad over 240 m is the long sweeping arc the client references are
+    // built on, and it is inside what a 62 m minimum radius can deliver.
+    const frameN = Math.max(4, Math.round(240 / main.ds));
+    const FRAME_TURN_WANT = 2.0;
+
+    const density = (x, z) => {
+      let c = 0;
+      for (let k = 0; k < n; k += 3) {
+        if (Math.hypot(S[k].x - x, S[k].z - z) < 130) c++;
+      }
+      return c;
+    };
+
+    // --- how green is the ground, really? -----------------------------------
+    // Height is only a proxy: the meadow also carries gold-green sun-baked
+    // patches and grey limestone outcrops, and a frame that lands on those is
+    // just as washed out as one up on the scree. If the terrain will tell us
+    // what colour it painted a point, ask it; otherwise fall back to height.
+    const swatch = (() => { try { return terrain._swatches?.(); } catch { return null; } })();
+    const _gc = new THREE.Color();
+    const verdant = (x, z, h) => {
+      if (!swatch || typeof biome.colorAt !== 'function') return null;
+      try {
+        _gc.setRGB(1, 1, 1);
+        biome.colorAt(_gc, swatch, h, terrainSlope(terrain, x, z, 6), x, z, seed ?? 0);
+      } catch { return null; }
+      // green channel clearly ahead of the other two = saturated meadow
+      return clamp((_gc.g - Math.max(_gc.r, _gc.b) * 0.93) * 5, 0, 1);
+    };
+
+    // Prefix sums so a 380 m window costs O(1) instead of O(runN) per candidate.
+    const P = (n + 1);
+    const cumH = new Float64Array(P), cumG = new Float64Array(P), cumK = new Float64Array(P);
+    let anyGreen = false;
     for (let i = 0; i < n; i++) {
-      const sm = S[i];
-      if (sm.wet) continue;
-      const corner = Math.abs(sm.k);
-      if (corner < 1 / 60) continue;
-      const j = ((i - lead) % n + n) % n;   // where we would actually start
+      const q = S[i];
+      const g = verdant(q.x, q.z, q.yT);
+      if (g !== null) anyGreen = true;
+      cumH[i + 1] = cumH[i] + q.yT;
+      cumG[i + 1] = cumG[i] + (g ?? 0);
+      cumK[i + 1] = cumK[i] + Math.abs(q.k) * main.ds;
+    }
+    const win = (cum, j, len) => (j + len <= n
+      ? cum[j + len] - cum[j]
+      : cum[n] - cum[j] + cum[(j + len) % n]);
+
+    let best = -1, bestScore = -Infinity;
+    for (let j = 0; j < n; j++) {
       const st = S[j];
       if (st.wet || st.yT < biome.waterLevel + 3) continue;
-      const rim = Math.max(Math.abs(st.x), Math.abs(st.z)) / half;
-      const open = 1 - clamp(terrainSlope(terrain, st.x, st.z, 22) * 2.4, 0, 1);
-      // how much road is nearby? a folded route fills the frame
-      let near = 0;
-      for (let k = 0; k < n; k += 3) {
-        const d = Math.hypot(S[k].x - st.x, S[k].z - st.z);
-        if (d < 130) near++;
+
+      let hMax = -Infinity, ok = true, wet = 0;
+      for (let k = 0; k < runN; k += 2) {
+        const q = S[(j + k) % n];
+        // Three tiers: the long run-up must be gentle so the car arrives on the
+        // road at all; the last stretch before the shutter may be a real corner
+        // (a car running slightly wide out of one IS the reference pose); and
+        // beyond the car nothing is driven, so it may bend as hard as it likes.
+        const lim = k < endN - frameN * 0.35 ? R_DRIVE : (k < endN ? 66 : R_MIN);
+        if (Math.abs(q.k) > 1 / lim) { ok = false; break; }
+        // A bridge in the run is not a disqualification — it is the hero
+        // landmark of half the client references.
+        if (q.wet) wet++;
+        else if (q.yT > hMax) hMax = q.yT;
       }
-      const score = corner * 260 + open * 5 + near * 0.35 - Math.max(0, rim - 0.62) * 34;
+      if (!ok || hMax === -Infinity) continue;
+
+      // Weighted toward the road ahead of the car, which is the deep half of
+      // the frame and the half that is allowed to bend hard.
+      const turn = win(cumK, j + Math.max(0, endN - Math.round(frameN * 0.3)), frameN);
+      const hAvg = win(cumH, j, runN) / runN;
+      const byHeight = clamp(1 - Math.max(0, hAvg - GREEN) / 30, 0, 1)
+        * clamp(1 - Math.max(0, hMax - GREEN * 1.7) / 45, 0, 1);
+      const green = anyGreen
+        ? byHeight * 0.35 + (win(cumG, j, runN) / runN) * 0.65
+        : byHeight;
+      if (green <= 0) continue;
+
+      const end = S[(j + endN) % n];
+      const rim = Math.max(Math.abs(end.x), Math.abs(end.z)) / half;
+      const open = 1 - clamp(terrainSlope(terrain, end.x, end.z, 22) * 2.4, 0, 1);
+      // The composition: a road that curves and folds back through the frame,
+      // not a straight line vanishing off one edge. ~0.5-1.4 rad over the run.
+      const shape = clamp(1 - Math.abs(turn - FRAME_TURN_WANT) / (FRAME_TURN_WANT * 0.9), 0, 1);
+      const near = density(end.x, end.z);
+
+      // A little water crossing in the run is a bonus; a long causeway is not.
+      const bridge = clamp(wet / 12, 0, 1) * (1 - clamp(wet / 60, 0, 1));
+
+      const score = green * 100 + shape * 150 + open * 10 + near * 0.40
+        + bridge * 45 - Math.max(0, rim - 0.62) * 40;
       if (score > bestScore) { bestScore = score; best = j; }
     }
     if (best < 0) {
