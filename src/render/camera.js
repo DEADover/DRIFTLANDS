@@ -3,19 +3,22 @@ import * as THREE from 'three';
 /**
  * THE 2.5D CAMERA.
  *
- * Reference (art of rally): a high, steeply-tilted view with a narrow FOV so
- * the world reads almost orthographic — parallel-looking, poster-like, the car
- * small in a big landscape. Tops of trees dominate; you see just enough of the
- * sides of objects to read their height.
+ * The client targets (ref/target_01..08), NOT art of rally, set this now. They
+ * are closer and less steep: you can read a bridge's pylons, the sides of a
+ * conifer, the flank of a boulder. Real perspective recession, never
+ * orthographic. Still world-fixed — the frame does not rotate with the car.
  *
- * Tunables that matter most, in order:
- *   pitch    ~58-66 deg from horizontal (0 = side-on, 90 = straight down)
- *   fov      20-32 deg. Lower = flatter/more orthographic/more "poster".
- *   distance set so the car occupies ~3.5-4.5% of frame width.
+ * MEASURED FROM ref/target_01 AND CONFIRMED IN OUR OWN FRAMES:
+ *   car width  4.5-5.5% of frame width
+ *   tilt       48-55 deg from horizontal
+ *   horizon    NOT IN FRAME — ground fills the picture edge to edge
  *
- * CALIBRATION (measured, not guessed): at fov 26 / 16:9, distance 136 puts the
- * car at ~3.8% of frame width in `hero_alpine` — measured off the actual PNG.
- * Do not change `distance` without re-measuring.
+ * CALIBRATION (projected the car's bounding box, not eyeballed): at 16:9 with
+ * the capture-time fov of ~30.4 (baseFov 26 + the feel layer's speed boost),
+ * distance 136 gave 3.31% and pitch 61 deg. Frame width at the focus point is
+ * 2*tan(fovx/2)*distance, so the car's share is inversely proportional to
+ * distance: 136 -> 90 lands it at ~5.0%. Re-measure with
+ * scratchpad measure.js if you touch fov, aspect or speedWiden.
  *
  * MOTION DOCTRINE: unhurried. The focus point rides a critically-damped spring,
  * not a lerp, so it never snaps and never overshoots; the velocity lead and the
@@ -28,11 +31,14 @@ export class ChaseCamera {
     this.baseFov = 26;
     // Near/far kept tight: post.js reconstructs view-space position from the
     // depth buffer, and precision there is worth more than headroom.
-    this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 24, 1900);
+    // Near pulled in from 24 now that the camera sits at distance 90: a hillside
+    // rising toward the lens must not clip. Far is still tight because post.js
+    // reconstructs view-space position from this depth buffer.
+    this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 14, 1500);
 
     // --- tuning ---
-    this.pitch = THREE.MathUtils.degToRad(61);
-    this.distance = 136;
+    this.pitch = THREE.MathUtils.degToRad(52);
+    this.distance = 90;
     this.height = 0;              // extra vertical offset beyond pitch
     this.yaw = Math.PI * 0.25;    // world-fixed heading (art of rally does NOT spin with the car)
     this.followYaw = 0.0;         // 0 = fully world-fixed, 1 = fully car-relative

@@ -203,14 +203,51 @@ const BLUR_FRAG = /* glsl */ `
   }
 `;
 
+/**
+ * THE TONE CURVE — shared by the bright pass and the composite.
+ *
+ * The scene buffer is LINEAR and UNTONED (three renders it with NoToneMapping
+ * so the frame is only ever mapped once, here). Its range is roughly 0..3, so
+ * every threshold downstream has to be expressed against that, and the curve
+ * itself has to be able to swallow a value of 3 without producing paper white.
+ *
+ * It compresses the PEAK CHANNEL and rescales the triplet by the same factor,
+ * so the ratio between channels — the hue and the saturation — survives the
+ * roll-off exactly. A per-channel shoulder (what this used to be) desaturates
+ * as it compresses: a hot red becomes pink, a lit green becomes cream, and a
+ * whole meadow one stop over becomes a white hole. That was the blowout.
+ *
+ * Below `knee` it is the identity, so authored flat colour is untouched.
+ */
+const TONEMAP = /* glsl */ `
+  uniform float uExposure;
+  uniform float uShoulder;   // knee: below this, identity
+  uniform float uWhite;      // asymptote: the curve never reaches it
+
+  vec3 tonemap(vec3 c) {
+    c = max(c * uExposure, 0.0);
+    float p = max(c.r, max(c.g, c.b));
+    if (p <= uShoulder) return c;
+    float span = max(uWhite - uShoulder, 1e-3);
+    float t = (p - uShoulder) / span;
+    float pc = uShoulder + span * (t / (1.0 + t));
+    return c * (pc / max(p, 1e-5));
+  }
+`;
+
+// The bright pass thresholds the DISPLAY-REFERRED value, not the raw linear
+// one, so "0.85" means "85% of the way to white on screen" whatever the scene
+// exposure happens to be. It also means bloom is bounded by the tone curve and
+// physically cannot smear a white star across the frame.
 const BRIGHT_FRAG = /* glsl */ `
   precision highp float;
   varying vec2 vUv;
+  ${TONEMAP}
   uniform sampler2D tSrc;
   uniform float uThreshold;
   uniform float uKnee;
   void main() {
-    vec3 c = texture2D(tSrc, vUv).rgb;
+    vec3 c = tonemap(texture2D(tSrc, vUv).rgb);
     float l = max(c.r, max(c.g, c.b));
     float w = smoothstep(uThreshold, uThreshold + uKnee, l);
     gl_FragColor = vec4(c * w, 1.0);
@@ -222,6 +259,7 @@ const COMPOSITE_FRAG = /* glsl */ `
   precision highp float;
   varying vec2 vUv;
   ${DEPTH_UTIL}
+  ${TONEMAP}
   uniform sampler2D tScene;
   uniform sampler2D tAO;
   uniform sampler2D tBloom;
@@ -230,8 +268,6 @@ const COMPOSITE_FRAG = /* glsl */ `
   uniform vec2 uOutTexel;      // 1 / output size
   uniform float uAspectRatio;
 
-  uniform float uExposure;
-  uniform float uShoulder;
   uniform vec3  uLift;
   uniform vec3  uGamma;
   uniform vec3  uGain;
@@ -266,15 +302,6 @@ const COMPOSITE_FRAG = /* glsl */ `
           + texture2D(tScene, uv + vec2( o.x,  o.y)).rgb) * 0.25;
   }
 
-  vec3 shoulder(vec3 x) {
-    // Identity in the mid-range (flat colour stays exactly as authored), soft
-    // roll-off only where it would clip. Deliberately NOT ACES: ACES desaturates
-    // exactly the bright, saturated flats this game is made of.
-    vec3 t = max(x - uShoulder, 0.0) / max(1.0 - uShoulder, 1e-3);
-    vec3 comp = uShoulder + (1.0 - uShoulder) * (t / (1.0 + t));
-    return mix(x, comp, step(vec3(uShoulder), x));
-  }
-
   vec3 toSRGB(vec3 c) {
     c = max(c, 0.0);
     return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
@@ -302,19 +329,19 @@ const COMPOSITE_FRAG = /* glsl */ `
       col = mix(col, texture2D(tFar, vUv).rgb, uDofAmount * 0.55);
     }
 
-    // ---- contact shading
+    // ---- contact shading (in linear: occlusion is a light term, not a paint)
     float ao = texture2D(tAO, vUv).r;
     float occ = (1.0 - ao) * uAOStrength;
     col = mix(col, col * uAOTint, clamp(occ, 0.0, 1.0));
 
-    // ---- bloom
+    // ---- tone map. EVERYTHING below this line is display-referred: bloom is
+    // added against a 0-1 image and a contrast pivot of 0.5 means mid-grey.
+    col = tonemap(col);
+
+    // ---- bloom (already tone mapped by the bright pass, so it is bounded)
     col += texture2D(tBloom, vUv).rgb * uBloom;
     col += texture2D(tBloomWide, vUv).rgb * uBloomWide;
 
-    // ---- tone map, then encode. EVERYTHING below this line is graded in
-    // display space, where a contrast pivot of 0.5 actually means mid-grey.
-    col *= uExposure;
-    col = shoulder(max(col, 0.0));
     col = toSRGB(col);
 
     col = col * uGain + uLift * (1.0 - col);
@@ -327,7 +354,10 @@ const COMPOSITE_FRAG = /* glsl */ `
     // ---- vignette
     float v = 1.0 - uVignette * smoothstep(uVignetteSoft, 1.30, r2 * 1.9);
     col *= v;
-    col = mix(vec3(dot(max(col, 0.0), LUMA)), col, mix(1.0, 0.88, 1.0 - v));
+    // Barely desaturate the corners. The references darken at the edge but stay
+    // fully saturated there; a filmic edge-desaturation reads as a photograph,
+    // and this is meant to read as a painting.
+    col = mix(vec3(dot(max(col, 0.0), LUMA)), col, mix(1.0, 0.96, 1.0 - v));
 
     if (uDebug > 0.5) {
       if (uDebug < 1.5) col = vec3(ao);
@@ -423,8 +453,11 @@ export function createPostFX(ctx) {
     uProj: projU, uNear: nearU, uFar: farU,
     uTexel: { value: new THREE.Vector2() },
     uAspect: { value: new THREE.Vector2(1, 1) },
-    uR1: { value: 3.0 },
-    uR2: { value: 11.0 },
+    // Tight radius = the contact pool at the base of a tree/rock/post, which is
+    // what actually grounds an object in the references. Wide radius only
+    // deepens real cavities. Both in METRES.
+    uR1: { value: 2.2 },
+    uR2: { value: 8.0 },
     uIntensity: { value: 2.4 },
     uBias: { value: 0.10 },
     uFade: { value: 460 },
@@ -446,10 +479,17 @@ export function createPostFX(ctx) {
     uDir: { value: new THREE.Vector2() },
   });
 
+  // Shared by the bright pass and the composite so the bloom threshold is
+  // always measured against the same curve the frame is finally shown through.
+  const exposureU = { value: 1 };
+  const shoulderU = { value: 0.72 };
+  const whiteU = { value: 1.0 };
+
   const bright = new Pass(renderer, geo, BRIGHT_FRAG, {
     tSrc: { value: rtHalf.texture },
-    uThreshold: { value: 0.72 },
-    uKnee: { value: 0.55 },
+    uExposure: exposureU, uShoulder: shoulderU, uWhite: whiteU,
+    uThreshold: { value: 0.86 },
+    uKnee: { value: 0.14 },
   });
 
   const composite = new Pass(renderer, geo, COMPOSITE_FRAG, {
@@ -462,8 +502,7 @@ export function createPostFX(ctx) {
     uProj: projU, uNear: nearU, uFar: farU,
     uOutTexel: { value: new THREE.Vector2() },
     uAspectRatio: { value: 1.777 },
-    uExposure: { value: 1 },
-    uShoulder: { value: 0.7 },
+    uExposure: exposureU, uShoulder: shoulderU, uWhite: whiteU,
     uLift: { value: new THREE.Vector3(0, 0, 0) },
     uGamma: { value: new THREE.Vector3(1, 1, 1) },
     uGain: { value: new THREE.Vector3(1, 1, 1) },
@@ -488,6 +527,12 @@ export function createPostFX(ctx) {
   const api = {
     enabled: true,
     grade: null,
+
+    // Tuning surface. Every knob of the composite is reachable from the console
+    // (and from the screenshot harness) so the look can be bisected empirically
+    // instead of by editing shaders and reloading.
+    u: composite.u,
+    passes: { ao: aoPass, bright, composite },
 
     setCamera(cam) { if (cam) camera = cam; },
 
@@ -524,6 +569,7 @@ export function createPostFX(ctx) {
       const u = composite.u;
       u.uExposure.value = g.exposure;
       u.uShoulder.value = g.shoulder;
+      u.uWhite.value = g.white;
       u.uLift.value.fromArray(g.lift);
       u.uGamma.value.fromArray(g.gamma);
       u.uGain.value.fromArray(g.gain);

@@ -17,7 +17,13 @@
 
 const BASE = {
   exposure: 1.0,
+  // Tone curve. `shoulder` is the knee — below it the curve is the identity, so
+  // every authored flat colour survives untouched. `white` is the asymptote the
+  // roll-off approaches but never reaches, and the compression is applied to the
+  // peak channel and shared across the triplet, so highlights keep their hue
+  // instead of bleaching. Both are display-referred (0-1).
   shoulder: 0.74,
+  white: 1.0,
   lift: [0.0, 0.0, 0.0],
   gamma: [1.0, 1.0, 1.0],
   gain: [1.0, 1.0, 1.0],
@@ -30,34 +36,60 @@ const BASE = {
   aoTint: [0.56, 0.61, 0.70],
   bloom: 0.16,
   bloomWide: 0.11,
-  // Linear-HDR threshold. The scene buffer is untonemapped (post does its own
-  // tone map), so lit ground sits around 1.5-2.5 here, not 0-1. A 0.8 cut made
-  // the entire meadow bloom into a white star.
-  bloomThreshold: 2.6,
+  // DISPLAY-REFERRED: the bright pass tone maps before it thresholds, so this
+  // is "how far toward white on screen", independent of scene exposure. It can
+  // no longer be defeated by a hot scene buffer.
+  bloomThreshold: 0.86,
   dof: 0.55,
   vignette: 0.20,
   ca: 0.0016,
 };
 
 export const GRADES = {
+  // TARGET: ref/target_01_alpine_meadow.png — deep saturated meadow green,
+  // warm high-key sun, gentle contrast, no washed whites, everything crisp.
+  // Measured off the reference: lit grass sits at sRGB ~#6fb84a, grass in tree
+  // shadow at ~#3a7a2e. That is a ratio of (0.25, 0.42, 0.39) — shadow is a
+  // COLOURED step that keeps green and blue and eats red, never a grey wash.
+  // The AO tint below is that ratio; it is why contact shading reads as cool
+  // green rather than as dirt.
+  //
+  // The grade is deliberately CLOSE TO NEUTRAL. The palette anchors already are
+  // the target colours (grass #5faa3c-#7cc24a, road #c9a45f), and the rig lands
+  // a lit horizontal surface at ~0.95x its albedo, so a lit meadow arrives at
+  // the composite already the right colour. Verified by hand: albedo #7cc24a
+  // through this grade comes out #76c73e. A heavier grade only pushed it into
+  // acid green. Saturation and richness are the world's job; the grade's job is
+  // warmth, a shadow that is cool rather than black, and no clipped highlight.
   'Alpine Meadows': {
-    exposure: 1.04,
-    shoulder: 0.76,
-    lift: [0.008, 0.014, 0.028],
-    gamma: [1.02, 1.0, 0.99],
-    gain: [1.02, 1.02, 0.99],
-    contrast: 1.12,
-    saturation: 1.13,
-    shadowTint: [0.91, 0.98, 1.13],
-    highTint: [1.05, 1.02, 0.96],
-    ao: 0.58,
-    aoIntensity: 1.05,
-    aoTint: [0.50, 0.58, 0.68],
-    bloom: 0.22,
-    bloomWide: 0.13,
-    bloomThreshold: 0.93,
-    dof: 0.55,
-    vignette: 0.17,
+    exposure: 1.0,
+    shoulder: 0.82,
+    white: 1.0,
+    // NO CRUSHED BLACKS. Shadow is a coloured step, so the lift is small but
+    // blue-weighted: it opens the darks and tints them toward the sky instead
+    // of letting them collapse to neutral.
+    lift: [0.012, 0.020, 0.040],
+    gamma: [1.0, 1.0, 1.0],
+    gain: [1.0, 1.0, 1.0],
+    contrast: 1.10,
+    saturation: 1.08,
+    shadowTint: [0.93, 0.99, 1.10],
+    highTint: [1.06, 1.015, 0.93],
+    // Objects are grounded by a soft dark pool at their base in every
+    // reference frame — that pool is this, not the cast shadow.
+    ao: 0.76,
+    // Measured against the AO debug buffer (post.u.uDebug = 1): at 1.15 the
+    // buffer was almost pure white — nothing was grounded. 2.4 gives the soft
+    // dark pool the references have at the base of every tree, rock and post.
+    aoIntensity: 2.4,
+    aoTint: [0.38, 0.55, 0.52],
+    bloom: 0.15,
+    bloomWide: 0.09,
+    bloomThreshold: 0.88,
+    // The reference is sharp corner to corner: only a whisper of far softening.
+    dof: 0.20,
+    vignette: 0.20,
+    ca: 0.0011,
   },
 
   'Ember Woodland': {

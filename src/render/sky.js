@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { sunElevationFor } from './renderer.js';
 
 /**
  * SKY DOME + fog.
@@ -143,10 +144,13 @@ export class Sky {
     u.uHorizon.value.setHex(p.skyHorizon);
     u.uHaze.value.setHex(p.fogColor ?? p.skyHorizon);
     u.uSunColor.value.setHex(p.sunColor);
+    // Use the SAME elevation the light rig clamped to (renderer.js), or the sun
+    // disc ends up somewhere the shadows disagree with.
+    const el = sunElevationFor(p);
     u.uSunDir.value.set(
-      Math.cos(p.sunAzimuth) * Math.cos(p.sunElevation),
-      Math.sin(p.sunElevation),
-      Math.sin(p.sunAzimuth) * Math.cos(p.sunElevation)
+      Math.cos(p.sunAzimuth) * Math.cos(el),
+      Math.sin(el),
+      Math.sin(p.sunAzimuth) * Math.cos(el)
     );
 
     const cl = CLOUDS[p.name] ?? { cover: 0.35, scale: 0.55, glow: 1.0 };
@@ -154,7 +158,7 @@ export class Sky {
     u.uCloudScale.value = cl.scale;
     u.uSunGlow.value = cl.glow;
     // A low sun makes a bigger, softer disc; a high sun a small hard one.
-    u.uSunSize.value = THREE.MathUtils.lerp(1.6, 0.85, THREE.MathUtils.clamp(p.sunElevation / 0.9, 0, 1));
+    u.uSunSize.value = THREE.MathUtils.lerp(1.6, 0.85, THREE.MathUtils.clamp(el / 0.9, 0, 1));
 
     // Cloud tones: a shadowed body and a sun-lit top. Two flat values only.
     const lo = new THREE.Color(p.skyHorizon).lerp(new THREE.Color(p.skyTop), 0.30);

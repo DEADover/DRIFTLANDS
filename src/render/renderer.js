@@ -37,7 +37,12 @@ export function createRenderer(container, { pixelRatio } = {}) {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // PCFShadowMap, not PCFSoft: only this branch of three's shader honours
+  // `light.shadow.radius`, and a tunable penumbra is the whole point — the
+  // references have soft-edged shadows, and PCFSoft's fixed kernel gives a hard
+  // one. (VSM was tried and rejected: it moirés badly across a low-poly
+  // heightfield.) The radius itself is set in LightRig, in metres.
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.shadowMap.autoUpdate = true;
   container.appendChild(renderer.domElement);
   return renderer;
@@ -45,16 +50,56 @@ export function createRenderer(container, { pixelRatio } = {}) {
 
 const PI = Math.PI;
 
+/**
+ * SHADOW LENGTH IS ART DIRECTION, NOT ASTRONOMY.
+ *
+ * A shadow is `1/tan(elevation)` times the caster's height. The references sit
+ * at 1.0-1.5x — short, readable, and they let you see the ground the object is
+ * standing on. Palettes are free to author a mood-driven sun elevation; the rig
+ * clamps it into the band that produces those lengths, because a 28° sun (what
+ * alpine asked for) throws a 1.9x shadow that reads as late afternoon and eats
+ * the meadow.
+ *
+ *   0.98 rad = 56.1°  ->  0.67x height in world, ~1.09x ON SCREEN
+ *   1.12 rad = 64.2°  ->  0.48x height in world, ~0.79x ON SCREEN
+ *
+ * The two numbers differ because the camera is tilted: a vertical object is
+ * squashed to cos(52) = 0.62 of its height on screen while the ground it
+ * stands on is not, so a world shadow of 1.0x READS as 1.6x. MEASURED off
+ * ref/target_01 (fence posts and the isolated conifer at ~(780,20)+): the
+ * reference's shadows read at 0.3-0.6x on screen. This band is deliberately a
+ * little longer than that so shadows still describe the light's direction,
+ * but it is far shorter than the 1.9x this used to throw.
+ *
+ * Exported so sky.js can put the sun disc where the shadows say it is.
+ */
+export const SHADOW_ELEVATION = [0.98, 1.12];
+export function sunElevationFor(p) {
+  return THREE.MathUtils.clamp(p?.sunElevation ?? 0.7, SHADOW_ELEVATION[0], SHADOW_ELEVATION[1]);
+}
+
+/** World-space width of the shadow penumbra, in metres. */
+const PENUMBRA = 0.85;
+
 /** Value of a fully-lit horizontal surface, as a fraction of its albedo. */
 const KEY = 0.97;
 
-/** How much of the total light budget survives in shadow, per biome mood. */
+/**
+ * How much of the total light budget survives in shadow, per biome mood.
+ *
+ * MEASURED off target_01: lit grass #7cc24a, the same grass under a conifer
+ * #3a7a2e. In linear that is a factor of (0.25, 0.42, 0.39) — so a shadowed
+ * surface keeps a bit over 0.4 of its lit value, and it keeps it UNEVENLY:
+ * green and blue survive, red is eaten. The uneven part is the ambient's hue
+ * (see `tint` below) and the post AO tint; this number is the level.
+ * Direct light alone lands ~0.46 and AO takes the contact points lower.
+ */
 function shadowFloor(p) {
   const sun = p.sunIntensity ?? 3;
   const amb = p.ambientIntensity ?? 1;
   const share = amb / (sun + amb); // 0.22 .. 0.38 across our palettes
   // Compress into a designed band: shadow must be a clean step, never a hole.
-  return THREE.MathUtils.clamp(0.40 + 0.55 * share, 0.48, 0.62);
+  return THREE.MathUtils.clamp(0.34 + 0.50 * share, 0.42, 0.54);
 }
 
 const _c = new THREE.Color();
@@ -84,7 +129,7 @@ export class LightRig {
     // reference, instead of the stair-stepped mess a loose frustum gives.
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.00025;
-    this.sun.shadow.normalBias = 0.035;
+    this.sun.shadow.normalBias = 0.075;   // scaled with the wider PCF disc below
     const c = this.sun.shadow.camera;
     c.near = 1;
     c.far = 900;
@@ -116,7 +161,7 @@ export class LightRig {
 
   applyPalette(p) {
     this._az = p.sunAzimuth;
-    this._el = p.sunElevation;
+    this._el = sunElevationFor(p);
 
     const floor = shadowFloor(p);
     const fillShare = 0.20;             // fraction of the ambient budget given to the rim fill
@@ -124,23 +169,30 @@ export class LightRig {
     // The ground is the picture's mid value, and the ground is horizontal — so
     // normalise the sun by its own elevation. Without this, a 5° dusk sun makes
     // the same palette read four stops darker than a 54° desert one.
-    const sinEl = THREE.MathUtils.clamp(Math.sin(p.sunElevation ?? 0.7), 0.30, 1.0);
+    const sinEl = THREE.MathUtils.clamp(Math.sin(this._el), 0.30, 1.0);
     const sunTerm = (KEY * (1 - floor)) / sinEl;
     const ambTerm = KEY * floor * (1 - fillShare);
     const fillTerm = KEY * floor * fillShare;
 
     // three's lambert BRDF divides irradiance by PI, so multiply it back in.
-    this.sun.color.copy(tint(p.sunColor, 0.35));
+    // Keep more of the sun's warmth (0.35 -> 0.20 toward white): the reference's
+    // "high-key warm light" is not brightness, it is the WARM KEY / COOL FILL
+    // split. `tint` normalises luminance, so this is hue only.
+    this.sun.color.copy(tint(p.sunColor, 0.20));
     this.sun.intensity = PI * sunTerm;
 
-    // A high sun wants a near-neutral ambient; a dusk sun IS its ambient hue,
-    // so keep more of the palette's colour as the sun drops.
-    const desat = THREE.MathUtils.lerp(0.30, 0.54, THREE.MathUtils.clamp((p.sunElevation ?? 0.7) / 0.8, 0, 1));
+    // SHADOW MUST BE COLOURED, NEVER NEUTRAL. What fills a shadow is sky above
+    // and bounce off the ground beside it — so the shadow's hue is the ambient's
+    // hue, and pulling the ambient toward white (which the old 0.30-0.54 desat
+    // did) is exactly how you get the grey shadows the brief rejects. Keep most
+    // of the palette's sky/ground colour; `tint` still normalises luminance, so
+    // this changes hue only and cannot darken the picture.
+    const desat = THREE.MathUtils.lerp(0.14, 0.34, THREE.MathUtils.clamp(this._el / 0.8, 0, 1));
     this.hemi.color.copy(tint(p.ambientSky, desat));
     this.hemi.groundColor.copy(tint(p.ambientGround, desat + 0.06)).multiplyScalar(0.85);
     this.hemi.intensity = PI * ambTerm;
 
-    this.fill.color.copy(tint(p.ambientSky, desat - 0.08));
+    this.fill.color.copy(tint(p.ambientSky, Math.max(0, desat - 0.06)));
     this.fill.intensity = PI * fillTerm * 1.7; // directional, so only ~half the surfaces see it
     this.fill.position.set(
       -Math.cos(p.sunAzimuth) * 100,
@@ -148,9 +200,14 @@ export class LightRig {
       -Math.sin(p.sunAzimuth) * 100
     );
 
-    // Long shadows need a long box. Grows as the sun drops.
-    const el = Math.max(0.06, p.sunElevation);
-    this._half = THREE.MathUtils.clamp(96 + 9 / Math.tan(el), 105, 190);
+    // Shadow box. Now that the sun is held in a short-shadow band this no longer
+    // has to grow for a raking dusk sun, so it stays tight and the map stays
+    // sharp where it matters.
+    // Sized for what the camera can actually see: at distance 90 / 52 deg the
+    // frame covers roughly 95 m across at the focus and ~150 m at the top edge,
+    // so a +-80 m box (biased up-sun in `follow`) covers it with room to spare.
+    // Tighter box = 0.039 m per texel = contact points that stay attached.
+    this._half = THREE.MathUtils.clamp(72 + 9 / Math.tan(this._el), 78, 120);
     const c = this.sun.shadow.camera;
     c.left = -this._half;
     c.right = this._half;
@@ -159,6 +216,12 @@ export class LightRig {
     c.near = 1;
     c.far = 2.6 * this._half + 420;
     c.updateProjectionMatrix();
+
+    // Penumbra in METRES, not texels: three scales the Vogel disk by
+    // `radius * texelSize`, and texelSize depends on the box we just fitted, so
+    // expressing it any other way makes the softness drift with the sun angle.
+    const metresPerTexel = (2 * this._half) / this.sun.shadow.mapSize.x;
+    this.sun.shadow.radius = THREE.MathUtils.clamp(PENUMBRA / metresPerTexel, 2, 40);
     this._basisDirty = true;
 
     this.shadowFloor = floor;
