@@ -242,8 +242,11 @@ export class SkidMarks {
     // Width and opacity both ride slip: the mark fattens into the apex.
     const s0 = (Math.sin(this._dist[idx] * 0.9 + salt * 12.9898) + 1) * 0.5;
     const s1 = (Math.sin(this._dist[idx] * 1.7 + salt * 78.233) + 1) * 0.5;
-    const hw = (0.32 + e * 0.36) * widthMul * (0.90 + 0.20 * s0);
-    const alpha = Math.min(0.95, (0.30 + e * 0.62) * alphaMul * (0.86 + 0.28 * s1));
+    // A tyre is ~0.25 m wide. From 180 m up it needs a little exaggeration to
+    // read at all, but not much — the old width painted a 2 m band per wheel,
+    // which composited into a pale smear longer than the dust plume.
+    const hw = (0.30 + e * 0.30) * widthMul * (0.90 + 0.20 * s0);
+    const alpha = Math.min(0.72, (0.26 + e * 0.50) * alphaMul * (0.86 + 0.28 * s1));
 
     const v0 = this._dist[idx];
     this._dist[idx] += d;

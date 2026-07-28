@@ -44,7 +44,7 @@ const T_DROP = 2;   // water droplet / snow crystal, bright and specular
 const T_SPARK = 3;  // additive streak
 const T_SHADE = 4;  // unlit ground-aligned shadow of the plume
 
-const MAX_RATE = 215;   // particles/second ceiling for the wheel driver
+const MAX_RATE = 130;   // particles/second ceiling for the wheel driver
 
 // ------------------------------------------------------------- shaders ----
 const VERT = /* glsl */ `
@@ -160,25 +160,28 @@ const FRAG = /* glsl */ `
       float grow = mix(0.66, 1.04, 1.0 - death);      // silhouette dilates with age
       float rr = r / grow * (1.0 + (na - 0.5) * 0.88);
 
-      float body = smoothstep(1.00, 0.30, rr);
-      body *= mix(0.58, 1.28, nb);
-      alpha = body * vOpa * (0.30 + 0.70 * death) * birth;
+      float body = smoothstep(1.00, 0.58, rr);
+      body *= mix(0.52, 1.10, nb);
+      // Dust hanging in air thins out FAST. A square-law fade means the tail of
+      // the plume has visually gone long before the particle actually dies, so
+      // the plume reads short and translucent without popping out of existence.
+      alpha = body * vOpa * (0.04 + 0.96 * death * death) * birth;
 
       // sphere impostor normal -> sun side / shadow side
       float nz = sqrt(max(0.0, 1.0 - min(r * r, 1.0)));
       vec3 N = normalize(camRight * p.x + camUp * p.y + camFwd * nz);
       float ndl = dot(N, uSunDir);
-      float wrap = pow(clamp(0.26 + 0.74 * ndl, 0.0, 1.0), 1.45);
+      float wrap = pow(clamp(0.44 + 0.56 * ndl, 0.0, 1.0), 1.25);
 
-      vec3 lit = uSunCol * wrap * 1.22
-               + uSkyCol * (0.24 + 0.30 * clamp(N.y, 0.0, 1.0))
+      vec3 lit = uSunCol * wrap * 0.98
+               + uSkyCol * (0.32 + 0.34 * clamp(N.y, 0.0, 1.0))
                + uGndCol * 0.14;
       col = vCol * lit;
 
       // Sun-through-dust: the lit limb of the puff blooms.
       float rim = smoothstep(0.38, 1.00, rr) * clamp(ndl, 0.0, 1.0);
-      col += uSunCol * rim * 0.24;
-      glow = uSunCol * vCol * rim * 0.45 * alpha;
+      col += uSunCol * rim * 0.12;
+      glow = uSunCol * vCol * rim * 0.16 * alpha;
 
     } else if (vType < 1.5) {
       // ===================== HARD: chips, stones, leaves ==================
@@ -211,7 +214,7 @@ const FRAG = /* glsl */ `
       float ang = atan(p.y, p.x);
       float na = fbm(vec2(cos(ang), sin(ang)) * 1.7 + vSeed * 29.0);
       float rr = r * (1.0 + (na - 0.5) * 0.55);
-      alpha = smoothstep(1.02, 0.20, rr) * vOpa * (0.30 + 0.70 * death) * birth;
+      alpha = smoothstep(1.02, 0.20, rr) * vOpa * (0.04 + 0.96 * death * death) * birth;
       col = vCol;   // unlit: it IS the absence of light
     }
 
@@ -374,14 +377,19 @@ export class ParticleSystem {
     const rearSlip = Math.max(f.slip[0], f.slip[1]);
     // Scrub: how hard the tyres are tearing the surface up.
     const scrub = Math.min(2.4, rearSlip * 1.25 + Math.abs(f.vLat) / 8.5 + Math.abs(f.yawRate) * 0.30);
-    // Roll: even straight-line speed throws a rooster tail on loose ground.
-    const roll = Math.min(1, Math.max(0, (spd - 6.5) / 20));
-    const drive = roll * 0.62 + scrub * 1.55;
+    // Roll: even straight-line speed lifts a thread of dust off loose ground —
+    // but only a thread. A rooster tail has to be EARNED by sliding.
+    const roll = Math.min(1, Math.max(0, (spd - 11) / 24));
+    // Slide is scrub past a deadband, so tracking straight emits almost nothing
+    // and the curve then opens up fast once the car is genuinely sideways.
+    const slide = Math.max(0, scrub - 0.12) * 1.2;
+    const drive = roll * 0.17 + slide * (0.82 + slide * 0.64);
     const loose = inWater ? 1.6 : st.loose;
 
     let rate = Math.min(MAX_RATE, drive * 38 * loose);
     // Tarmac only lights up when it is genuinely sliding — no smoke at cruise.
     if (st.surf === SURF.TARMAC) rate *= Math.min(1, scrub * 0.75);
+    this._heft = Math.min(1, slide * 0.82);   // 0 cruising, 1 in a full slide
 
     this._acc.dust += rate * dt;
     let n = Math.floor(this._acc.dust);
@@ -394,8 +402,8 @@ export class ParticleSystem {
       const w = f.rear[this._wheelToggle];
       // Smear the origin backwards along the path so the plume is continuous
       // instead of pulsing once per frame.
-      const back = Math.random() * spd * dt * 1.4 + Math.random() * 1.2;
-      const spread = (Math.random() - 0.5) * 2.4;
+      const back = 1.1 + Math.random() * spd * dt * 1.4 + Math.random() * 0.9;
+      const spread = (Math.random() - 0.5) * 1.5;
       const ox = w.x - dirX * back + f.rightX * spread + (Math.random() - 0.5) * 0.6;
       const oz = w.z - dirZ * back + f.rightZ * spread + (Math.random() - 0.5) * 0.6;
       if (inWater) this._spray(ox, w.y, oz, f);
@@ -404,10 +412,12 @@ export class ParticleSystem {
 
     // ---- verge life: grass shredded out, stones flicked up ---------------
     if (!inWater && st.surf !== SURF.TARMAC && st.surf !== SURF.SNOW) {
-      const off = f.kind === 'road' || f.kind === 'bridge' ? 0.25 : 1;
-      this._acc.fleck += roll * 7 * off * (0.4 + scrub * 0.5) * dt;
+      // Litter is punctuation, not texture: it only shows up when the car is
+      // actually tearing at the verge, and never as a constant sprinkle.
+      const off = f.kind === 'road' || f.kind === 'bridge' ? 0.18 : 1;
+      this._acc.fleck += roll * 4.5 * off * this._heft * dt;
       while (this._acc.fleck >= 1) { this._acc.fleck -= 1; this._fleck(f, env); }
-      this._acc.stone += roll * 3.5 * off * (0.3 + scrub * 0.8) * dt;
+      this._acc.stone += roll * 1.8 * off * this._heft * dt;
       while (this._acc.stone >= 1) { this._acc.stone -= 1; this._stone(f, st); }
     }
   }
@@ -419,6 +429,14 @@ export class ParticleSystem {
     const rx = f.rightX, rz = f.rightZ;
     const lat = THREE.MathUtils.clamp(f.vLat * 0.22, -3.2, 3.2);
     const power = 0.35 + scrub * 0.55;
+    // heft scales the whole plume with how hard the car is actually sliding.
+    // At a cruise it is a thin veil; in a full slide it opens right up.
+    const heft = this._heft ?? 0;
+    const big = 0.56 + heft * 1.10;         // size multiplier
+    const dense = 0.34 + heft * 0.98;       // opacity multiplier
+    // Sideways throw. Cruising, dust barely leaves the wheel track; sideways,
+    // it gets flung out and the plume opens into a fan.
+    const fan = (0.5 + heft * 2.2) * (1.0 + Math.random() * 1.4);
 
     // Colour: base dust with per-particle drift toward the hot (sunlit) tint.
     const mixHot = Math.random() * Math.random();
@@ -431,86 +449,87 @@ export class ParticleSystem {
     const isSnow = st.surf === SURF.SNOW;
     const isTar = st.surf === SURF.TARMAC;
 
-    if (roleR < 0.46) {
+    if (roleR < 0.68) {
       // ---------- BILLOW: the body of the plume --------------------------
       const carry = spd * (0.30 + Math.random() * 0.22);
       this._emit({
-        x, y: gy + 0.35 + Math.random() * 0.8, z,
-        vx: dirX * carry + rx * (lat * 0.8 + side * (3.0 + Math.random() * 5.0)) + (Math.random() - 0.5) * 2.0,
-        vy: (1.1 + Math.random() * 2.0) * st.rise * (0.7 + power),
-        vz: dirZ * carry + rz * (lat * 0.8 + side * (3.0 + Math.random() * 5.0)) + (Math.random() - 0.5) * 2.0,
-        w: (6.0 + Math.random() * 4.5) * (isTar ? 1.3 : 1),
-        gw: (3.4 + Math.random() * 4.0) * st.puff,
-        life: (0.95 + Math.random() * 0.85) * st.life,
+        x, y: gy + 0.24 + Math.random() * 0.42, z,
+        vx: dirX * carry + rx * (lat * 0.6 + side * fan) + (Math.random() - 0.5) * 1.4,
+        vy: (0.95 + Math.random() * 1.45) * st.rise * (0.5 + power * 0.7),
+        vz: dirZ * carry + rz * (lat * 0.6 + side * fan) + (Math.random() - 0.5) * 1.4,
+        w: (2.3 + Math.random() * 2.1) * big * (isTar ? 1.3 : 1),
+        gw: (1.5 + Math.random() * 1.8) * st.puff * big,
+        life: (0.30 + Math.random() * 0.26) * st.life,
         r, g, b,
-        drag: 1.05, acc: 0.85 * st.rise, turb: 1.9,
+        drag: 1.45, acc: 0.68 * st.rise, turb: 1.4,
         rotV: (Math.random() - 0.5) * 0.9,
-        opacity: (0.30 + Math.random() * Math.random() * 0.75) * (isTar ? 1.15 : 1),
+        opacity: (0.46 + Math.random() * Math.random() * 0.62) * dense * (isTar ? 1.15 : 1),
         type: T_SOFT, flat: 0.18,
       });
-    } else if (roleR < 0.73) {
+    } else if (roleR < 0.79) {
       // ---------- SHEET: the low skirt that hugs the ground --------------
       const carry = spd * (0.24 + Math.random() * 0.20);
       const along = Math.atan2(-dirZ, -dirX);
       this._emit({
-        x, y: gy + 0.55 + Math.random() * 0.45, z,
-        vx: dirX * carry + rx * (lat * 1.5 + side * (2.4 + Math.random() * 4.5)),
-        vy: 0.15 + Math.random() * 0.35,
-        vz: dirZ * carry + rz * (lat * 1.5 + side * (2.4 + Math.random() * 4.5)),
-        w: 6.0 + Math.random() * 4.5,
-        h: 4.8 + Math.random() * 3.6,
-        gw: 5.0 + Math.random() * 4.5,
-        gh: 4.0 + Math.random() * 3.6,
-        life: (0.85 + Math.random() * 0.8) * st.life,
+        x, y: gy + 0.40 + Math.random() * 0.30, z,
+        vx: dirX * carry + rx * (lat * 1.1 + side * fan * 0.8),
+        vy: 0.10 + Math.random() * 0.22,
+        vz: dirZ * carry + rz * (lat * 1.1 + side * fan * 0.8),
+        w: (2.4 + Math.random() * 1.8) * big,
+        h: (2.0 + Math.random() * 1.5) * big,
+        gw: (1.6 + Math.random() * 1.5) * big,
+        gh: (1.4 + Math.random() * 1.3) * big,
+        life: (0.28 + Math.random() * 0.24) * st.life,
         r, g, b,
-        drag: 1.7, acc: 0.06, turb: 0.5,
-        rot: along + (Math.random() - 0.5) * 1.6, rotV: (Math.random() - 0.5) * 0.25,
-        opacity: 0.26 + Math.random() * Math.random() * 0.45,
+        drag: 2.1, acc: 0.04, turb: 0.4,
+        rot: along + (Math.random() - 0.5) * 1.2, rotV: (Math.random() - 0.5) * 0.25,
+        opacity: (0.15 + Math.random() * Math.random() * 0.28) * dense,
         type: T_SOFT, flat: 1,
       });
-    } else if (roleR < 0.80) {
+    } else if (roleR < 0.85) {
       // ---------- SHADOW: the plume's own shade cast on the ground -------
       // Offset along the sun's horizontal projection by an assumed plume
       // height. Nothing grounds airborne dust like seeing it darken the
       // meadow underneath it.
       const env = this._env;
       const sy = Math.max(0.25, env.sunDir.y);
-      const h = 2.4 + Math.random() * 3.4;
+      const h = 1.0 + Math.random() * 1.5;
       const ox = -(env.sunDir.x / sy) * h;
       const oz = -(env.sunDir.z / sy) * h;
       const carry = spd * (0.24 + Math.random() * 0.18);
       const along = Math.atan2(-dirZ, -dirX);
-      this._c2.copy(env.groundColor).multiplyScalar(0.44);
+      this._c2.copy(env.groundColor).multiplyScalar(0.52);
       this._emit({
-        x: x + ox, y: gy + 0.14, z: z + oz,
-        vx: dirX * carry + rx * side * (2.0 + Math.random() * 3.5),
+        x: x + ox, y: gy + 0.12, z: z + oz,
+        vx: dirX * carry + rx * side * (1.0 + Math.random() * 1.8),
         vy: 0,
-        vz: dirZ * carry + rz * side * (2.0 + Math.random() * 3.5),
-        w: 5.5 + Math.random() * 4.0,
-        h: 4.4 + Math.random() * 3.2,
-        gw: 4.5 + Math.random() * 4.0,
-        gh: 3.6 + Math.random() * 3.2,
-        life: (0.85 + Math.random() * 0.8) * st.life,
+        vz: dirZ * carry + rz * side * (1.0 + Math.random() * 1.8),
+        w: (2.0 + Math.random() * 1.6) * big,
+        h: (1.4 + Math.random() * 1.1) * big,
+        gw: (1.4 + Math.random() * 1.3) * big,
+        gh: (1.0 + Math.random() * 1.0) * big,
+        life: (0.28 + Math.random() * 0.24) * st.life,
         r: this._c2.r, g: this._c2.g, b: this._c2.b,
-        drag: 1.7, acc: 0, turb: 0.4,
-        rot: along + (Math.random() - 0.5) * 1.8, opacity: 0.15 + Math.random() * 0.12,
+        drag: 2.1, acc: 0, turb: 0.35,
+        rot: along + (Math.random() - 0.5) * 1.4,
+        opacity: (0.10 + Math.random() * 0.08) * dense,
         type: T_SHADE, flat: 1,
       });
-    } else if (roleR < 0.93) {
+    } else if (roleR < 0.94) {
       // ---------- WISP: shreds torn straight off the tyre ----------------
       const carry = spd * (0.45 + Math.random() * 0.25);
       this._emit({
-        x, y: gy + 0.25 + Math.random() * 0.5, z,
-        vx: dirX * carry + rx * lat * 1.9 + (Math.random() - 0.5) * 4.0,
-        vy: 1.6 + Math.random() * 3.2 * st.rise,
-        vz: dirZ * carry + rz * lat * 1.9 + (Math.random() - 0.5) * 4.0,
-        w: 1.5 + Math.random() * 2.0,
-        gw: 3.4 + Math.random() * 3.0,
-        life: (0.35 + Math.random() * 0.45) * st.life,
+        x, y: gy + 0.22 + Math.random() * 0.4, z,
+        vx: dirX * carry + rx * lat * 1.5 + (Math.random() - 0.5) * 3.0,
+        vy: 0.9 + Math.random() * 1.8 * st.rise,
+        vz: dirZ * carry + rz * lat * 1.5 + (Math.random() - 0.5) * 3.0,
+        w: (0.6 + Math.random() * 0.8) * big,
+        gw: (1.1 + Math.random() * 1.1) * big,
+        life: (0.22 + Math.random() * 0.28) * st.life,
         r, g, b,
-        drag: 2.6, acc: 1.5 * st.rise, turb: 2.2,
+        drag: 3.0, acc: 0.8 * st.rise, turb: 1.6,
         rotV: (Math.random() - 0.5) * 2.2,
-        opacity: 0.28 + Math.random() * 0.18,
+        opacity: (0.12 + Math.random() * 0.12) * dense,
         type: T_SOFT, flat: 0,
       });
     } else if (isSnow) {
@@ -528,9 +547,24 @@ export class ParticleSystem {
         groundY: gy + 0.05, bounce: 0,
         opacity: 0.8, type: T_DROP,
       });
-    } else if (!isTar) {
+    } else if (!isTar && heft > 0.55 && Math.random() < 0.5) {
       // ---------- GRIT: hard chips that arc and bounce --------------------
-      this._chip(x, gy, z, f, st, 1);
+      // Only when the tyre is genuinely digging. At cruise these read as
+      // specks of dirt on the lens, not as stones off a rally car.
+      this._chip(x, gy, z, f, st, 0.85 + heft * 0.5);
+    } else if (!isTar) {
+      // cruising: one more thread of dust rather than a flying stone
+      this._emit({
+        x, y: gy + 0.20 + Math.random() * 0.3, z,
+        vx: dirX * spd * 0.35 + (Math.random() - 0.5) * 1.6,
+        vy: 0.5 + Math.random() * 0.8,
+        vz: dirZ * spd * 0.35 + (Math.random() - 0.5) * 1.6,
+        w: (0.7 + Math.random() * 0.7) * big, gw: (0.9 + Math.random()) * big,
+        life: (0.24 + Math.random() * 0.22) * st.life,
+        r, g, b, drag: 2.8, acc: 0.5, turb: 1.2,
+        opacity: (0.10 + Math.random() * 0.10) * dense,
+        type: T_SOFT,
+      });
     } else {
       // tarmac: extra soft smoke instead of chips
       this._emit({
@@ -555,14 +589,14 @@ export class ParticleSystem {
       vx: f.dirX * spd * (0.30 + Math.random() * 0.40) + (Math.random() - 0.5) * 7,
       vy: 3.5 + Math.random() * 7.5,
       vz: f.dirZ * spd * (0.30 + Math.random() * 0.40) + (Math.random() - 0.5) * 7,
-      w: (0.10 + Math.random() * 0.16) * scale,
-      h: (0.08 + Math.random() * 0.12) * scale,
-      life: 1.4 + Math.random() * 1.3,
+      w: (0.06 + Math.random() * 0.09) * scale,
+      h: (0.05 + Math.random() * 0.07) * scale,
+      life: 0.55 + Math.random() * 0.55,
       r: this._c2.r * v, g: this._c2.g * v, b: this._c2.b * v,
       drag: 0.12, acc: -19, turb: 0,
       groundY: gy + 0.08, bounce: 0.34,
       rotV: (Math.random() - 0.5) * 9,
-      opacity: 0.95, type: T_HARD,
+      opacity: 0.72, type: T_HARD,
     });
   }
 
@@ -578,13 +612,13 @@ export class ParticleSystem {
       vx: f.dirX * spd * 0.30 + f.rightX * side * (1.5 + Math.random() * 3),
       vy: 1.2 + Math.random() * 3.4,
       vz: f.dirZ * spd * 0.30 + f.rightZ * side * (1.5 + Math.random() * 3),
-      w: 0.22 + Math.random() * 0.34, h: 0.09 + Math.random() * 0.14,
-      life: 0.9 + Math.random() * 1.1,
+      w: 0.14 + Math.random() * 0.20, h: 0.06 + Math.random() * 0.09,
+      life: 0.5 + Math.random() * 0.6,
       r: this._c2.r, g: this._c2.g, b: this._c2.b,
       drag: 1.5, acc: -7.5, turb: 1.2,
       groundY: w.y + 0.06, bounce: 0.12,
       rotV: (Math.random() - 0.5) * 12,
-      opacity: 0.9, type: T_HARD,
+      opacity: 0.75, type: T_HARD,
     });
   }
 
