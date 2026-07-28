@@ -228,6 +228,11 @@ export function buildCarMesh({ body = 0xef4d4d, accent = 0xffffff } = {}) {
 
 const clamp = THREE.MathUtils.clamp;
 
+/** Tyre radius — must match the CylinderGeometry used to build the wheels. */
+const WHEEL_R = 0.46;
+/** Scratch vector for per-wheel ground queries; avoids a per-frame allocation. */
+const _wp = new THREE.Vector3();
+
 /**
  * Visual layer over the Vehicle physics.
  *
@@ -274,7 +279,12 @@ export class CarView {
    * @param {import('./vehicle.js').Vehicle} v
    * @param {{normal: THREE.Vector3, height: number}} ground
    */
-  update(dt, v, ground) {
+  /**
+   * @param {(x:number,z:number)=>number} [sampleHeight] world ground height
+   *        query, used to seat each wheel individually. Optional so the view
+   *        still works standalone, but the game always supplies it.
+   */
+  update(dt, v, ground, sampleHeight) {
     const k = (rate) => 1 - Math.exp(-rate * Math.max(dt, 1e-5));
 
     // Suspension: the vehicle owns the vertical spring (so the feel layer can
@@ -328,6 +338,33 @@ export class CarView {
       // Wheels stay planted: undo the body's vertical move, add corner load.
       w.position.y = 0.46 - this.chassis.position.y + this.suspension[i];
       this.hubs[i].rotation.z = -this.wheelSpin;
+    }
+
+    // ---- plant each wheel on its own patch of ground -----------------------
+    //
+    // The line above only undoes the chassis's vertical TRANSLATION. The wheels
+    // are children of the chassis, so they also inherit its roll and pitch
+    // ROTATION, which swings the outer wheels down through the terrain on any
+    // camber or under any body roll — that is the sinking you can see.
+    //
+    // Rather than trying to invert the tilt analytically, measure it: put the
+    // wheel where the transform actually left it, ask the world how high the
+    // ground is at that exact point, and correct the difference. Costs four
+    // height samples a frame.
+    if (sampleHeight) {
+      this.root.updateMatrixWorld(true);
+      for (let i = 0; i < 4; i++) {
+        const w = this.wheels[i];
+        w.getWorldPosition(_wp);
+        const want = sampleHeight(_wp.x, _wp.z) + WHEEL_R;
+        // The travel has to be generous in BOTH directions. An earlier version
+        // allowed only 0.12 m of drop, which made wheels hang up to 0.87 m in
+        // the air whenever the ground fell away — off a camber, over a road
+        // cut, on the inside of a bank. Track the surface up and down; the
+        // range below is wide enough to cover the worst facet a wheel can
+        // straddle without ever letting one float or bury.
+        w.position.y += clamp(want - _wp.y, -0.75, 0.75);
+      }
     }
 
     // ---- lights ------------------------------------------------------------

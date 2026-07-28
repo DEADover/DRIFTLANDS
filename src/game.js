@@ -21,6 +21,7 @@ import { createAudio } from './audio/audio.js';
 import { Hud } from './ui/hud.js';
 
 const FIXED_DT = 1 / 120;
+const UP = new THREE.Vector3(0, 1, 0);
 
 /**
  * The game shell. It OWNS the wiring between systems and nothing else — every
@@ -215,12 +216,50 @@ export class Game {
     return { x: 0, z: 0, heading: 0 };
   }
 
+  /**
+   * Height of whatever surface is actually DRAWN at (x, z): bridge deck, then
+   * road carriageway, then bare terrain.
+   *
+   * This used to return the terrain height unconditionally, ignoring
+   * `roads.heightAt` entirely. The road ribbon is cut and filled into the
+   * landscape and carries its own banking, so the drawn surface and the queried
+   * surface disagreed everywhere the route did any work — the car sank into the
+   * road, and worse, it took its roll from the TERRAIN normal underneath, so it
+   * sat visibly tilted while parked on a flat road.
+   */
+  surfaceHeight(x, z) {
+    const deck = this.bridges.heightAt(x, z);
+    if (deck !== null && deck !== undefined) return deck;
+    const road = this.roads.heightAt?.(x, z);
+    if (road !== null && road !== undefined) return road;
+    return this.terrain.heightAt(x, z);
+  }
+
   groundAt(x, z) {
     const deck = this.bridges.heightAt(x, z);
     if (deck !== null && deck !== undefined) {
-      return { height: deck, normal: new THREE.Vector3(0, 1, 0), onBridge: true };
+      return { height: deck, normal: UP.clone(), onBridge: true };
     }
-    return { height: this.terrain.heightAt(x, z), normal: this.terrain.normalAt(x, z), onBridge: false };
+
+    const road = this.roads.heightAt?.(x, z);
+    if (road !== null && road !== undefined) {
+      // Normal from the surface we are actually on, sampled wide enough to
+      // ignore facet tooth but tight enough to keep real banking.
+      const e = 2.2;
+      const n = new THREE.Vector3(
+        this.surfaceHeight(x - e, z) - this.surfaceHeight(x + e, z),
+        2 * e,
+        this.surfaceHeight(x, z - e) - this.surfaceHeight(x, z + e)
+      ).normalize();
+      return { height: road, normal: n, onBridge: false, onRoad: true };
+    }
+
+    return {
+      height: this.terrain.heightAt(x, z),
+      normal: this.terrain.normalAt(x, z),
+      onBridge: false,
+      onRoad: false,
+    };
   }
 
   /**
@@ -354,7 +393,8 @@ export class Game {
 
     const v = this.vehicle;
     const g = this.groundAt(v.position.x, v.position.z);
-    this.carView.update(scaled, v, this.carGroundAt(v));
+    this.carView.update(scaled, v, this.carGroundAt(v), this._sampleHeight ??=
+      (x, z) => this.groundAt(x, z).height);
     this.emitFx(scaled);
     this.skid.update(scaled);
     this.particles.update(scaled);
