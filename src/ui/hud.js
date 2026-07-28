@@ -757,6 +757,6 @@ const TEMPLATE = `
 
   <div class="help" data-help>
     <u>W A S D</u><s>drive</s>&nbsp;&nbsp;&nbsp;<u>SPACE</u><s>handbrake</s><br>
-    <u>R</u><s>reset</s>&nbsp;&nbsp;<u>1-5</u><s>travel</s>&nbsp;&nbsp;<u>M</u><s>map</s>&nbsp;&nbsp;<u>N</u><s>mute</s>&nbsp;&nbsp;<u>H</u><s>hide</s>
+    <u>R</u><s>reset</s>&nbsp;&nbsp;<u>M</u><s>map</s>&nbsp;&nbsp;<u>N</u><s>mute</s>&nbsp;&nbsp;<u>H</u><s>hide</s>
   </div>
 </div>`;

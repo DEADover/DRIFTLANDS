@@ -58,21 +58,47 @@ if (shotId) {
   const startAudio = () => { game.audio.start?.(); window.removeEventListener('keydown', startAudio); };
   window.addEventListener('keydown', startAudio);
 
+  /**
+   * Respawn on the route. Also used to rescue the player: at this camera height
+   * it is easy to end up in a lake or wedged somewhere with no way to tell what
+   * went wrong, and a demo must never dead-end.
+   */
+  const respawn = () => {
+    const s = game.roads.spawn?.() ?? game.findSpawn();
+    game.vehicle.reset(s.x, s.z, s.heading);
+    game.skid.clear();
+    game.particles.clear();
+    game.driftScore = 0;
+  };
+
   window.addEventListener('keydown', (e) => {
-    const idx = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(e.code);
-    if (idx >= 0 && BIOME_IDS[idx]) game.loadBiome(BIOME_IDS[idx]);
-    if (e.code === 'KeyR') {
-      const s = game.roads.spawn?.() ?? game.findSpawn();
-      game.vehicle.reset(s.x, s.z, s.heading);
-      game.skid.clear();
-    }
+    if (e.code === 'KeyR') respawn();
+    // Biome switching is deliberately NOT bound. This build is a single-world
+    // demo; the other biomes exist in the codebase but none of them has had the
+    // art pass alpine has, so offering them would only show unfinished work.
   });
+
+  // Auto-rescue: if the car is submerged or stuck for a few seconds, put it back
+  // on the road rather than leaving the player stranded.
+  let stuckFor = 0;
+  const watchdog = (dt, input) => {
+    const v = game.vehicle;
+    const g = game.groundAt(v.position.x, v.position.z);
+    const submerged = g.height < (game.biome.waterLevel ?? -Infinity) - 0.5;
+    // Only "stuck" if the player is ASKING to move and nothing is happening.
+    // Parking to look at the view must never teleport you.
+    const wedged = v.speed < 1.2 && (input.throttle > 0 || input.brake > 0);
+    stuckFor = (submerged || wedged) ? stuckFor + dt : 0;
+    if (stuckFor > 5) { respawn(); stuckFor = 0; }
+  };
 
   let last = performance.now();
   const frame = (now) => {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
-    game.update(dt, kb.sample());
+    const input = kb.sample();
+    game.update(dt, input);
+    watchdog(dt, input);
     game.render();
     requestAnimationFrame(frame);
   };
