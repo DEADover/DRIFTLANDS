@@ -23,7 +23,11 @@ if (shotId) {
 
   const tape = new TapeInput(preset.tape);
   const dt = 1 / 60;
-  const frames = Math.round(preset.warmup / dt);
+  // `?t=` overrides the preset's settle time. Shooting one preset at several
+  // values of t gives a motion sequence — the only way to judge a drift from
+  // stills.
+  const warmup = params.has('t') ? Number(params.get('t')) : preset.warmup;
+  const frames = Math.round(warmup / dt);
   for (let i = 0; i < frames; i++) {
     const input = tape.sample();
     tape.advance(dt);
@@ -32,7 +36,7 @@ if (shotId) {
   game.render();
   game.render(); // second pass so shader compiles never land in the capture
 
-  window.__SHOT_INFO = { preset: preset.id, biome: preset.biome, ...game.stats() };
+  window.__SHOT_INFO = { preset: preset.id, biome: preset.biome, t: warmup, ...game.stats() };
   window.__SHOT_READY = true;
 } else {
   // -------------------------------------------------------------- interactive

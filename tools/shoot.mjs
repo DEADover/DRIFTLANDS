@@ -33,6 +33,9 @@ function parseArgs(argv) {
     else if (a === '--out') out.out = argv[++i];
     else if (a === '--hud') out.hud = argv[++i];
     else if (a === '--base') out.base = argv[++i];
+    // --times 4,6,8,10 shoots each preset at several settle times, producing a
+    // motion sequence. Judging a drift from a single still is guesswork.
+    else if (a === '--times') out.times = argv[++i].split(',').map(Number);
     else if (!a.startsWith('--')) out.presets.push(a);
   }
   return out;
@@ -62,7 +65,15 @@ const browser = await chromium.launch({
 const results = [];
 let hadError = false;
 
+// Expand presets × settle times into the actual shot list.
+const jobs = [];
 for (const id of targets) {
+  if (args.times) for (const t of args.times) jobs.push({ id, t, name: `${id}_t${String(t).replace('.', 'p')}` });
+  else jobs.push({ id, t: null, name: id });
+}
+
+for (const job of jobs) {
+  const { id, t, name } = job;
   const page = await browser.newPage({
     viewport: { width: args.w, height: args.h },
     deviceScaleFactor: 1,
@@ -71,26 +82,26 @@ for (const id of targets) {
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
-  const url = `${args.base}/?shot=${encodeURIComponent(id)}&hud=${args.hud}`;
+  const url = `${args.base}/?shot=${encodeURIComponent(id)}&hud=${args.hud}${t != null ? `&t=${t}` : ''}`;
   const t0 = Date.now();
   let info = null;
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForFunction('window.__SHOT_READY === true', null, { timeout: 120000 });
     info = await page.evaluate('window.__SHOT_INFO');
-    const file = path.join(outDir, `${id}.png`);
+    const file = path.join(outDir, `${name}.png`);
     await page.screenshot({ path: file, type: 'png' });
-    results.push({ id, file: path.relative(ROOT, file), ms: Date.now() - t0, ...info, errors });
-    console.log(`  ✓ ${id.padEnd(16)} ${info?.speedKmh ?? '?'} km/h  drift ${info?.driftAngleDeg ?? '?'}°  ${info?.drawCalls ?? '?'} calls  ${Date.now() - t0}ms`);
+    results.push({ id, name, t, file: path.relative(ROOT, file), ms: Date.now() - t0, ...info, errors });
+    console.log(`  ✓ ${name.padEnd(20)} ${info?.speedKmh ?? '?'} km/h  drift ${info?.driftAngleDeg ?? '?'}°  ${info?.drawCalls ?? '?'} calls  ${Date.now() - t0}ms`);
   } catch (e) {
     hadError = true;
     errors.push(String(e));
-    results.push({ id, error: String(e), errors });
-    console.error(`  ✗ ${id}: ${e}`);
+    results.push({ id, name, error: String(e), errors });
+    console.error(`  ✗ ${name}: ${e}`);
   }
   if (errors.length) {
     hadError = true;
-    console.error(`    page errors in ${id}:`);
+    console.error(`    page errors in ${name}:`);
     for (const e of errors.slice(0, 6)) console.error(`      ${e}`);
   }
   await page.close();
