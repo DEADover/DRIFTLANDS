@@ -45,11 +45,16 @@ const clamp = THREE.MathUtils.clamp;
  */
 function chalet(rng, K, o = {}) {
   const b = new GeoBuilder();
-  const W = o.w ?? rng.float(8.5, 11.0);      // along X (ridge direction)
-  const D = o.d ?? rng.float(6.5, 8.0);       // across Z
-  const plinth = rng.float(0.7, 1.3);
-  const h1 = rng.float(2.9, 3.4);
-  const h2 = rng.float(2.3, 2.8);
+  // Measured against the car in shots/mine: at W 8.5-11 the chalet came out
+  // ~13 m across and three car-lengths wide on screen, which made it the
+  // subject of the frame instead of a note in it. A small alpine farmhouse is
+  // 7-8 m on the ridge. The whole point of the building is SCALE — it has to
+  // be readable as a house and then get out of the way.
+  const W = o.w ?? rng.float(6.6, 8.2);       // along X (ridge direction)
+  const D = o.d ?? rng.float(5.2, 6.4);       // across Z
+  const plinth = rng.float(0.6, 1.0);
+  const h1 = rng.float(2.6, 3.0);
+  const h2 = rng.float(2.0, 2.4);
 
   // Plinth — deliberately oversized and sunk, so a chalet on a slight slope
   // never shows daylight under a corner.
@@ -80,10 +85,13 @@ function chalet(rng, K, o = {}) {
 function woodshed(rng, K) {
   const b = new GeoBuilder();
   const W = rng.float(4.0, 5.4), D = rng.float(2.8, 3.6), H = rng.float(2.2, 2.7);
-  b.box(W, 0.3, D, K.woodDark, { y: 0.15 });
+  // Deck and back wall in `wood`, not `woodDark`. Seen from a 50 degree camera
+  // the shed is mostly roof and back wall, and in woodDark those two read as
+  // one black rectangle lying in the grass beside a lit chalet.
+  b.box(W, 0.3, D, K.wood, { y: 0.15 });
   for (const sx of [-1, 1]) b.box(0.26, H, 0.26, K.wood, { x: sx * (W / 2 - 0.2), y: H / 2, z: -D / 2 + 0.2 });
   for (const sx of [-1, 1]) b.box(0.26, H * 0.86, 0.26, K.wood, { x: sx * (W / 2 - 0.2), y: H * 0.43, z: D / 2 - 0.2 });
-  b.box(W, H * 0.9, 0.3, K.woodDark, { y: H * 0.45, z: -D / 2 + 0.1 });
+  b.box(W, H * 0.9, 0.3, K.wood, { y: H * 0.45, z: -D / 2 + 0.1 });
   // Mono-pitch roof, tilted toward the open front.
   b.box(W * 1.16, 0.22, D * 1.24, K.roofDark, { y: H + 0.1, rx: 0.20 });
   // Log ends — a stack of short cylinders facing out is unmistakable at
@@ -157,9 +165,19 @@ export function createLandmarks(ctx) {
 
   const rng = new Rng((seed ^ 0x1a7d) >>> 0);
   const P = derivePalette(palette, B.id);
+  // The palette's `roofTile` is accent0 — the signal red kept for corner boards
+  // — darkened by 0.20 of HSL lightness. THREE works in LINEAR space, so that
+  // darkening barely bites and the roof rendered as a raspberry lozenge that
+  // outshouted the car in its own frame. An alpine roof is weathered
+  // timber-red: mostly the wood tone, with the accent only as a tint.
+  const tile = P.roofTile.clone().lerp(P.woodDark, 0.62).lerp(P.rust, 0.22);
   const K = {
     ...P,
-    roofDark: P.roofTile.clone().offsetHSL(0, 0.02, -0.10),
+    roofTile: tile,
+    // Only a step down from the ridge tile, not a silhouette. At 0.34 toward
+    // stoneDark the woodshed's mono-pitch roof read as a black rectangle
+    // dropped on the grass.
+    roofDark: tile.clone().lerp(P.stoneDark, 0.18),
   };
   const wl = B.waterLevel ?? 0;
   const half = (B.size / 2) * 0.92;
@@ -205,21 +223,43 @@ export function createLandmarks(ctx) {
   const shedGeo = woodshed(new Rng((seed * 613 + 5) >>> 0), K);
   const panelGeo = fencePanel(rng, K, 4.2);
 
-  for (let i = 0; i < N && homes.length < maxHomes; i += 3) {
+  // Homes are ANCHORED to fixed fractions of the lap and the search spirals
+  // OUTWARD from each anchor, taking the nearest shelf that qualifies. Two
+  // things this buys over the old "walk from index 0, take the first two hits":
+  // the houses can never end up on the same straight, and each one lands as
+  // close as the terrain allows to a chosen point on the route rather than
+  // wherever the first flat patch happened to be — which was reliably in the
+  // opening third of the lap and therefore in none of the capture frames.
+  // The anchors are the quarter and three-quarter marks, i.e. the two points
+  // furthest from the start line and from each other.
+  const anchors = maxHomes === 1 ? [0.24] : [0.24, 0.79];
+  const SPAN = Math.round(N * 0.055);   // +/- ~5% of the lap to find a shelf
+
+  for (let slot = 0; slot < anchors.length; slot++) {
+   const c = Math.round(anchors[slot] * N);
+   for (let k = 0; k <= SPAN * 2 && homes.length === slot; k++) {
+    // 0, +1, -1, +2, -2 ... so the nearest qualifying shelf to the anchor wins.
+    const i = (c + (k % 2 ? (k + 1) >> 1 : -(k >> 1)) + N) % N;
     const p = pts[i];
     const nx = -p.tz, nz = p.tx;
     for (const side of rng.bool(0.5) ? [1, -1] : [-1, 1]) {
-      const off = rng.float(24, 46);
+      // Pulled in from 24-46 m. A chalet 46 m off the road is outside the hero
+      // frame at this camera height; the reference's buildings sit close enough
+      // that the road and the yard share the shot.
+      const off = rng.float(26, 38);
       const x = p.x + nx * side * off;
       const z = p.z + nz * side * off;
       if (Math.abs(x) > half || Math.abs(z) > half) continue;
       const h = T.heightAt(x, z);
       if (h < wl + 4) continue;
       if (roads.isBlocked(x, z)) continue;
-      if (T.normalAt(x, z, 4).y < 0.965) continue;
-      if (flatness(x, z, 9) > 1.7) continue;
+      // Relaxed from 0.965 / 1.7. Alpine's drivable band rolls +/-20 m over
+      // 190 m, so a shelf that flat barely exists beside the route and the
+      // search ran the whole lap without a single hit.
+      if (T.normalAt(x, z, 4).y < 0.945) continue;
+      if (flatness(x, z, 9) > 2.8) continue;
       let clash = false;
-      for (const o of homes) if ((o.x - x) ** 2 + (o.z - z) ** 2 < 420 * 420) clash = true;
+      for (const o of homes) if ((o.x - x) ** 2 + (o.z - z) ** 2 < 260 * 260) clash = true;
       if (clash) continue;
 
       // Face the house square to the road: ridge parallel to the tangent.
@@ -249,6 +289,7 @@ export function createLandmarks(ctx) {
       homes.push({ x, z });
       break;
     }
+   }
   }
 
   // -- 2. CORNER MARKER BOARDS ---------------------------------------------
@@ -309,5 +350,6 @@ export function createLandmarks(ctx) {
   }
 
   group.userData.stats = { homes: homes.length, boards: placed.length, pieces: parts.length };
+  if (typeof window !== 'undefined') window.__LM = { ...group.userData.stats, at: homes };
   return { group, isBlocked, colliders };
 }
