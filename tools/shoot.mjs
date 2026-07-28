@@ -1,0 +1,102 @@
+#!/usr/bin/env node
+/**
+ * SCREENSHOT HARNESS
+ * ------------------
+ * Renders capture presets to PNG through headless Chromium. Deterministic:
+ * the game runs a fixed number of fixed-step frames driven by a scripted input
+ * tape, then signals `window.__SHOT_READY`.
+ *
+ * Usage:
+ *   node tools/shoot.mjs                          # every preset, default size
+ *   node tools/shoot.mjs hero_alpine drift_alpine # named presets
+ *   node tools/shoot.mjs --all --out shots/r03 --w 1920 --h 1080
+ *   node tools/shoot.mjs --hud 0                  # hide the HUD (pure art shots)
+ *
+ * Exits non-zero if any page error occurred, so builders can't ship a broken
+ * build past a critic.
+ */
+import { chromium } from 'playwright';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const ROOT = path.resolve(import.meta.dirname, '..');
+
+function parseArgs(argv) {
+  const out = { presets: [], w: 1920, h: 1080, out: 'shots/latest', hud: '1', base: 'http://127.0.0.1:5173' };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--all') out.all = true;
+    else if (a === '--w') out.w = +argv[++i];
+    else if (a === '--h') out.h = +argv[++i];
+    else if (a === '--out') out.out = argv[++i];
+    else if (a === '--hud') out.hud = argv[++i];
+    else if (a === '--base') out.base = argv[++i];
+    else if (!a.startsWith('--')) out.presets.push(a);
+  }
+  return out;
+}
+
+const args = parseArgs(process.argv.slice(2));
+
+// Read the preset list straight from the source of truth.
+const presetsMod = await import(pathToFileURL(path.join(ROOT, 'src/capture/presets.js')).href);
+const ALL = presetsMod.PRESET_IDS;
+const targets = args.presets.length ? args.presets : ALL;
+
+const outDir = path.isAbsolute(args.out) ? args.out : path.join(ROOT, args.out);
+await mkdir(outDir, { recursive: true });
+
+const browser = await chromium.launch({
+  args: [
+    '--use-gl=angle',
+    '--use-angle=metal',
+    '--enable-unsafe-swiftshader',
+    '--ignore-gpu-blocklist',
+    '--enable-gpu-rasterization',
+    '--disable-lcd-text',
+  ],
+});
+
+const results = [];
+let hadError = false;
+
+for (const id of targets) {
+  const page = await browser.newPage({
+    viewport: { width: args.w, height: args.h },
+    deviceScaleFactor: 1,
+  });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+
+  const url = `${args.base}/?shot=${encodeURIComponent(id)}&hud=${args.hud}`;
+  const t0 = Date.now();
+  let info = null;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForFunction('window.__SHOT_READY === true', null, { timeout: 120000 });
+    info = await page.evaluate('window.__SHOT_INFO');
+    const file = path.join(outDir, `${id}.png`);
+    await page.screenshot({ path: file, type: 'png' });
+    results.push({ id, file: path.relative(ROOT, file), ms: Date.now() - t0, ...info, errors });
+    console.log(`  ✓ ${id.padEnd(16)} ${info?.speedKmh ?? '?'} km/h  drift ${info?.driftAngleDeg ?? '?'}°  ${info?.drawCalls ?? '?'} calls  ${Date.now() - t0}ms`);
+  } catch (e) {
+    hadError = true;
+    errors.push(String(e));
+    results.push({ id, error: String(e), errors });
+    console.error(`  ✗ ${id}: ${e}`);
+  }
+  if (errors.length) {
+    hadError = true;
+    console.error(`    page errors in ${id}:`);
+    for (const e of errors.slice(0, 6)) console.error(`      ${e}`);
+  }
+  await page.close();
+}
+
+await browser.close();
+await writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({ at: new Date().toISOString(), args, results }, null, 2));
+console.log(`\n→ ${results.length} shots in ${path.relative(ROOT, outDir)}`);
+process.exit(hadError ? 1 : 0);
