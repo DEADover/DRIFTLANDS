@@ -97,8 +97,11 @@ export class ChaseCamera {
     this.camera.updateProjectionMatrix();
   }
 
+  /** Drop all accumulated trauma — used on respawn so a crash cannot follow you. */
+  calmShake() { this.shakeAmount = 0; this._fovApplied = undefined; }
+
   addShake(amount) {
-    this.shakeAmount = Math.min(1.2, this.shakeAmount + amount);
+    this.shakeAmount = Math.min(0.55, this.shakeAmount + amount);
   }
 
   /**
@@ -112,7 +115,13 @@ export class ChaseCamera {
     // stabs of throttle or a spin do not jolt the frame.
     const leadN = Math.min(speed / this.leadFullSpeed, 1);
     const lead = this.lookAhead + (this.lookAheadFast - this.lookAhead) * (leadN * leadN);
-    this._tmp.set(car.velocity.x * lead, 0, car.velocity.z * lead);
+    // Clamp the lead to a fraction of what the frame actually covers, so a fast
+    // straight or a tight corner can never push the car off the edge.
+    const vFovR = (this.camera.fov * Math.PI) / 180;
+    const halfFrame = this.distance * Math.tan(vFovR / 2) * this.camera.aspect;
+    const leadDist = Math.min(speed * lead, Math.max(8, halfFrame * 0.45));
+    const leadScale = speed > 0.01 ? leadDist / speed : 0;
+    this._tmp.set(car.velocity.x * leadScale, 0, car.velocity.z * leadScale);
     this._lead.lerp(this._tmp, 1 - Math.exp(-this.leadSmooth * step));
 
     // Push the frame sideways when sliding so the drift has room to breathe.
@@ -152,9 +161,16 @@ export class ChaseCamera {
     const distance = this.distance * (1 + this._speedEase * this.speedWiden) * (opts.zoom ?? 1);
 
     // FOV punch, driven by the feel layer.
-    const fov = this.baseFov + (opts.fovBoost ?? 0);
-    if (Math.abs(this.camera.fov - fov) > 0.001) {
-      this.camera.fov = fov;
+    const fovWant = this.baseFov + (opts.fovBoost ?? 0);
+    if (this._fovApplied === undefined) this._fovApplied = fovWant;
+    // Degrees per second the FOV may move. 1.74 deg in one frame at 120 Hz is
+    // 209 deg/s; 9 deg/s turns the same punch into a 0.2 s swell you read as
+    // weight instead of a snap.
+    const FOV_RATE = 9;
+    const dFov = THREE.MathUtils.clamp(fovWant - this._fovApplied, -FOV_RATE * step, FOV_RATE * step);
+    this._fovApplied += dFov;
+    if (Math.abs(this.camera.fov - this._fovApplied) > 0.002) {
+      this.camera.fov = this._fovApplied;
       this.camera.updateProjectionMatrix();
     }
 

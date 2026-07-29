@@ -540,11 +540,20 @@ export class Vehicle {
   _updateDrivetrain(dt, fwdSpeed, throttle) {
     const T = this.tune;
     const span = T.topSpeed / GEAR_COUNT;
-    const g = clamp(Math.floor(fwdSpeed / span) + 1, 1, GEAR_COUNT);
+    // Gear from speed, WITH HYSTERESIS. A bare floor() meant cruising at a
+    // boundary flipped the gear every time the timer expired, and each flip
+    // fired a shift event that punched the camera.
+    const HYST = 0.12;
+    const upAt = this.gear * span * (1 + HYST * 0.5);
+    const downAt = (this.gear - 1) * span * (1 - HYST * 0.5);
+    let g = this.gear;
+    if (fwdSpeed > upAt) g = Math.min(GEAR_COUNT, this.gear + 1);
+    else if (fwdSpeed < downAt) g = Math.max(1, this.gear - 1);
+
     this._gearTimer = Math.max(0, this._gearTimer - dt);
     if (g !== this.gear && this._gearTimer <= 0) {
       this.justShifted = g > this.gear ? 1 : -1;
-      this._gearTimer = 0.35;
+      this._gearTimer = 0.45;
       this.gear = g;
     }
     const frac = clamp((fwdSpeed - (this.gear - 1) * span) / span, 0, 1);

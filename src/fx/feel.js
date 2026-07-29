@@ -131,7 +131,9 @@ export function createFeel(ctx = {}) {
       }
       if (v.justShifted) {
         // A shift should be felt as a beat, not seen as an event.
-        fovPunch += v.justShifted > 0 ? 0.55 : -0.35;
+        // A shift is a beat, not a jolt. The camera now rate-limits FOV, but
+        // the punch itself was also far too large to begin with.
+        fovPunch += v.justShifted > 0 ? 0.14 : -0.09;
         v.justShifted = 0;
       }
 
@@ -221,7 +223,7 @@ export function createFeel(ctx = {}) {
       if (!(speed > 0.5) || impactCool > 0) return;
       impactCool = TUNE.impactCooldown;
       camera?.addShake?.(clamp(speed * TUNE.impactShake, 0.08, 0.85));
-      fovPunch -= clamp(speed * 0.10, 0.3, 2.2);   // punch IN — the world lurches
+      fovPunch -= clamp(speed * 0.05, 0.1, 0.7);   // punch IN — the world lurches
       if (allowStop && speed > TUNE.hitStopMin && hitStop <= 0) {
         hitStop = Math.min(TUNE.hitStopMax, 0.028 + speed * 0.0032);
       }
