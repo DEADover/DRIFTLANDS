@@ -114,26 +114,52 @@ export function mergeColored(parts) {
     const g = p.geo.index ? p.geo.toNonIndexed() : p.geo;
     if (!g.attributes.normal) g.computeVertexNormals();
     total += g.attributes.position.count;
-    prep.push({ g, c: p.color, top: p.top, t0: p.t0 ?? 0.30, t1: p.t1 ?? 0.86 });
+    prep.push({
+      g, c: p.color, top: p.top, t0: p.t0 ?? 0.30, t1: p.t1 ?? 0.86,
+      low: p.low, l0: p.l0 ?? -0.55,
+    });
   }
   const pos = new Float32Array(total * 3);
   const nrm = new Float32Array(total * 3);
   const col = new Float32Array(total * 3);
   let o = 0;
-  for (const { g, c, top, t0, t1 } of prep) {
+  for (const { g, c, top, t0, t1, low, l0 } of prep) {
     const n = g.attributes.position.count;
     pos.set(g.attributes.position.array, o * 3);
     nrm.set(g.attributes.normal.array, o * 3);
     if (top) {
       const na = g.attributes.normal.array;
       const span = Math.max(1e-4, t1 - t0);
+      // THREE-STOP RAMP, and why stone needs one.
+      //
+      // Two stops (body -> sunlit top) is what produced the salmon boulders: to
+      // get a bright crown at all the top stop had to be lerped most of the way
+      // to a strongly warm highlight, and because EVERY face above t0 landed on
+      // it, a chunky block ended up warm all over with no shadow side left. In
+      // target_01 a meadow boulder is three clear planes — a cool dark
+      // underside, a neutral grey flank, and a pale slightly-warm top — and the
+      // separation between them is albedo, not lighting. `low` supplies the
+      // bottom of that ramp for faces pointing at the ground.
+      const lspan = Math.max(1e-4, t0 - l0);
       for (let i = 0; i < n; i++) {
-        let t = (na[i * 3 + 1] - t0) / span;
-        t = t < 0 ? 0 : t > 1 ? 1 : t;
-        const k = t * t * (3 - 2 * t);
-        col[(o + i) * 3] = c.r + (top.r - c.r) * k;
-        col[(o + i) * 3 + 1] = c.g + (top.g - c.g) * k;
-        col[(o + i) * 3 + 2] = c.b + (top.b - c.b) * k;
+        const ny = na[i * 3 + 1];
+        let r, gg, b;
+        if (low && ny < t0) {
+          let t = (ny - l0) / lspan;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const k = t * t * (3 - 2 * t);
+          r = low.r + (c.r - low.r) * k;
+          gg = low.g + (c.g - low.g) * k;
+          b = low.b + (c.b - low.b) * k;
+        } else {
+          let t = (ny - t0) / span;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const k = t * t * (3 - 2 * t);
+          r = c.r + (top.r - c.r) * k;
+          gg = c.g + (top.g - c.g) * k;
+          b = c.b + (top.b - c.b) * k;
+        }
+        col[(o + i) * 3] = r; col[(o + i) * 3 + 1] = gg; col[(o + i) * 3 + 2] = b;
       }
       o += n;
       continue;
@@ -195,11 +221,15 @@ export class GeoBuilder {
     return this;
   }
 
-  /** `raw`, but sky-facing facets fade to `top`. See `mergeColored`. */
+  /** `raw`, but sky-facing facets fade to `top` and (optionally) ground-facing
+   *  ones fade to `o.low`. See `mergeColored`. */
   rawLit(geo, color, top, o = {}) {
     geo.applyMatrix4(this.m);
     const C2 = (v) => (v.isColor ? v : new THREE.Color(v));
-    this.parts.push({ geo, color: C2(color), top: C2(top), t0: o.t0, t1: o.t1 });
+    this.parts.push({
+      geo, color: C2(color), top: C2(top), t0: o.t0, t1: o.t1,
+      low: o.low ? C2(o.low) : undefined, l0: o.l0,
+    });
     this.tris += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
     return this;
   }
@@ -335,6 +365,51 @@ export function slabGeom(rng, opts = {}) {
   return g;
 }
 
+/**
+ * ONE TIER OF A CONIFER — a scalloped, drooping skirt, not a plain cone.
+ *
+ * A plain `ConeGeometry` is the wrong primitive for this and it took a side-by
+ * -side crop of target_01 to see why. Every side facet of a cone shares the
+ * SAME normal.y, so (a) the tier is one flat tone all the way round apart from
+ * whatever the key light does to it, and (b) the vertex-colour ramp in
+ * `mergeColored`, which keys off normal.y, cannot separate the top of a skirt
+ * from its underside. Our firs were therefore a single green per tier with a
+ * gentle Lambert wash, and the reference's are a mosaic of alternating bright
+ * and dark triangles that reads as needles catching the sun.
+ *
+ * This builds the tier from an apex and a rim ring whose vertices ALTERNATE:
+ * odd ones are pushed out to the full radius and dropped by `droop`, even ones
+ * pulled in to `notch` of it and left level. Consequences, all of them wanted:
+ *
+ *   * the plan-view silhouette is a star with `seg/2` points — the scalloped
+ *     skirt edge the reference has, instead of a smooth octagon;
+ *   * adjacent facets tilt differently, so half of them face up-and-out and
+ *     half down-and-out. The `low`/`top` ramp then gives a real light side and
+ *     dark side WITHIN one tier, independent of where the sun is — which
+ *     matters because instances are randomly yawed and no baked directional
+ *     shading could survive that;
+ *   * it costs exactly `seg` triangles, the same as an open cone.
+ */
+export function firTier(r, h, seg, droop, notch) {
+  const v = [];
+  const ax = 0, ay = h, az = 0;
+  const rim = [];
+  for (let i = 0; i < seg; i++) {
+    const a = (i / seg) * Math.PI * 2;
+    const long = i % 2 === 0;
+    const rr = r * (long ? 1 : notch);
+    rim.push([Math.cos(a) * rr, long ? -droop : 0, Math.sin(a) * rr]);
+  }
+  for (let i = 0; i < seg; i++) {
+    const p = rim[i], q = rim[(i + 1) % seg];
+    v.push(ax, ay, az, p[0], p[1], p[2], q[0], q[1], q[2]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3));
+  g.computeVertexNormals();
+  return g;
+}
+
 // ---------------------------------------------------------------------------
 // Palette derivation. Landmarks and props need more materials than the Palette
 // declares (plaster, roof tile, rusted metal...). Rather than invent hexes we
@@ -362,6 +437,14 @@ const off = (c, h, s, l) => c.clone().offsetHSL(h, s, l);
  */
 const dark = (c, k) => c.clone().multiplyScalar(k);
 
+/** Pull a colour k of the way toward its own luminance — i.e. desaturate it
+ *  without changing how bright it is. Stone needs this: the palette's `rock` is
+ *  a warm brown-grey and the reference's is a near-neutral one. */
+function neutral(c, k) {
+  const l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  return c.clone().lerp(new THREE.Color(l, l, l), k);
+}
+
 export function derivePalette(p, biomeId) {
   const rock = C(p.rock);
   const rockDark = C(p.rockShadow);
@@ -383,6 +466,60 @@ export function derivePalette(p, biomeId) {
     scree: off(rock, 0, -0.05, -0.05),
     stone: off(rock, 0, -0.04, -0.02),
     stoneDark: off(rockDark, 0, 0, -0.04),
+
+    /**
+     * THE STONE TRIAD — three planes of one grey rock, measured off target_01.
+     *
+     * The previous round built boulders as `rock` lerped a THIRD of the way to
+     * plasterWarm (a tan road-edge colour) and then lerped its top plane 52-68%
+     * toward `sunlit` (rgb 255,241,215). That albedo is rgb(225,207,181) before
+     * anything is done to it, and the frame's grade — which adds 5% red and
+     * 10.5% blue — landed the rendered crowns on rgb(232,184,184): red and blue
+     * equal, green 45 below both. That is not stone, it is skin, and it is the
+     * first thing the client saw.
+     *
+     * Sampled off target_01's meadow boulders instead:
+     *
+     *     sunlit top plane   rgb(200,184,145)   B/G 0.79   warm, not white
+     *     side flank         rgb(152,140,112)   B/G 0.80   plain warm grey
+     *     shadow underside   rgb( 96, 80, 80)   B/G 1.00   NEUTRAL, cool
+     *
+     * Two things fall out that the old code had backwards. The warmth belongs
+     * to the LIT plane only — the shadow side of a reference boulder is
+     * neutral, its blue equal to its green — and the lit plane is only a
+     * QUARTER-step warm (B/G 0.79), not the near-yellow `sunlit` used before.
+     * `sunlit` stays, because road gravel and grass crowns want it; stone does
+     * not.
+     *
+     * Everything below is derived: `rock` desaturated toward its own luminance,
+     * then lifted toward `white` (the palette's own last accent) for the top and
+     * scaled down for the shadow. Blue is pulled back by a measured factor
+     * rather than by lerping toward a yellow, because lerping toward yellow
+     * takes green with it and the reference's stone keeps its green.
+     *
+     * The blue factors look brutal until you measure what the frame does to a
+     * grey. Shot and sampled on the same boulder: an albedo of (114,108,97)
+     * renders at (132,130,140) on a side face and (209,189,184) on a top one —
+     * the hemisphere ambient is sky blue and the grade adds another 10% of blue
+     * on top, so a NEUTRAL albedo comes out distinctly cool and a warm one comes
+     * out pink. Every stone tone below is therefore pre-compensated: B/G ~0.63
+     * in the albedo lands at B/G ~0.79 on screen, which is target_01's number.
+     */
+    stoneBody: (() => {
+      const g = neutral(rock, 0.55).lerp(rockDark, 0.10);
+      g.b *= 0.62; g.r *= 1.06;
+      return g;
+    })(),
+    stoneTop: (() => {
+      const g = neutral(rock, 0.55).lerp(white, 0.34);
+      g.b *= 0.53;
+      return g;
+    })(),
+    stoneLow: (() => {
+      const g = neutral(rockDark, 0.45).multiplyScalar(0.88);
+      g.b *= 0.62; g.r *= 1.08;
+      return g;
+    })(),
 
     // Man-made
     plaster: off(edge, 0, -0.10, 0.16),

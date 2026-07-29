@@ -427,8 +427,9 @@ function screePatch(rng, K) {
     const s = rng.float(0.28, 0.72);
     b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28),
       rng.float(-0.3, 0.3), rng.float(-0.3, 0.3), s);
-    const sc = i % 3 === 0 ? K.scree : K.rockDark;
-    b.rawLit(rockGeom(rng, { jitter: 0.34 }), sc, sc.clone().lerp(K.sunlit, 0.22), { t0: 0.55, t1: 0.99 });
+    const sc = K.stoneBody.clone().lerp(K.stoneLow, i % 3 === 0 ? 0.10 : 0.48);
+    b.rawLit(rockGeom(rng, { jitter: 0.34 }), sc,
+      K.stoneTop.clone().lerp(K.stoneBody, 0.30), { t0: 0.50, t1: 0.98, low: K.stoneLow, l0: -0.30 });
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1 };
@@ -442,56 +443,36 @@ function screePatch(rng, K) {
  */
 function slab(rng, K, o = {}) {
   const b = new GeoBuilder();
-  // Pale, slightly warm grey. Against a deep green meadow the rock has to be
-  // clearly LIGHTER than the grass or it disappears into it — in the reference
-  // the boulders are the brightest thing in the frame after the road.
-  // Warm pale grey, from the palette's own road-edge tone. The reference's
-  // boulders are a warm stone, not the cool blue-grey of the cliff colour, and
-  // that warmth is what separates them from the meadow shadows.
-  // Pale, but not paper. At 0.30 toward plasterWarm the meadow boulders came
-  // out a milky tan that read lighter than the road; the reference's stones are
-  // a warm mid-grey that still sits a clear step above the grass.
-  // Landed at 0.20 after shooting 0.30 (milky tan, lighter than the road) and
-  // 0.14 (a muddy mid-grey that sank into the meadow shadows). target_01's
-  // meadow blocks are a pale WARM grey whose sunlit top is the brightest thing
-  // in the grass without ever competing with the gravel.
-  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.0, 0.18)).lerp(K.plasterWarm, 0.34);
-  // ROUND 6 — WHERE THE FRAME'S HIGHLIGHTS COME FROM.
+  // GREY STONE, THREE PLANES. See buildkit's `stoneBody / stoneTop / stoneLow`
+  // for the measurement; the short version is that the previous round's warm
+  // crown was both far too warm and applied to far too much of the solid, so
+  // every boulder in the meadow rendered flesh-pink. The chunky faceted
+  // silhouette below is unchanged — it was never the problem.
   //
-  // Measured: target_01 puts 1.5% of its pixels above 0.70 luma with a tail
-  // running to 1.0; ours had 0.4% and NOTHING above 0.75. Masking both frames
-  // at L>0.70 showed where the reference's live — the gravel, the water, and
-  // the planed top faces of its meadow boulders, which come out near white.
-  // Ours had none on stone at all, because a rock whose entire albedo is a mid
-  // warm grey cannot make a bright pixel: Lambert only ever multiplies it down.
-  //
-  // So the stone is given a real two-tone albedo, sky-facing to side-facing,
-  // and the lift is large — the top plane is most of the way to the palette's
-  // white. That is not stylisation, it is what a planed granite face does in
-  // full sun, and it is the single cheapest highlight in the meadow because
-  // every group already has a car-sized anchor block in it.
-  // ...and the amount, which took one shoot to find. THREE.Color is LINEAR, so
-  // "lerp the stone 70% of the way to white" is not a 70% brightening, it is
-  // roughly a 4x one: the first attempt rendered rock tops at rgb(249,243,182),
-  // L 0.94, and the meadow filled with marshmallows. Sampled off target_01, a
-  // sunlit boulder top is rgb(167,141,94) — L 0.56, warm, and a good stop below
-  // the gravel. A ~1.5x lift lands there, which is a lerp of about 0.2.
-  //
-  // The highlight is also WARM, not white: the reference's stone tops carry
-  // R > G > B by a wide margin because they are lit by a low afternoon sun, and
-  // a neutral-white top plane reads as snow at this camera height.
-  const litTop = (c, k) => c.clone().lerp(K.sunlit, k);
-  b.rawLit(slabGeom(rng, { jitter: 0.24 }), body, litTop(body, rng.float(0.52, 0.68)),
-    { t0: 0.74, t1: 1.00 });
+  // A LITTLE per-instance variation in the body keeps a group of blocks from
+  // looking like one material stamped four times, but it varies VALUE only.
+  const k = rng.float(0.0, 0.26);
+  const body = K.stoneBody.clone().lerp(K.stoneLow, k);
+  const top = K.stoneTop.clone().lerp(K.stoneBody, k * 0.9 + rng.float(0, 0.14));
+  const low = K.stoneLow;
+  // t0 0.42: a planed granite face is not exactly level, and at 0.74 only the
+  // one facet that happened to point straight up caught the light, so the
+  // reference's broad pale crown came out as a single bright polygon in a sea
+  // of mid grey. The shadow ramp starts at the same place and runs down to
+  // horizontal-and-below, which is where a bedded block's dark side lives.
+  b.rawLit(slabGeom(rng, { jitter: 0.24 }), body, top,
+    { t0: 0.55, t1: 0.94, low, l0: -0.10 });
   const n = rng.int(1, 3);
   for (let i = 0; i < n; i++) {
     const s = rng.float(0.34, 0.62);
     const a = rng.float(0, Math.PI * 2), d = rng.float(0.85, 1.35);
     b.pushTilt(Math.cos(a) * d, -0.06, Math.sin(a) * d, rng.float(0, 6.28),
       rng.float(-0.16, 0.16), rng.float(-0.16, 0.16), s);
-    const sat = K.rockDark.clone().lerp(K.rock, rng.float(0.35, 0.85)).lerp(K.plasterWarm, 0.10);
-    b.rawLit(slabGeom(rng, { jitter: 0.26 }), sat, litTop(sat, rng.float(0.36, 0.50)),
-      { t0: 0.72, t1: 1.00 });
+    const k2 = rng.float(0.10, 0.44);
+    b.rawLit(slabGeom(rng, { jitter: 0.26 }),
+      K.stoneBody.clone().lerp(K.stoneLow, k2),
+      K.stoneTop.clone().lerp(K.stoneBody, 0.20 + k2),
+      { t0: 0.52, t1: 0.92, low, l0: -0.10 });
     b.pop();
   }
   if (o.snow) {
@@ -505,17 +486,23 @@ function slab(rng, K, o = {}) {
 
 function boulder(rng, K, o = {}) {
   const b = new GeoBuilder();
-  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.25, 0.70)).lerp(K.plasterWarm, 0.22);
-  // Same two-tone albedo as `slab`, a little gentler: a rounded boulder has no
-  // single plane facing the sky, so its crown catches the light over a smaller
-  // area and a full slab-strength lift would read as a bald patch of snow.
-  b.rawLit(rockGeom(rng, { jitter: 0.28 }), body, body.clone().lerp(K.sunlit, rng.float(0.20, 0.30)),
-    { t0: 0.55, t1: 0.99 });
+  // Same grey triad as `slab`. A rounded boulder has no single plane facing the
+  // sky, so its crown ramp starts higher and its shadow ramp bites earlier —
+  // which is what gives target_01's round stones their soft top-to-bottom roll
+  // instead of the slab's hard three planes. `detail: 1` because the reference's
+  // rounded boulders are visibly many-faceted, not eight-sided lumps.
+  const k = rng.float(0.06, 0.40);
+  const body = K.stoneBody.clone().lerp(K.stoneLow, k);
+  b.rawLit(rockGeom(rng, { jitter: 0.30, detail: rng.bool(0.5) ? 1 : 0 }), body,
+    K.stoneTop.clone().lerp(K.stoneBody, 0.24 + k),
+    { t0: 0.50, t1: 0.98, low: K.stoneLow, l0: -0.30 });
   if (rng.bool(0.5)) {
     const lump = rockGeom(rng, { jitter: 0.30 });
     lump.scale(0.55, 0.5, 0.55);
     lump.translate(rng.float(-0.9, 0.9), 0.1, rng.float(-0.9, 0.9));
-    b.rawLit(lump, K.rockDark, K.rockDark.clone().lerp(K.sunlit, 0.24), { t0: 0.55, t1: 0.99 });
+    b.rawLit(lump, K.stoneBody.clone().lerp(K.stoneLow, 0.45),
+      K.stoneTop.clone().lerp(K.stoneBody, 0.55),
+      { t0: 0.50, t1: 0.98, low: K.stoneLow, l0: -0.30 });
   }
   if (o.snow) {
     const cap = rockGeom(rng, { jitter: 0.22 });
