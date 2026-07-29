@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Rng, fbm } from '../core/rng.js';
-import { GeoBuilder, rockGeom, slabGeom, derivePalette } from './buildkit.js';
+import { GeoBuilder, rockGeom, slabGeom, blockGeom, firTier, derivePalette } from './buildkit.js';
 
 /**
  * VEGETATION & GROUND COVER.
@@ -62,14 +62,55 @@ function fir(rng, K, o = {}) {
   // a row of little points. Ours were three to five FAT cones, and from a
   // camera this high a fat cone shows its whole top face — which is why our
   // stands read as a heap of green pyramids and the reference's read as trees.
-  const tiers = o.tiers ?? rng.int(6, 9);
-  const trunkH = rng.float(1.25, 2.30) * tall;
-  const tr = rng.float(0.24, 0.34) * wide;
+  // ---- ROUND 8: THE SILHOUETTE, CROPPED SIDE BY SIDE AT 3.4x ---------------
+  //
+  // Everything above is a record of tuning the PROPORTIONS of a stack of plain
+  // cones, and the proportions were never the problem. Cropping one reference
+  // fir next to one of ours at 3.4x, three things separate them and none of
+  // them is size:
+  //
+  //   1. A BARE BROWN TRUNK. The reference's fir stands on a clean pole for the
+  //      bottom sixth of its height and you can see grass under the skirt.
+  //      Ours started its lowest tier 1.2 m off the ground and the skirt, being
+  //      2.3 m across, covered it — so our tree grew straight out of the turf
+  //      like a bush.
+  //   2. STEPS. The reference has four or five tiers with a clear notch between
+  //      each pair — you can count them. Ours advanced only 0.42-0.52 of a
+  //      tier's height per tier and shrank 10% per tier, which is a CONTINUOUS
+  //      cone by construction: seven overlapping skirts with no step anywhere.
+  //      A smooth green cone is what the client means by "no detail".
+  //   3. A LIT SIDE AND A DARK SIDE. Every side facet of a `ConeGeometry` has
+  //      the same normal.y, so the vertex ramp in `mergeColored` cannot tell
+  //      the top of a skirt from its underside and every tier came out one
+  //      flat green. `firTier` (buildkit) exists precisely for this and had
+  //      never been called, because its winding was inside out — fixed now.
+  //      Its rim alternates long-and-drooping with short-and-level, so half of
+  //      each tier's facets face up-and-out and half down-and-out, and the
+  //      three-stop ramp gives them a real value separation that survives the
+  //      random per-instance yaw.
+  //
+  // ...and the correction, shot the same round. Four to six WIDELY SPACED
+  // tiers is not what target_01 has either — that came back as a stack of
+  // paper triangles with a gap of sky between each pair. Its fir is seven to
+  // nine skirts with heavy overlap, and you read the tiers not as gaps but as
+  // ROWS OF DROOPING POINTS: each skirt's long spurs hang below the rim of the
+  // one under it. So the tier count and the overlap go back near where they
+  // were, and the whole legibility gain comes from the per-facet mosaic in
+  // `firTier` plus the deeper droop.
+  const tiers = o.tiers ?? rng.int(7, 9);
+  // A sixth of the tree, and never less than a car's height, so the trunk still
+  // shows at the smallest instance scale in the ladder.
+  // ...and shot at 2.6-4.0 m the trees came back as brown POLES with a small
+  // conifer balanced on top — the trunk was reading as a third of the object.
+  // In target_01 what shows below the skirt is a stub: enough to plant the tree
+  // and put a slot of grass under it, never enough to be a shape of its own.
+  const trunkH = rng.float(1.5, 2.5) * tall;
+  const tr = rng.float(0.17, 0.25) * wide;
   // Open-ended: the trunk's top disappears inside the lowest tier and its
   // bottom is in the turf, so both caps are ten triangles of nothing. Same
   // reasoning for the tier cones below. Across ~30k conifers this is worth
   // about a million triangles, which is what pays for the extra trees.
-  b.cyl(tr * 0.8, tr * 1.5, trunkH + 1.6, 5, K.bark, { y: (trunkH + 1.6) / 2, open: true });
+  b.cyl(tr * 0.7, tr * 1.9, trunkH + 1.0, 5, K.bark, { y: (trunkH + 1.0) / 2, open: true });
   let y = trunkH;
   // Broader skirt, slightly shorter tiers than v1. Measured off target_01: the
   // conifers there are about a third as wide as they are tall, with the lowest
@@ -112,25 +153,58 @@ function fir(rng, K, o = {}) {
   // with it and did it while the stands were still fused, so it produced
   // needles inside a mass. With the stands separated, a narrower tree shows
   // its shape instead of its neighbour's.
-  let r = rng.float(1.78, 2.36) * wide;
+  let r = rng.float(2.05, 2.70) * wide;
+  const NR = K.leafRamp.length;
   for (let i = 0; i < tiers; i++) {
-    const h = rng.float(2.62, 3.48) * tall * (1 - i * 0.04);
+    const h = rng.float(2.30, 3.00) * tall * (1 - i * 0.04);
     // Dark at the skirt, lighter at the tip. The reference's conifers all read
     // this way — a deep shadowed core with sunlit new growth on top — and it is
     // what stops a stand of firs from being one flat green mass.
-    const c = K.leafRamp[Math.min(K.leafRamp.length - 1, Math.floor((i / Math.max(1, tiers - 1)) * K.leafRamp.length))];
-    b.cone(r, h, rng.int(5, 7), c, { y: y + h / 2, ry: rng.float(0, 1.2), open: true });
+    const ci = Math.min(NR - 1, Math.floor((i / Math.max(1, tiers - 1)) * NR));
+    const body = K.leafRamp[ci];
+    // The mosaic uses the WHOLE ramp inside every tier, not the two rungs
+    // either side of the tier's own. Measured on target_01's fir at 8x, one
+    // skirt spans #2a4d22 to #86b054 — a factor of three in luminance. Two
+    // adjacent rungs of `leafRamp` are a factor of 1.1 apart, which renders as
+    // a flat green whatever the geometry does.
+    const litc = K.leafRamp[NR - 1];
+    // ...and the shadow rung goes back to the bottom of the ramp. Measured on
+    // the frame after the silhouette landed: luma bucket 1 (L 0.10-0.20) held
+    // 9.7% of our pixels against the reference's 15.0%, and bucket 6 held 9.3%
+    // against its 5.0% — i.e. our wood is a stop too bright all the way down
+    // its dark side. `l0` stays at -0.22, so only facets that genuinely point
+    // at the ground reach the bottom rung and the "soot" failure of round 6
+    // (6.1% in the BOTTOM bucket) cannot come back.
+    const darkc = K.leafRamp[0];
+    // 8 segments, and it must stay EVEN: the scallop alternates long/short
+    // around the rim, so an odd count puts two long spurs side by side and the
+    // star loses a point.
+    b.push(0, y, 0, rng.float(0, Math.PI * 2));
+    // droop 0.34h: the spurs have to hang far enough to show BELOW the rim of
+    // the tier under them, because that overhang is what the reference reads as
+    // a tier boundary once the skirts overlap.
+    b.rawLit(firTier(r, h, 8, h * 0.34, 0.58, rng), body, litc,
+      { t0: 0.16, t1: 0.56, low: darkc, l0: -0.24 });
+    b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.
     if (o.snow && i >= tiers - 2) {
-      b.cone(r * 0.62, h * 0.26, rng.int(5, 6), K.snow, { y: y + h * 0.84 });
+      b.cone(r * 0.60, h * 0.28, 6, K.snow, { y: y + h * 0.80 });
     }
-    // Heavy overlap and a gentle taper: each skirt hides the base of the one
-    // below it, so the silhouette is a continuous cone with a serrated edge
-    // rather than a stack of separate umbrellas.
-    y += h * rng.float(0.42, 0.52);
-    r *= rng.float(0.855, 0.905);
+    // A CLEAR STEP between tiers. 0.62-0.74 of a tier's height per advance
+    // leaves the top third of each skirt uncovered, so the silhouette is a
+    // staircase of four or five points instead of one smooth cone — which is
+    // the single feature that made the reference's firs read as trees and ours
+    // read as green pyramids.
+    y += h * rng.float(0.44, 0.56);
+    r *= rng.float(0.865, 0.915);
   }
-  return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y + 2 };
+  // Crown spike: the reference's firs all finish in a thin leader above the
+  // last full skirt, and without it the stack ends bluntly.
+  b.push(0, y, 0, rng.float(0, Math.PI * 2));
+  b.rawLit(firTier(r * 0.62, r * 1.7, 6, r * 0.10, 0.70, rng),
+    K.leafRamp[NR - 1], K.leafRamp[NR - 1], { t0: 0.10, t1: 0.72, low: K.leafRamp[1], l0: -0.22 });
+  b.pop();
+  return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y + r * 1.5 };
 }
 
 function scotsPine(rng, K) {
@@ -419,6 +493,217 @@ function tussock(rng, K) {
   return { geo: b.build(), trunkR: 0, height: 1.0 };
 }
 
+// ---------------------------------------------------------------------------
+// THE DETAIL SET — "most polygons have no detail at all"
+//
+// This block exists because of one crop. Blowing target_01's meadow up 8x next
+// to ours: between its conifers there is something every couple of metres —
+// upright blades catching the sun, dark spiky scrub, a half-buried cobble, a
+// hollow stump, a fallen log, a scrape of bare earth, a drift of white heads —
+// and NONE of it is more than a handful of triangles. Ours had exactly two
+// kinds of ground cover (a squat grass tuft and a flower drift), both of them
+// within a few percent of the sward's own colour, so 37 000 tussocks in a map
+// contributed nothing you could see.
+//
+// The rule for everything here: under 25 triangles, and a CLEAR value or hue
+// step off the grass. Detail you cannot see is the most expensive thing in a
+// frame — you pay for it twice, once in triangles and once in the note the
+// client writes.
+// ---------------------------------------------------------------------------
+
+/** Thin upright blades. Taller and brighter than `tussock`, which is a squat
+ *  clump: these are the individual spikes catching the key light. */
+function grassBlades(rng, K) {
+  const b = new GeoBuilder();
+  // ---- FOOTPRINT, and the arithmetic that had been missing all round -------
+  //
+  // Cropping target_01 at 8x and measuring against the road (11 m) puts its
+  // meadow at roughly ONE VISIBLE MARK PER TWO SQUARE METRES. A blanket cell of
+  // 1.4 m would deliver that in instances and would also be 1.7 million of
+  // them, which is not a budget, it is a joke. But a mark is not an instance:
+  // one of these carries eight or ten blades. So the density is bought by
+  // spreading each instance over a wider footprint instead of by placing more
+  // of them — same triangles per mark, a third of the instances.
+  const n = rng.int(7, 11);
+  for (let i = 0; i < n; i++) {
+    const a = rng.float(0, Math.PI * 2), d = Math.sqrt(rng.float(0, 1)) * 1.6;
+    const h = rng.float(0.80, 1.60);
+    // Two thirds lit. In target_01 the blades standing proud of the sward are
+    // the BRIGHTEST green in the meadow — brighter than the sunlit turf — which
+    // is what gives its grass a sparkle ours has never had.
+    const lit = rng.bool(0.62);
+    // No accent in it. The first pass warmed the lit blade 10% toward the
+    // palette yellow and the meadow filled with straw-coloured spikes — the
+    // same mistake the `grassLit` note above already records once.
+    // ...and the lit blade is pulled a quarter back toward the sward green.
+    // Straight `grassLit` is built off the two brightest rungs of a ramp that
+    // is already yellow-olive at the top, so at blade scale it rendered as
+    // chartreuse spikes standing out of green grass.
+    // 0.30 toward the dark rung, not 0.13. Cropped at 5x, a lit blade at 0.13
+    // is a chartreuse spike sitting ON the meadow; the reference's lit blades
+    // are the same hue family as the sward, one value step up, so they read as
+    // grass catching light rather than as a different plant.
+    const c = lit ? K.grassLit.clone().lerp(K.grass[1], 0.30) : K.grass[i % K.grass.length];
+    b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.44, 0.44));
+    // Three segments: a blade is 2 px wide on screen and a triangle prism is
+    // indistinguishable from anything rounder there.
+    // Wider than the first pass. At radius 0.11-0.21 squashed to 0.42 on one
+    // axis a blade was under half a screen pixel across at the hero camera —
+    // 62 000 of them in the map and a 3.4x crop of the meadow showed almost
+    // none. Detail that cannot resolve is the most expensive thing there is.
+    b.cone(rng.float(0.17, 0.30), h, 3, c, { y: h / 2, sz: 0.62, open: true });
+    b.pop();
+  }
+  return { geo: b.build(), trunkR: 0, height: 1.7 };
+}
+
+/** Low dark scrub — the near-black speckle scattered through the reference's
+ *  meadow. Spiky rather than blobby, so it never reads as a small tree. */
+function shrubTuft(rng, K) {
+  const b = new GeoBuilder();
+  const n = rng.int(5, 8);
+  const R = rng.float(0.7, 1.5);
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + rng.float(-0.55, 0.55);
+    const d = rng.float(0, R * 0.75);
+    const h = rng.float(0.5, 1.15);
+    b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.55, 0.55));
+    b.cone(rng.float(0.20, 0.40), h, 4, K.bushDark[i % K.bushDark.length], { y: h / 2, open: true });
+    b.pop();
+  }
+  return { geo: b.build(), trunkR: 0, height: 1.0 };
+}
+
+/** ROCK FAMILY 3 of 4 — a single half-buried cobble, squat and rounded, never
+ *  bigger than a football. The grit that keeps a meadow off being a plane. */
+function cobble(rng, K) {
+  const b = new GeoBuilder();
+  // One to three of them, loosely spread. A cobble on its own is a mark; two
+  // or three a metre apart are a SCATTER, and the reference's turf is scatters
+  // all the way down. Costs 20 triangles per stone and buys the density that
+  // placing three times as many instances would.
+  const n = rng.int(1, 3);
+  for (let i = 0; i < n; i++) {
+    const g = rockGeom(rng, { jitter: 0.36 });
+    const s = i === 0 ? 1 : rng.float(0.42, 0.80);
+    g.scale(s, s * rng.float(0.30, 0.52), s);
+    if (i > 0) {
+      const a = rng.float(0, Math.PI * 2), d = rng.float(0.7, 1.7);
+      g.translate(Math.cos(a) * d, -0.12, Math.sin(a) * d);
+    }
+    const k = rng.float(0.05, 0.55);
+    b.rawLit(g, K.stoneBody.clone().lerp(K.stoneLow, k),
+      K.stoneTop.clone().lerp(K.stoneBody, 0.30 + k * 0.5),
+      { t0: 0.40, t1: 0.96, low: K.stoneLow, l0: -0.30 });
+  }
+  return { geo: b.build(), trunkR: 0, height: 0.6 };
+}
+
+/** ROCK FAMILY 2 of 4 — a TRAIN of three or four mid stones stepping down a
+ *  heading. The reference almost never puts one stone anywhere; it puts a
+ *  line of them, and the line is what reads as geology rather than as litter. */
+function stoneTrain(rng, K) {
+  const b = new GeoBuilder();
+  const n = rng.int(3, 4);
+  const a0 = rng.float(0, Math.PI * 2);
+  const ux = Math.cos(a0), uz = Math.sin(a0);
+  let run = 0;
+  let s = rng.float(0.85, 1.35);
+  for (let i = 0; i < n; i++) {
+    const lat = rng.gauss(0, 0.30);
+    const g = rng.bool(0.45) ? slabGeom(rng, { jitter: 0.26 }) : rockGeom(rng, { jitter: 0.32 });
+    g.scale(s, s * rng.float(0.5, 0.85), s);
+    g.rotateY(rng.float(0, Math.PI * 2));
+    g.translate(ux * run - uz * lat, -s * 0.22, uz * run + ux * lat);
+    const k = rng.float(0.05, 0.55);
+    b.rawLit(g, K.stoneBody.clone().lerp(K.stoneLow, k),
+      K.stoneTop.clone().lerp(K.stoneBody, 0.24 + k * 0.5),
+      { t0: 0.44, t1: 0.96, low: K.stoneLow, l0: -0.28 });
+    run += s * rng.float(1.3, 2.2);
+    s *= rng.float(0.58, 0.84);
+  }
+  return { geo: b.build(), trunkR: 0, height: 1 };
+}
+
+/** A log lying in the grass, with a pale sawn end. */
+function logFallen(rng, K) {
+  const b = new GeoBuilder();
+  const L = rng.float(2.4, 5.0);
+  const r = rng.float(0.22, 0.40);
+  b.push(0, r * 0.86, 0, rng.float(0, Math.PI * 2));
+  b.cyl(r * 0.80, r, L, 6, K.dead, { rz: Math.PI / 2, open: true });
+  b.cyl(r * 0.80, r * 0.80, 0.10, 6, K.woodPale, { rz: Math.PI / 2, x: L / 2 });
+  // One broken branch stub, which is most of what stops a log reading as a pipe.
+  if (rng.bool(0.6)) {
+    const bl = rng.float(0.5, 1.1);
+    b.pushTilt(rng.float(-L * 0.3, L * 0.3), 0, 0, rng.float(0, 6.28), 0, rng.float(-0.5, 0.5));
+    b.cyl(0.07, 0.13, bl, 4, K.dead, { y: bl / 2, open: true });
+    b.pop();
+  }
+  b.pop();
+  return { geo: b.build(), trunkR: 0, height: 0.8 };
+}
+
+/** Two logs and one on top — a stack left at the edge of a clearing. */
+function logPile(rng, K) {
+  const b = new GeoBuilder();
+  const L = rng.float(2.6, 4.2);
+  const r = rng.float(0.26, 0.40);
+  b.push(0, 0, 0, rng.float(0, Math.PI * 2));
+  const put = (x, y) => {
+    b.cyl(r * 0.86, r, L, 6, K.dead, { rz: Math.PI / 2, x: 0, y, z: x, open: true });
+    b.cyl(r * 0.86, r * 0.86, 0.09, 6, K.woodPale, { rz: Math.PI / 2, x: L / 2, y, z: x });
+  };
+  put(-r * 1.02, r);
+  put(r * 1.02, r);
+  put(0, r * 2.72);
+  b.pop();
+  return { geo: b.build(), trunkR: 0, height: r * 3.4 };
+}
+
+/** A cut stump with a pale ring and a dark heart, or a hollow one. Straight off
+ *  target_01, which has these dotted through the grass between the stands. */
+function stumpHollow(rng, K) {
+  const b = new GeoBuilder();
+  const h = rng.float(0.7, 1.5);
+  const r = rng.float(0.45, 0.80);
+  b.cyl(r * 0.94, r * 1.20, h, 6, K.dead, { y: h / 2, open: true });
+  b.cyl(r * 0.94, r * 0.94, 0.10, 6, K.woodPale, { y: h + 0.05 });
+  b.cyl(r * 0.44, r * 0.44, 0.07, 5, K.trunkDark, { y: h + 0.13 });
+  // Two root buttresses. A plain drum reads as a barrel from above.
+  for (let i = 0; i < 2; i++) {
+    const a = rng.float(0, Math.PI * 2);
+    b.pushTilt(Math.cos(a) * r * 0.9, 0, Math.sin(a) * r * 0.9, a, 0, rng.float(0.7, 1.1));
+    b.cyl(0.10, 0.22, r * 1.1, 4, K.dead, { y: r * 0.5, open: true });
+    b.pop();
+  }
+  return { geo: b.build(), trunkR: 0, height: h };
+}
+
+/** A scrape of bare earth with a little grit in it. Flat-ish and wide: the job
+ *  is to break the turf, not to be an object. */
+function earthPatch(rng, K) {
+  const b = new GeoBuilder();
+  const R = rng.float(1.3, 2.8);
+  // A shallow 7-sided dome. Cover props are emitted 0.15 below the ground, so
+  // it needs half a metre of rise to show at all; what stands proud reads as a
+  // worn scrape rather than a molehill because it is four times as wide as tall.
+  b.rawLit(
+    (() => { const g = rockGeom(rng, { jitter: 0.22 }); g.scale(R, R * rng.float(0.16, 0.26), R); return g; })(),
+    K.soil, K.soilLit, { t0: 0.55, t1: 0.99, low: K.trunkDark, l0: -0.2 });
+  const n = rng.int(2, 5);
+  for (let i = 0; i < n; i++) {
+    const a = rng.float(0, Math.PI * 2), d = Math.sqrt(rng.float(0, 1)) * R * 0.85;
+    const s = rng.float(0.10, 0.26);
+    const g = rockGeom(rng, { jitter: 0.34 });
+    g.scale(s, s * 0.6, s);
+    g.translate(Math.cos(a) * d, R * 0.12, Math.sin(a) * d);
+    b.rawLit(g, K.stoneBody.clone().lerp(K.stoneLow, 0.35), K.stoneTop.clone().lerp(K.stoneBody, 0.4),
+      { t0: 0.42, t1: 0.96, low: K.stoneLow, l0: -0.3 });
+  }
+  return { geo: b.build(), trunkR: 0, height: 0.5 };
+}
+
 function screePatch(rng, K) {
   const b = new GeoBuilder();
   const n = rng.int(5, 8);
@@ -513,6 +798,51 @@ function boulder(rng, K, o = {}) {
   return { geo: b.build(), trunkR: 1, height: 1 };
 }
 
+/**
+ * ROCK FAMILY 1 of 4 — the CLEAVED BLOCK. A big flat-faced anchor with hard
+ * vertical edges and a planed top, and one wedge fallen against its base. This
+ * is the silhouette the meadow was completely missing: everything we had was a
+ * jittered icosahedron under one name or another.
+ */
+function blockStone(rng, K, o = {}) {
+  const b = new GeoBuilder();
+  const k = rng.float(0.0, 0.30);
+  const body = K.stoneBody.clone().lerp(K.stoneLow, k);
+  const top = K.stoneTop.clone().lerp(K.stoneBody, k * 0.8 + rng.float(0, 0.18));
+  const g = blockGeom(rng, { jitter: 0.24, taper: rng.float(0.12, 0.34) });
+  // Wider than tall and slightly canted. A block sitting dead level reads as
+  // masonry; two or three degrees of tilt reads as something that fell.
+  g.scale(rng.float(1.15, 1.55), rng.float(0.60, 1.05), rng.float(0.95, 1.30));
+  g.rotateY(rng.float(0, Math.PI * 2));
+  g.rotateZ(rng.float(-0.16, 0.16));
+  g.rotateX(rng.float(-0.13, 0.13));
+  g.translate(0, 0.16, 0);
+  // t0 0.46 / t1 0.86: a cleaved top is a real plane, so it should reach the
+  // crown colour across the WHOLE face rather than only at its flattest point.
+  b.rawLit(g, body, top, { t0: 0.46, t1: 0.86, low: K.stoneLow, l0: -0.12 });
+  const n = rng.int(1, 2);
+  for (let i = 0; i < n; i++) {
+    const s = rng.float(0.30, 0.58);
+    const a = rng.float(0, Math.PI * 2), d = rng.float(0.75, 1.25);
+    const w = blockGeom(rng, { jitter: 0.30, taper: 0.36 });
+    w.scale(s * 1.3, s * rng.float(0.5, 0.9), s);
+    w.rotateY(rng.float(0, Math.PI * 2));
+    w.rotateZ(rng.float(-0.5, 0.5));
+    w.translate(Math.cos(a) * d, -0.08, Math.sin(a) * d);
+    const k2 = rng.float(0.15, 0.50);
+    b.rawLit(w, K.stoneBody.clone().lerp(K.stoneLow, k2),
+      K.stoneTop.clone().lerp(K.stoneBody, 0.24 + k2),
+      { t0: 0.46, t1: 0.86, low: K.stoneLow, l0: -0.12 });
+  }
+  if (o.snow) {
+    const cap = blockGeom(rng, { jitter: 0.18, taper: 0.30 });
+    cap.scale(1.18, 0.24, 1.0);
+    cap.translate(0, 0.58, 0);
+    b.raw(cap, K.snow);
+  }
+  return { geo: b.build(), trunkR: 1, height: 1 };
+}
+
 const MAKERS = {
   fir,
   firOld: (r, K) => fir(r, K, { tall: 1.24, wide: 1.10, tiers: 5 }),
@@ -555,9 +885,12 @@ const MAKERS = {
     spread: 0.82,
   }),
   reeds, tussock, screePatch,
-  boulder, slab,
+  grassBlades, shrubTuft, cobble, stoneTrain,
+  logFallen, logPile, stumpHollow, earthPatch,
+  boulder, slab, blockStone,
   boulderSnow: (r, K) => boulder(r, K, { snow: true }),
   slabSnow: (r, K) => slab(r, K, { snow: true }),
+  blockStoneSnow: (r, K) => blockStone(r, K, { snow: true }),
 };
 
 // ---------------------------------------------------------------------------
@@ -749,17 +1082,111 @@ const MIXES = {
       { id: 'flowersWhite', w: 4.6, alt: [1, 4, 120, 180], wet: [0, 0.12, 1.05, 1.2], flat: 0.78, size: [0.9, 1.35] },
       { id: 'flowersCream', w: 1.05, alt: [2, 5, 110, 160], wet: [0.05, 0.2, 1.05, 1.2], flat: 0.82, size: [0.8, 1.25] },
       { id: 'flowersRed', w: 1.15, alt: [2, 5, 95, 140], wet: [0.1, 0.3, 1.05, 1.2], flat: 0.82, size: [0.85, 1.3] },
-      { id: 'tussock', w: 9.2, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.58, size: [1.0, 2.2] },
+      { id: 'tussock', w: 5.0, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.58, size: [1.0, 2.2] },
       { id: 'screePatch', w: 1.2, alt: [120, 190, 300, 430], wet: [0, 0, 0.6, 0.9], flat: 0.0, flatMax: 0.88, size: [0.7, 1.3] },
+
+      // ---- THE DETAIL SET -------------------------------------------------
+      // Weights are the answer to the client's "most polygons have no detail at
+      // all", and the split between them is read straight off the reference:
+      // grass first, dark scrub second, then stone, then wood and earth as the
+      // notes you find once or twice a frame.
+      //
+      // Everything that is not a plant is `accent: true`. The cluster pass
+      // picks ONE dominant per copse and keeps it for three quarters of the
+      // members, so without the flag a 0.5-weight log becomes a copse of
+      // fourteen logs in a ten-metre circle roughly once every twenty stands —
+      // which is a woodyard, not a meadow. As accents they can only ever be the
+      // minority quarter, i.e. one or two per group. Same reasoning that
+      // retired the broadleaf in round 5.
+      { id: 'grassBlades', w: 6.2, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.55, size: [0.85, 1.75] },
+      { id: 'shrubTuft', w: 3.0, alt: [1, 3, 170, 260], wet: [0, 0.04, 1.05, 1.2], flat: 0.55, size: [0.8, 1.7] },
+      { id: 'cobble', w: 2.1, accent: true, alt: [1, 3, 220, 340], wet: [0, 0, 1.1, 1.3], flat: 0.42, size: [0.55, 1.7] },
+      { id: 'stoneTrain', w: 1.1, accent: true, alt: [1, 4, 220, 340], wet: [0, 0, 1.1, 1.3], flat: 0.60, size: [0.6, 1.5] },
+      { id: 'earthPatch', w: 1.0, accent: true, alt: [1, 4, 200, 320], wet: [0, 0, 1.05, 1.25], flat: 0.72, size: [0.6, 1.4] },
+      { id: 'logFallen', w: 0.62, accent: true, alt: [1, 4, 150, 230], wet: [0, 0.05, 1.05, 1.2], flat: 0.74, size: [0.7, 1.3] },
+      { id: 'stumpHollow', w: 0.55, accent: true, alt: [1, 4, 150, 230], wet: [0, 0.05, 1.05, 1.2], flat: 0.72, size: [0.8, 1.5] },
+      { id: 'logPile', w: 0.16, accent: true, alt: [1, 4, 130, 200], wet: [0, 0.05, 1.05, 1.2], flat: 0.82, size: [0.8, 1.2] },
     ],
+    /**
+     * THE DETAIL BLANKET — the pass that answers "most polygons have no detail
+     * at all" directly, and the reason the cover pass alone never could.
+     *
+     * `placeClusters` puts ground cover in COPSES: it accepts a centre, packs
+     * members round it, and moves on. That is right for plants that grow in
+     * company, and it is why the r10 meadow could hold 92 000 ground props and
+     * still show forty-metre stretches of untouched polygon — the props were
+     * all in the other stretches. Cropping our frame at 3.4x next to the
+     * reference: theirs never gives you more than two or three metres of empty
+     * turf, ours routinely gives twenty.
+     *
+     * So this is a JITTERED GRID, not a scatter: one candidate per `cell`
+     * metres of map, everywhere, with the position jittered inside its cell so
+     * there is no visible lattice. Even coverage is the whole point — the grid
+     * cannot leave a hole because it has a cell there.
+     *
+     * It runs last and on its own Rng, so every earlier pass keeps the exact
+     * placement it had before this existed.
+     */
+    blanket: {
+      // 3.6 m, and this is the number the client note is really about. At 5.0
+      // the blanket put one item per 25 m² and a 3.4x crop of the meadow still
+      // showed stretches of twenty metres with nothing in them; at 3.6 it is
+      // one per 13 m², which is what counting marks in the reference's own turf
+      // gives. Below this the triangle bill grows faster than anything is
+      // visible.
+      cell: 3.6, fill: 0.90,
+      mix: [
+        { id: 'grassBlades', w: 0.22, size: [0.75, 1.45] },
+        // Tussock's weight is cut to a token. It is the oldest ground-cover
+        // species we have and, measured, the least useful: the map carried
+        // 42 000 of them and a 3.4x crop of the meadow shows not one, because
+        // every colour in a tuft is derived from the sward it stands in. It
+        // stays as filler under the other marks, not as a headline.
+        { id: 'tussock', w: 0.06, size: [0.9, 2.0] },
+        // Reweighted by what actually RESOLVES. Shot and cropped at 3.4x, the
+        // marks you can see in our meadow are, in order: cobbles, dark scrub,
+        // flower drifts, bare earth — and only then blades. So the weight moves
+        // toward the first four.
+        { id: 'shrubTuft', w: 0.24, size: [0.80, 1.7] },
+        { id: 'bushDark', w: 0.07, size: [0.45, 0.85] },
+        // Stone, wood and earth are a fifth of the blanket, and that fifth is
+        // the measured shortfall: the frame's "other" pixel population (road +
+        // stone + small detail) sits at 25.7% against the reference's 32.3%.
+        { id: 'cobble', w: 0.16, size: [0.55, 1.75] },
+        { id: 'flowersWhite', w: 0.11, size: [0.85, 1.3] },
+        { id: 'earthPatch', w: 0.07, size: [0.55, 1.4] },
+        { id: 'stoneTrain', w: 0.045, size: [0.5, 1.3] },
+        { id: 'flowersRed', w: 0.015, size: [0.8, 1.25] },
+        { id: 'logFallen', w: 0.014, size: [0.7, 1.3] },
+        { id: 'stumpHollow', w: 0.014, size: [0.8, 1.5] },
+      ],
+    },
     shore: { id: 'reeds', size: [0.8, 1.5] },
     boulder: 'boulder',
     slab: 'slab',
+    // Anchors are what a group is built around; satellites are what lies
+    // beside it. `cobble` appears only as a satellite because a football-sized
+    // stone cannot anchor anything, and `blockStone` is weighted twice into the
+    // anchor list because the cleaved block is the silhouette the frame was
+    // short of.
+    anchors: ['blockStone', 'blockStone', 'slab', 'boulder'],
+    sats: ['blockStone', 'slab', 'boulder', 'cobble', 'cobble'],
     verge: {
-      count: 4200, width: 13,
+      // The verge is the one band the detail blanket cannot reach — everything
+      // inside the road's keep-out is rejected by `isBlocked` — so the strip
+      // beside the gravel has to be dressed by this pass or it stays the one
+      // bare part of the frame. Counted up with the blanket.
+      count: 9000, width: 13,
       mix: [
-        { id: 'flowersWhite', w: 0.22 },
-        { id: 'tussock', w: 0.20 },
+        { id: 'flowersWhite', w: 0.16 },
+        { id: 'tussock', w: 0.08 },
+        // The verge is where the reference is DENSEST — blades, cobbles and a
+        // scrape of bare earth crowd the gravel, and the soft encroaching
+        // margin is most of why its road looks driven-on.
+        { id: 'grassBlades', w: 0.14 },
+        { id: 'cobble', w: 0.09 },
+        { id: 'earthPatch', w: 0.05 },
+        { id: 'shrubTuft', w: 0.05 },
         // A few real trees on the verge, not just saplings. In target_01 the
         // wood closes to within a couple of metres of the gravel in places and
         // that is what stops the road looking drawn on rather than cut through.
@@ -767,13 +1194,13 @@ const MIXES = {
         // Roadside stone. In target_01 there is a pale block within a couple of
         // metres of the gravel every hundred metres or so, and it is the single
         // clearest scale cue the frame has — bigger share than the flowers.
-        { id: 'slab', w: 0.17 },
-        { id: 'flowersCream', w: 0.06 },
-        { id: 'bushDark', w: 0.10 },
+        { id: 'slab', w: 0.10 },
+        { id: 'flowersCream', w: 0.04 },
+        { id: 'bushDark', w: 0.06 },
         // Young conifers crowding the verge: in the reference the wood comes
         // right down to the fence line, and the road's keep-out band is the
         // only reason ours does not.
-        { id: 'firSapling', w: 0.17 },
+        { id: 'firSapling', w: 0.12 },
         { id: 'flowersRed', w: 0.05 },
       ],
     },
@@ -1125,7 +1552,10 @@ export class PropScatter {
     need.add(mix.shore.id);
     need.add(mix.boulder);
     if (mix.slab) need.add(mix.slab);
+    if (mix.anchors) for (const id of mix.anchors) need.add(id);
+    if (mix.sats) for (const id of mix.sats) need.add(id);
     if (mix.verge) for (const m of mix.verge.mix) need.add(m.id);
+    if (mix.blanket) for (const m of mix.blanket.mix) need.add(m.id);
     for (const id of need) {
       for (let v = 0; v < VARIANTS; v++) {
         const r = new Rng((strHash(id) ^ Math.imul(v + 1, 2654435761) ^ 0x9e37) >>> 0);
@@ -1518,7 +1948,7 @@ export class PropScatter {
         // In target_01 the blocks sitting a metre off the gravel are car-sized
         // or bigger — that is the whole reason they read as a scale cue — and
         // at 0.75-1.45 ours were pebbles you had to hunt for.
-        const s = id === mix.slab ? rng.float(1.1, 2.3) : rng.float(0.75, 1.45);
+        const s = (id === mix.slab || id === 'blockStone') ? rng.float(1.1, 2.3) : rng.float(0.75, 1.45);
         emit(id, v, {
           x: p.x, y: e.h - (id === mix.slab ? s * 0.12 : 0.12), z: p.z, s,
           r: rng.float(0, Math.PI * 2),
@@ -1640,7 +2070,15 @@ export class PropScatter {
     // query props are given, so the verge is found by probing outward: a point
     // that is itself clear but has blocked ground a few metres away is a
     // roadside. Cheap, and it needs nothing new from the roads contract.
+    // FOUR FAMILIES, NOT ONE. Every rock in the map used to come from
+    // `mix.slab` — one geometry maker, one size ladder, one silhouette — which
+    // is the whole of "the rocks are all the same rock". The anchors now draw
+    // from three distinct hulls and the satellites from four, so a group is a
+    // cleaved block with a rounded boulder and a couple of cobbles round it
+    // rather than four copies of itself at four scales.
     const rockId = mix.slab ?? mix.boulder;
+    const ANCHORS = mix.anchors ?? [rockId];
+    const SATS = mix.sats ?? [rockId];
     const nearRoad = (x, z, probe) =>
       !isBlocked(x, z) && (
         isBlocked(x + probe, z) || isBlocked(x - probe, z) ||
@@ -1658,7 +2096,10 @@ export class PropScatter {
       // Half-buried, but only half. slabGeom now carries its mass ABOVE the
       // origin (see buildkit), so it only needs bedding in by a hand's depth;
       // rockGeom is still centred and wants a real third of itself sunk.
-      const flat = id === mix.slab;
+      // Bedding depth is a property of the HULL, not of a single id. A cleaved
+      // block and a flat-topped slab both carry their mass above the origin and
+      // only need a hand's depth; a centred icosahedron wants a third sunk.
+      const flat = id === mix.slab || id === 'blockStone';
       emit(id, v, {
         x, y: h - s * (flat ? rng.float(0.10, 0.22) : rng.float(0.26, 0.42)), z, s,
         r: rng.float(0, Math.PI * 2),
@@ -1708,14 +2149,20 @@ export class PropScatter {
       // frame. So the base rate is high enough that flat ground gets groups
       // too, and steepness only tilts the odds.
       const road = nearRoad(cx, cz, 7) ? 1 : 0;
-      const p = 0.22 + rocky * 0.30 + Math.max(0, field) * 0.34 + road * 0.55;
+      // Rates cut roughly a third across the board. The detail blanket now
+      // supplies a cobble every few metres everywhere, so the BIG groups no
+      // longer have to carry "the meadow must contain stone" on their own —
+      // and at the old rate, with anchors up to 4.4 units, the hero frame held
+      // nine car-sized blocks. target_01 has two.
+      const p = 0.15 + rocky * 0.24 + Math.max(0, field) * 0.26 + road * 0.36;
       if (rng.float(0, 1) > p) continue;
 
       // One anchor block, then a train of smaller ones around it. The anchor is
       // deliberately car-sized or bigger: a boulder that is not clearly larger
       // than the car gives the frame no sense of scale at all.
-      const big = lerp(1.9, 4.4, Math.pow(rng.float(0, 1), 1.5)) * (1 + rocky * 0.3);
-      if (!dropRock(cx, cz, big, rockId)) continue;
+      const big = lerp(1.6, 3.5, Math.pow(rng.float(0, 1), 1.7)) * (1 + rocky * 0.3);
+      const anchorId = rng.pick(ANCHORS);
+      if (!dropRock(cx, cz, big, anchorId)) continue;
       grouped++;
       // The train runs DOWNHILL from the anchor where the ground has a slope to
       // speak of, and along an arbitrary heading where it does not. Following
@@ -1738,7 +2185,9 @@ export class PropScatter {
         const lat = rng.gauss(0, big * 0.24);
         const x = cx + ux * run - uz * lat;
         const z = cz + uz * run + ux * lat;
-        if (dropRock(x, z, s, rockId)) grouped++;
+        // A satellite is a DIFFERENT rock that broke off the same joint, not a
+        // shrunken copy of the anchor — so it draws its own hull.
+        if (dropRock(x, z, s, rng.pick(SATS))) grouped++;
         run += (s + big * 0.34) * rng.float(0.85, 1.45);
         s *= rng.float(0.52, 0.78);
         if (s < big * 0.14) break;
@@ -1758,7 +2207,49 @@ export class PropScatter {
       const p = 0.12 + rocky * 0.55 + Math.max(0, field) * 0.5;
       if (rng.float(0, 1) > p) continue;
       const s = lerp(0.42, 1.35, Math.pow(rng.float(0, 1), 2.4)) * (1 + rocky * 0.5);
-      dropRock(x, z, s, rng.bool(0.45) ? rockId : mix.boulder);
+      dropRock(x, z, s, rng.pick(SATS));
+    }
+
+    // ---- DETAIL BLANKET --------------------------------------------------
+    // See `blanket` in the alpine mix for why this exists. One candidate per
+    // cell of the whole map, jittered inside its cell; the only things that can
+    // stop it are water, the road band, the spawn pocket and a cliff face.
+    const BK = mix.blanket;
+    if (BK) {
+      const br = new Rng((S ^ 0x2f81a7) >>> 0);
+      const cell = BK.cell;
+      const n = Math.floor((half * 2) / cell);
+      let wsum = 0;
+      for (const m of BK.mix) wsum += m.w;
+      let blanketed = 0;
+      for (let iz = 0; iz < n; iz++) {
+        for (let ix = 0; ix < n; ix++) {
+          if (br.float(0, 1) > BK.fill) continue;
+          const x = -half + (ix + br.float(0.06, 0.94)) * cell;
+          const z = -half + (iz + br.float(0.06, 0.94)) * cell;
+          const e = envAt(x, z);
+          // 0.30 is a 73 degree slope. Ground cover clings to far worse than
+          // the 0.55-0.74 gates the species table uses, and the bald hillsides
+          // in previous rounds were exactly the ground those gates excluded —
+          // shot at 0.42, lake_bridge still came back with a bare wedge of
+          // steep meadow in its bottom-left corner and nothing else in the
+          // frame was wrong with it.
+          if (!e || e.ny < 0.30) continue;
+          if (isBlocked(x, z)) continue;
+          if (nearSpawn(x, z)) continue;
+          let t = br.float(0, wsum), m = BK.mix[BK.mix.length - 1];
+          for (const q of BK.mix) { t -= q.w; if (t <= 0) { m = q; break; } }
+          const sz = m.size;
+          const s = sz[0] + (sz[1] - sz[0]) * Math.pow(br.float(0, 1), 1.3);
+          emit(m.id, br.int(0, VARIANTS - 1), {
+            x, y: e.h - 0.12, z, s,
+            r: br.float(0, Math.PI * 2),
+            tx: br.gauss(0, 0.03), tz: br.gauss(0, 0.03),
+          });
+          blanketed++;
+        }
+      }
+      this.blanketed = blanketed;
     }
 
     // ---- BAKE ------------------------------------------------------------
@@ -1783,9 +2274,22 @@ export class PropScatter {
       // conifer greens — a wood should hold three or four greens, not a
       // highlight that outshines the meadow.
       const canopy = /^(fir|scotsPine|broadleaf|birch|maple|windPine)/.test(key);
-      const kLo = bloom ? 0.94 : canopy ? 0.86 : 0.84;
-      const kHi = bloom ? 1.10 : canopy ? 1.055 : 1.14;
-      const wAmp = bloom ? 0.012 : 0.055;
+      // STONE GETS THE WIDEST TEMPERATURE SPREAD IN THE MAP, and this is the
+      // last piece of "different rocks". Geometry variety alone still left the
+      // meadow with four silhouettes in ONE material: every block the same
+      // grey, which from 200 m up reads as one rock cut four ways. In target_01
+      // the stones beside its lake are a warm tan-grey, the blocks in its
+      // meadow are near-neutral, and one or two of the small ones are frankly
+      // purple. +/-11% of red-against-blue on a near-white multiplier spans
+      // that without inventing a hex or costing a draw call.
+      const stone = /^(boulder|slab|blockStone|cobble|stoneTrain|screePatch)/.test(key);
+      const kLo = bloom ? 0.94 : canopy ? 0.86 : stone ? 0.78 : 0.84;
+      const kHi = bloom ? 1.10 : canopy ? 1.055 : stone ? 1.10 : 1.14;
+      // ...and capped there. At +/-0.11 on a 1.16 multiplier the warm tail of
+      // the distribution came out at (1.29, 1.16, 1.03) over an already-bright
+      // crown, i.e. SALMON — the exact note the client opened with. 0.075 on a
+      // 1.10 ceiling keeps the tan-to-cool spread and cannot reach flesh.
+      const wAmp = bloom ? 0.012 : stone ? 0.075 : 0.055;
       for (let i = 0; i < list.length; i++) {
         const t = list[i];
         dummy.position.set(t.x, t.y, t.z);

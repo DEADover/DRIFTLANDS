@@ -366,6 +366,41 @@ export function slabGeom(rng, opts = {}) {
 }
 
 /**
+ * ANGULAR BLOCK — the OTHER rock silhouette, and the reason "different rocks"
+ * was a shape note as well as a colour one.
+ *
+ * `rockGeom` and `slabGeom` are both a jittered icosahedron: twenty smallish
+ * facets, a roughly spherical hull, no long straight edges. However far apart
+ * their parameters are set they belong to one family, and a meadow furnished
+ * entirely from that family reads as one rock repeated — which is exactly what
+ * the client saw. target_01 mixes them with cleaved blocks: four big flat
+ * faces, hard vertical edges, a planed top, the shape granite makes when it
+ * splits along a joint.
+ *
+ * A jittered BoxGeometry gives that for twelve triangles. It is indexed with
+ * four vertices per face, so the corner-coherent displacement table matters
+ * here for the same reason it does on the icosahedron: three copies of each
+ * corner must move together or the block tears open.
+ */
+export function blockGeom(rng, opts = {}) {
+  const g = new THREE.BoxGeometry(1, 1, 1).toNonIndexed();
+  const pos = g.attributes.position;
+  const jx = opts.jitter ?? 0.26;
+  const taper = opts.taper ?? 0.22;   // top narrower than base — weathered, not a crate
+  const J = cornerTable(rng, pos, () => ({
+    dx: rng.float(-jx, jx), dy: rng.float(-jx * 0.55, jx * 0.55), dz: rng.float(-jx, jx),
+  }));
+  for (let i = 0; i < pos.count; i++) {
+    const j = J[i];
+    const y = pos.getY(i);
+    const k = y > 0 ? 1 - taper : 1 + taper * 0.35;
+    pos.setXYZ(i, pos.getX(i) * (1 + j.dx) * k, y * (1 + j.dy), pos.getZ(i) * (1 + j.dz) * k);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
  * ONE TIER OF A CONIFER — a scalloped, drooping skirt, not a plain cone.
  *
  * A plain `ConeGeometry` is the wrong primitive for this and it took a side-by
@@ -389,20 +424,52 @@ export function slabGeom(rng, opts = {}) {
  *     matters because instances are randomly yawed and no baked directional
  *     shading could survive that;
  *   * it costs exactly `seg` triangles, the same as an open cone.
+ *
+ * ---- ROUND 8: PER-FACET, NOT PER-FAMILY --------------------------------
+ *
+ * The first version alternated long/short rim vertices at two FIXED heights,
+ * and shot that way every tier still came out one flat green. The reason is
+ * geometric: the "long-then-short" facet and the "short-then-long" facet are
+ * mirror images of each other, so they have the SAME normal.y, and a ramp that
+ * keys off normal.y cannot separate them. A tier had two families of facet and
+ * one value.
+ *
+ * Cropping target_01's fir at 8x shows what it actually is: every triangle in
+ * a skirt is a different value, from #2a4d22 in the shade to #86b054 in the
+ * sun, and that mosaic is most of what makes the reference's conifers read as
+ * needles rather than as painted cones. So each rim vertex now gets its own
+ * radius AND its own droop, which makes every facet its own plane. Rim
+ * vertices are still shared between neighbours, so the surface stays closed
+ * and the silhouette stays a star.
  */
-export function firTier(r, h, seg, droop, notch) {
+export function firTier(r, h, seg, droop, notch, rng) {
   const v = [];
   const ax = 0, ay = h, az = 0;
   const rim = [];
+  const f = rng ? (a, b) => rng.float(a, b) : (a, b) => (a + b) / 2;
   for (let i = 0; i < seg; i++) {
     const a = (i / seg) * Math.PI * 2;
     const long = i % 2 === 0;
-    const rr = r * (long ? 1 : notch);
-    rim.push([Math.cos(a) * rr, long ? -droop : 0, Math.sin(a) * rr]);
+    // Long spurs reach the full radius and hang; short ones are pulled in and
+    // sit high. The extra jitter on both is what breaks the mirror symmetry.
+    // The jitter has to be WIDE. Shot at f(0.75,1.30) a skirt still resolved
+    // into two values — a lit half and a dark half — because neighbouring
+    // facets differed by only a couple of degrees of tilt and the ramp could
+    // not tell them apart. target_01's skirt is a dozen values. At this spread
+    // adjacent facets differ by fifteen or twenty degrees, which is the whole
+    // mosaic and costs nothing.
+    const rr = r * (long ? f(0.82, 1.12) : notch * f(0.70, 1.28));
+    const dy = long ? -droop * f(0.40, 1.60) : -droop * f(-0.65, 0.65);
+    rim.push([Math.cos(a) * rr, dy, Math.sin(a) * rr]);
   }
+  // WINDING. The first version of this pushed (apex, rim[i], rim[i+1]), which
+  // for a rim running (cos a, sin a) with +Y up is the INWARD face: every
+  // computed normal pointed into the tree, so the ramp below read the wrong
+  // sign and Lambert lit the far side. That is why this function sat unused for
+  // three rounds while props.js kept building firs out of plain cones.
   for (let i = 0; i < seg; i++) {
     const p = rim[i], q = rim[(i + 1) % seg];
-    v.push(ax, ay, az, p[0], p[1], p[2], q[0], q[1], q[2]);
+    v.push(ax, ay, az, q[0], q[1], q[2], p[0], p[1], p[2]);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3));
@@ -504,22 +571,80 @@ export function derivePalette(p, biomeId) {
      * on top, so a NEUTRAL albedo comes out distinctly cool and a warm one comes
      * out pink. Every stone tone below is therefore pre-compensated: B/G ~0.63
      * in the albedo lands at B/G ~0.79 on screen, which is target_01's number.
+     *
+     * ---- ROUND 8 CORRECTION: THE PRE-COMPENSATION HAD OUTLIVED ITS CAUSE ----
+     *
+     * Everything above was written against a grade that has since been retuned
+     * by the render agent. Sampled on the r10 hero frame, the pre-compensated
+     * albedos (body B/G 0.76, top B/G 0.74) now render as rgb(232,220,186) on a
+     * crown and rgb(196,186,152) on a flank — CREAM, near the colour of the
+     * gravel, which is the client's "different rocks" complaint arriving as a
+     * colour problem before it is a shape problem. Cropping target_01 at 3.4x
+     * next to ours: its meadow boulder is a plain pale GREY solid,
+     * rgb(210,206,198) on the crown, rgb(150,146,142) on the flank,
+     * rgb(104,98,100) on the shadow side — B/G within 3% of unity everywhere,
+     * and only the crown carries any warmth at all.
+     *
+     * So the triad is built neutral now and the warmth is spent where the
+     * reference spends it — a couple of percent on the TOP face only. If a
+     * later grade change makes them read cool again, warm the top, not the body:
+     * a warm body is what made them flesh, twice.
      */
     stoneBody: (() => {
-      const g = neutral(rock, 0.55).lerp(rockDark, 0.10);
-      g.b *= 0.62; g.r *= 1.06;
+      // Cool-neutral mid grey. `rock` is a warm brown-grey, so almost all of
+      // its chroma is thrown away; what is kept is its VALUE.
+      // ...and then a percent of warmth is put BACK. Shot neutral, the blocks
+      // came back lavender (rgb 184,188,200): the sky ambient is blue and a
+      // literally neutral albedo cannot resist it. 3% of red over blue in the
+      // albedo is enough to land the render on target_01's near-unity B/G.
+      // Measured on the shot, not guessed: masking every near-neutral pixel of
+      // the frame (max-min < 20% of max) gave ours rgb(147,137,148) against the
+      // reference's rgb(152,142,137) in the same band — B/G 1.08 vs 0.96. So
+      // the compensation needed is about 12% of blue and 4% of red, one tenth
+      // of the 0.62 factor that produced cream.
+      const g = neutral(rock, 0.90);
+      g.multiplyScalar(0.62);
+      g.r *= 1.02; g.b *= 0.66;
       return g;
     })(),
     stoneTop: (() => {
-      const g = neutral(rock, 0.55).lerp(white, 0.34);
-      g.b *= 0.53;
+      // The CROWN, and its job is to be one of the three brightest things in
+      // the frame. Cropping target_01's meadow boulder at 8x: the planed top is
+      // rgb(232,228,214) — near white — while the flank beside it is
+      // rgb(150,140,132) and the shadow face rgb(96,84,80). That is a range of
+      // 2.4 stops WITHIN one rock, and it is the whole reason its stone reads
+      // as a solid with light on it. Ours ran the entire solid inside 20 levels.
+      // 0.56 toward white shot as literal WHITE paper — the crowns became the
+      // brightest thing in the frame by a mile and the meadow filled with what
+      // looked like discarded envelopes. 0.38 was still reading as paper once
+      // the map carried four rock families instead of one; at 0.27, with the
+      // warmth pushed a little further, a crown lands on the reference's
+      // rgb(210,206,198) rather than on its rgb(235,231,220) blown highlight,
+      // and only the handful of genuinely sky-facing facets get the latter.
+      const g = neutral(rock, 0.90).lerp(white, 0.32);
+      g.r *= 1.07; g.b *= 0.69;
       return g;
     })(),
     stoneLow: (() => {
-      const g = neutral(rockDark, 0.45).multiplyScalar(0.88);
-      g.b *= 0.62; g.r *= 1.08;
+      // The shadow side, and it has to be a CLEAR step, not a shading nuance:
+      // in target_01 the dark face of a boulder is half the value of its flank.
+      // Shot at 0.74 the whole solid read as one pale value with no dark side
+      // left at all, which is most of why our stone looked like folded paper.
+      const g = neutral(rockDark, 0.88).multiplyScalar(0.34);
+      g.r *= 1.04; g.b *= 0.78;
       return g;
     })(),
+
+    /**
+     * BARE EARTH. target_01's meadow is not continuous turf: every few tens of
+     * metres there is a scrape of open ground — under a fallen log, at the lip
+     * of a bank, where a boulder train has slid — and those brown patches are a
+     * quiet but large part of the "other" pixel population the frame is short
+     * of. Derived from the trunk brown, pulled toward the road edge so it is
+     * lighter and greyer than bark: soil in sun is not the colour of wood.
+     */
+    soil: off(trunk, 0.0, -0.16, 0.055).lerp(edge, 0.20),
+    soilLit: off(trunk, 0.0, -0.24, 0.10).lerp(edge, 0.42),
 
     // Man-made
     plaster: off(edge, 0, -0.10, 0.16),
