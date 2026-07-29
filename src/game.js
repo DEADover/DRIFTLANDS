@@ -295,17 +295,21 @@ export class Game {
     // A little of the max is mixed back in so a crest still lifts the car.
     const target = sum / 4 + (max - sum / 4) * 0.35;
 
-    // Rate-limit the body so a facet edge or a road/terrain seam cannot pop it.
-    // 3.5 m/s is far faster than any real slope at our speeds but still kills
-    // the single-frame steps.
+    // Low-pass only — NO rate limit.
+    //
+    // A 3.5 m/s clamp seemed safe until it was measured: at 31 m/s on a 15%
+    // gradient the ground rises 4.7 m/s, so the clamp could never keep up, the
+    // lag accumulated, and once it passed the 3 m "teleport" guard the body
+    // snapped three metres in one frame. The guard meant to stop popping was
+    // itself the biggest pop in the game (measured max step 3004 mm).
+    //
+    // A fast exponential filter is enough: per-frame mesh noise is a few mm and
+    // dies here, while a real gradient is tracked without lag.
     const prev = this._bodyH;
-    if (prev === undefined || Math.abs(target - prev) > 3.0) {
-      this._bodyH = target;                       // teleport / respawn: snap
+    if (prev === undefined || Math.abs(target - prev) > 8) {
+      this._bodyH = target;                       // respawn / teleport only
     } else {
-      const k = 1 - Math.exp(-18 * dt);
-      const lim = 3.5 * dt;
-      const step = THREE.MathUtils.clamp((target - prev) * k, -lim, lim);
-      this._bodyH = prev + step;
+      this._bodyH = prev + (target - prev) * (1 - Math.exp(-55 * Math.max(dt, 1e-5)));
     }
 
     const centre = this.groundAt(v.position.x, v.position.z);
