@@ -27,6 +27,10 @@ import { mergeGeometries } from './props.js';
  *   surfaceAt(x, z) -> {kind, grip}|null
  *   colliders       -> {x,z,r}[]     sign posts, for whoever wants them
  *   waterCrossings  -> [{x,z,heading,span,deckY,ax,az,bx,bz,width}]
+ *   barriers        -> { segments, hit(id, speed), update(dt) }
+ *                                    breakable timber fences and fixed steel
+ *                                    guardrails; see the block above the
+ *                                    return statement for the full contract.
  *
  * ---------------------------------------------------------------------------
  * HOW THE ROUTE IS BUILT
@@ -1477,57 +1481,160 @@ function kerbGeom() {
 }
 
 /**
- * POST-AND-RAIL FENCE — ART_DIRECTION §4.1, and the single most recurring piece
- * of furniture in the client set: warm brown timber following the road's curve,
- * sometimes both sides, running off over a hill.
+ * BARRIERS — the roadside furniture the car can actually hit.
+ *
+ * Two kinds, and the difference is the whole feature:
+ *
+ *  · 'fence'  post-and-rail timber (ART_DIRECTION §4.1, and the single most
+ *             recurring piece of furniture in the client set: warm brown
+ *             timber following the road's curve, sometimes both sides, running
+ *             off over a hill). It BREAKS. Hit a bay above BREAK_SPEED and its
+ *             rails are knocked out, the gap stays knocked out for the rest of
+ *             the session, and the timber goes tumbling across the meadow.
+ *
+ *  · 'guard'  steel W-beam guardrail — cool grey, one bright crease along the
+ *             top that catches the sun. It does NOT break. It goes exactly
+ *             where a real rally stage puts one: across a bridge approach, and
+ *             on the OUTSIDE of a corner tight enough or with enough of a drop
+ *             beyond it that a car leaving the road there leaves the stage.
+ *             Sparse by construction — a guardrail everywhere reads as motorway
+ *             furniture and tells the driver nothing.
  *
  * Built as geometry rather than instances because every bay is a different
- * length and a different slope: the posts are planted on the TERRAIN (not on
+ * length and a different slope: fence posts are planted on the TERRAIN (not on
  * the road plane, which is up to a third of a metre above it on a bench) and
- * the rails are stretched between consecutive post tops, so the whole line
- * follows the ground the way a real fence does instead of floating level.
+ * the rails are stretched between consecutive post tops, so the line follows
+ * the ground the way a real fence does instead of floating level. Guardrail
+ * posts are the other way round — they are bolted to the SHOULDER, so their
+ * beam tracks the carriageway and the post grows longer wherever the ground
+ * falls away underneath it, which is what makes the drop read.
+ *
+ * BREAKING WITHOUT A DRAW CALL PER BAY. Everything lives in one merged buffer.
+ * Each breakable bay remembers the vertex range its two rails occupy, and
+ * breaking it collapses that range onto the bay's own centre: the triangles go
+ * to zero area, disappear, and cost nothing. No mesh is created or destroyed,
+ * the draw call count never moves, and the bounding sphere stays valid because
+ * the collapse point is inside the old geometry.
  */
-function buildFence(strip, routes, terrain, seed, colPost, colRail) {
-  // WHY THESE NUMBERS, AND WHY THE FENCE MUST STAY SHORT.
-  //
-  // The camera looks down from ~26 degrees above the horizon, which means the
-  // ground is foreshortened to 0.44 while anything VERTICAL keeps 0.90 of its
-  // length on screen. A fence that runs along the road — which is every fence
-  // here — therefore has its bays squashed to 0.44 while its posts do not, and
-  // as soon as
-  //
-  //     bay x 0.44   <   post height x 0.90
-  //
-  // consecutive posts overlap and the whole line renders as one solid brown
-  // bar. A 3.15 m bay with a 1.72 m post is exactly that case, and the frame it
-  // produced was a fence-coloured kerb, not a fence.
-  //
-  // So the geometry is now the real thing: a post-and-rail fence is about 1.2 m
-  // tall with 4-4.5 m bays, which puts the ratio at 4.4x0.44 / 1.28x0.90 = 1.7
-  // and leaves a clear run of open rail with meadow visible through it — which
-  // is what target_01 shows at every magnification.
-  const SPACING = 4.4;      // bay length
-  const POST_H = 1.28;
-  const POST_R = 0.16;      // half-width of the square post
-  const RAILS = [0.46, 0.94];
-  const RAIL_T = 0.10;      // rail half-thickness
-  const RAIL_H = 0.13;      // rail half-height
+
+// Post pitch. WHY 4.4 m: the camera looks down from ~26 degrees above the
+// horizon, so ground distance is foreshortened to 0.44 while anything VERTICAL
+// keeps 0.90 of its length on screen. A fence running ALONG the road — which is
+// every fence here — therefore has its bays squashed to 0.44 while its posts
+// are not, and as soon as bay x 0.44 < post x 0.90 consecutive posts overlap
+// and the line renders as one solid brown bar. 4.4 x 0.44 / 1.28 x 0.90 = 1.7,
+// which leaves a clear run of open rail with meadow visible through it — what
+// target_01 shows at every magnification.
+const BAY = 4.4;
+const POST_H = 1.28;
+const POST_R = 0.16;      // half-width of the square timber post
+const RAILS = [0.46, 0.94];
+const RAIL_T = 0.10;      // rail half-thickness
+const RAIL_H = 0.13;      // rail half-height
+// How far below the carriageway a post foot may ever sink. Ordinary undulation
+// is well inside this; a bank or a lake is not.
+const FOOT_DROP = 1.9;
+
+// Steel guardrail. Deliberately shorter than the fence and mounted right at the
+// shoulder rather than back in the meadow: the two must never be mistaken for
+// each other at a glance, and the one that stops you has to look like it is
+// part of the road.
+// WHAT THE CAMERA ACTUALLY SEES OF A GUARDRAIL. Looking down from 26 degrees
+// above the horizon, a barrier is read almost entirely off its TOP faces. The
+// first version put a near-white glint on the widest top face it had, and the
+// result was a lavender pipe lying beside the road — no posts, no beam, no
+// steel. So the tops are now mid grey and the highlight is a separate narrow
+// strip down the middle of the beam: a grey band with one bright line in it,
+// which is what a W-beam looks like from a helicopter.
+const G_OFFSET = 1.35;    // metres outboard of the verge — a sliver of verge shows
+const G_POST_R = 0.155;   // fat enough that the posts read as ticks along the beam
+const G_LO = 0.30;        // beam bottom, above the shoulder
+const G_HI = 0.92;        // beam top
+const G_POST_TOP = 1.08;  // post head stands proud of the beam
+const G_BEAM_T = 0.195;   // half-thickness of the beam
+const G_TIGHT = 90;       // "a corner tighter than about 90 m radius"
+const G_FAST = 200;       // ...and this is as wide as a "fast corner" gets
+const G_ALWAYS = 55;      // this tight and it gets one whether it drops or not
+const G_DROP = 2.0;       // metres the ground must fall away to earn one
+const G_CLIFF = 9.0;      // ...and a RAVINE is a hazard whether it bends or not
+// Where to ask. Five samples out to 26 m, because the terrain mesh is faceted
+// at ~10 m and one probe measures the facet it happens to land on.
+const G_PROBES = [4, 8, 13, 19, 26];
+// Hard ceiling on the share of barrier bays that may be steel, per route side.
+const G_BUDGET = 0.06;
+const G_APPROACH = 30;    // guardrail this far back from a bridge deck
+const G_ABUTMENT = 4.0;   // ...but stop short of the bridge's own wing walls
+const G_MINRUN = 3;       // bays; anything shorter is a kink, not a corner
+
+// Above this closing speed a timber bay is knocked out. Below it the car just
+// scrapes along the rails. 7 m/s is 25 km/h — a nudge while parking survives,
+// anything that reads as a mistake does not.
+const BREAK_SPEED = 7;
+const DEBRIS_POOL = 168;
+const DEBRIS_LIFE = 5.4;
+const DEBRIS_FADE = 1.0;
+
+/**
+ * An axis-aligned-to-the-road box: four sides plus the top the camera sees.
+ * `ends = false` drops the two faces perpendicular to the long axis, which is
+ * what a rail wants — both of its ends are buried inside a post, and at this
+ * coverage that is a quarter of the barrier's triangles saved for nothing.
+ */
+function barBox(strip, cx, cy, cz, ax, az, halfA, halfB, halfH, col, top, ends = true) {
+  const bx = -az, bz = ax;                       // the other horizontal axis
+  const ux = ax * halfA, uz = az * halfA;
+  const vx = bx * halfB, vz = bz * halfB;
+  const c = [
+    [cx - ux - vx, cz - uz - vz], [cx + ux - vx, cz + uz - vz],
+    [cx + ux + vx, cz + uz + vz], [cx - ux + vx, cz - uz + vz],
+  ];
+  const lo = cy - halfH, hi = cy + halfH;
+  for (let q = 0; q < 4; q++) {
+    if (!ends && q % 2 === 0) continue;           // the two end caps
+    const p = c[q], r = c[(q + 1) % 4];
+    // A vertical face at this sun angle gets almost nothing from the light rig,
+    // so a 0.84 side multiplier came out black and the fence read as a dashed
+    // shadow. The sides are lifted instead: the object has to survive being lit
+    // almost entirely from above.
+    strip.quad([p[0], hi, p[1]], [p[0], lo, p[1]], [r[0], hi, r[1]], [r[0], lo, r[1]],
+      q % 2 ? col.clone().multiplyScalar(0.93) : col);
+  }
+  strip.quad([c[0][0], hi, c[0][1]], [c[1][0], hi, c[1][1]],
+    [c[3][0], hi, c[3][1]], [c[2][0], hi, c[2][1]], top);
+}
+
+/** One broken splinter of rail. Flat-shaded, four faces, nothing clever. */
+function splinterGeom() {
+  const g = new THREE.BoxGeometry(0.86, 0.11, 0.15);
+  return g;
+}
+
+/**
+ * Plans, builds and owns every barrier in the world.
+ *
+ * Returns { group, segments, hit, update, reset } — see the module contract.
+ */
+function buildBarriers(routes, terrain, seed, cols, waterLevel) {
+  const group = new THREE.Group();
+  group.name = 'road-barriers';
+  // Filled by compile(). `segments` is the array game.js holds a reference to,
+  // so a recompile refills it IN PLACE and never hands out a new one.
+  const segments = [];
+  let panels = [];            // parallel to `segments`: vertex range + debris seed
+  let byId = new Map();
 
   /**
-   * HOW MUCH OF THE ROAD CARRIES A FENCE.
+   * HOW MUCH OF THE ROAD CARRIES A TIMBER FENCE.
    *
    * The old rule was `fbm(...) > -0.02`, an eyeballed threshold against a noise
    * function whose distribution nobody had measured. It produced 46% coverage
    * in long blocks, and the hero frame landed in one of the holes: the nearest
    * post to the car was 64 m away and not one fence vertex projected inside the
-   * viewport. Three alpine frames in a row shipped with no fence in them at all
-   * while the world happily reported a fence mesh with 67k vertices in it.
-   *
-   * So the coverage is now a NUMBER rather than a threshold. The gate is the
-   * (1 - COVER) quantile of the noise sampled along these very routes, which
-   * pins the fraction of the road that carries fence no matter what the noise
-   * does. In target_01 the post-and-rail runs almost continuously on both sides
-   * of the road, broken only by field gates and the bridge approach.
+   * viewport. So the coverage is a NUMBER rather than a threshold — the gate is
+   * the (1 - COVER) quantile of the noise sampled along these very routes,
+   * which pins the fraction of road that carries fence no matter what the noise
+   * does. In target_01 the post-and-rail runs almost continuously on both sides,
+   * broken only by field gates and the bridge approach.
    */
   const COVER = 0.94;
   const FREQ = 0.0030;      // ~330 m per cycle: long runs, occasional gates
@@ -1545,46 +1652,14 @@ function buildFence(strip, routes, terrain, seed, colPost, colRail) {
     ? vals[clamp(Math.floor((1 - COVER) * vals.length), 0, vals.length - 1)]
     : -1;
 
-  /**
-   * An axis-aligned-to-the-road box: four sides plus the top the camera sees.
-   * `ends = false` drops the two faces perpendicular to the long axis, which is
-   * what a rail wants — both of its ends are buried inside a post, and at this
-   * coverage that is a quarter of the fence's triangles saved for nothing.
-   */
-  const box = (strip, cx, cy, cz, ax, az, halfA, halfB, halfH, col, top, ends = true) => {
-    const bx = -az, bz = ax;                       // the other horizontal axis
-    const ux = ax * halfA, uz = az * halfA;
-    const vx = bx * halfB, vz = bz * halfB;
-    const c = [
-      [cx - ux - vx, cz - uz - vz], [cx + ux - vx, cz + uz - vz],
-      [cx + ux + vx, cz + uz + vz], [cx - ux + vx, cz - uz + vz],
-    ];
-    const lo = cy - halfH, hi = cy + halfH;
-    for (let q = 0; q < 4; q++) {
-      if (!ends && q % 2 === 0) continue;           // the two end caps
-      const p = c[q], r = c[(q + 1) % 4];
-      // A vertical face at this sun angle gets almost nothing from the light
-      // rig, so a 0.84 side multiplier came out black and the fence read as a
-      // dashed shadow. The sides are lifted instead: the object has to survive
-      // being lit almost entirely from above.
-      strip.quad([p[0], hi, p[1]], [p[0], lo, p[1]], [r[0], hi, r[1]], [r[0], lo, r[1]],
-        q % 2 ? col.clone().multiplyScalar(0.93) : col);
-    }
-    strip.quad([c[0][0], hi, c[0][1]], [c[1][0], hi, c[1][1]],
-      [c[3][0], hi, c[3][1]], [c[2][0], hi, c[2][1]], top);
-  };
-
-  // A fence must never run across a carriageway. Spurs leave the main route at
-  // a T, and without this check the fence line marches straight over the
-  // junction and out the other side, which reads as a bug rather than a farm.
+  // A barrier must never run across a carriageway. Spurs leave the main route
+  // at a T, and without this check the line marches straight over the junction
+  // and out the other side, which reads as a bug rather than a farm.
   //
-  // The test has to ignore the fence's OWN stretch of road — it is standing a
-  // couple of metres off it by construction — but only the own stretch. The
-  // previous version excluded exactly one sample object, which meant the offset
-  // point was tested against its own immediate neighbours and cleared them by
-  // less than a metre; anything that moved the fence line closer to the road
-  // silently deleted the whole thing. Now it skips a window of arc length on
-  // the owning route and tests everything else properly.
+  // The test has to ignore the barrier's OWN stretch of road — it is standing a
+  // couple of metres off it by construction — but only the own stretch, so it
+  // skips a window of arc length on the owning route and tests everything else
+  // properly.
   const CELL = 24;
   const grid = new Map();
   routes.forEach((route, ri) => {
@@ -1595,7 +1670,7 @@ function buildFence(strip, routes, terrain, seed, colPost, colRail) {
       l.push({ sm, ri, i });
     });
   });
-  const overRoad = (x, z, ri, i, n, skip) => {
+  const overRoad = (x, z, ri, i, n, skip, clearance) => {
     const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
     for (let u = -1; u <= 1; u++) {
       for (let v = -1; v <= 1; v++) {
@@ -1606,13 +1681,54 @@ function buildFence(strip, routes, terrain, seed, colPost, colRail) {
             const d = Math.abs(e.i - i);
             if (Math.min(d, n - d) <= skip) continue;
           }
-          if (Math.hypot(e.sm.x - x, e.sm.z - z) < e.sm.hw + e.sm.verge + 1.4) return true;
+          if (Math.hypot(e.sm.x - x, e.sm.z - z) < e.sm.hw + e.sm.verge + clearance) return true;
         }
       }
     }
     return false;
   };
 
+  /**
+   * THE WHOLE LAYOUT, AS A PURE FUNCTION OF THE TERRAIN — and it has to be a
+   * function, because the terrain is not finished when this module runs.
+   *
+   * bridges.js digs the lakes (water.js `carveLakes`) and it runs AFTER
+   * createRoadNetwork. Measured, in the wildlife frame: at barrier-build time
+   * the ground beside the road read 24.8 m at every probe distance; by the time
+   * anything was rendered the same four points read 9.3 m. The road there runs
+   * along the lip of a bluff with the lake sixteen metres below and it was
+   * fenced with post-and-rail — a barrier the car goes straight through, over
+   * the edge, into the water — because at planning time the bluff did not
+   * exist yet. No threshold could have found it.
+   *
+   * So the layout is built once eagerly (nothing is ever missing, even if the
+   * later pass never comes) and then rebuilt ONCE on the first tick if the
+   * witness points say the ground moved. Frame one, then never again.
+   */
+  const compile = () => {
+  const strip = new Strip();
+  const segs = [];
+  const pans = [];
+  const witness = [];
+
+  // Bridge decks, as world-space XZ rectangles. Empty on the eager build (the
+  // bridges do not exist yet) and populated on the settled rebuild.
+  const decks = [];
+  try {
+    let root = group;
+    while (root.parent) root = root.parent;
+    const bb = new THREE.Box3();
+    root.traverse((o) => {
+      if (o.name !== 'bridge' || !o.geometry) return;
+      bb.setFromObject(o);
+      if (bb.isEmpty()) return;
+      decks.push([bb.min.x - 3, bb.min.z - 3, bb.max.x + 3, bb.max.z + 3]);
+    });
+  } catch { decks.length = 0; }
+  const overDeck = (x, z) => {
+    for (const d of decks) if (x >= d[0] && x <= d[2] && z >= d[1] && z <= d[3]) return true;
+    return false;
+  };
   routes.forEach((route, ri) => {
     const S = route.samples;
     const n = S.length;
@@ -1621,61 +1737,538 @@ function buildFence(strip, routes, terrain, seed, colPost, colRail) {
     const ds = route.ds;
     const total = closed ? n * ds : (n - 1) * ds;
     // Arc length of road the keep-out test forgives on the owning route: far
-    // enough that a fence never trips over its own carriageway, short enough
+    // enough that a barrier never trips over its own carriageway, short enough
     // that it still notices the other leg of a hairpin.
     const skip = Math.max(3, Math.round(26 / ds));
 
+    // WHERE THE BRIDGES ARE — by asking, once they exist.
+    //
+    // Three heuristics failed here first, and it is worth saying why so that
+    // nobody tries them again.
+    //
+    //  1. `sm.wet`, which `describe` sets where the ORIGINAL terrain put water
+    //     under the route. Zero samples on either alpine preset: this world's
+    //     bridges are the other kind — water.js `planLakes` picks a spot and
+    //     digs a tarn UNDER the finished road, from bridges.js, after this
+    //     module has run. The deck is not somewhere the road met water; it is
+    //     somewhere water was brought to the road.
+    //  2. Water beside the road. The carve is kept twelve metres clear of the
+    //     centreline (`ROAD_IN`), and the tarns carry their own local level —
+    //     measured at all four alpine bridges, 30 to 40 m above the biome's.
+    //  3. Road standing clear of the ground on BOTH flanks. True of all four
+    //     real bridges, and also of every embankment and ridge crest on the
+    //     route: at any threshold that found the bridges it also turned a third
+    //     of the world's timber into steel.
+    //
+    // The decks are simply objects in the scene by the time the settled rebuild
+    // runs, so read them instead of guessing. Cross-module, and deliberately
+    // so: it is read-only, it is the only source that is actually right, and if
+    // bridges.js ever stops naming its decks 'bridge' this degrades to no
+    // approach guardrails rather than to wrong ones.
+    const onDeck = new Uint8Array(n);
+    for (let i = 0; i < n; i++) onDeck[i] = (S[i].wet || overDeck(S[i].x, S[i].z)) ? 1 : 0;
+
+    // Distance along the road to the nearest bridge deck, in metres. Two
+    // sweeps each way so it wraps properly on a closed loop.
+    const wetD = new Float64Array(n).fill(1e9);
+    for (let i = 0; i < n; i++) if (onDeck[i]) wetD[i] = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < n; i++) {
+        const j = closed ? (i + 1) % n : Math.min(i + 1, n - 1);
+        if (wetD[i] + ds < wetD[j]) wetD[j] = wetD[i] + ds;
+      }
+      for (let i = n - 1; i >= 0; i--) {
+        const j = closed ? ((i - 1) + n) % n : Math.max(i - 1, 0);
+        if (wetD[i] + ds < wetD[j]) wetD[j] = wetD[i] + ds;
+      }
+    }
+
     for (const side of [1, -1]) {
-      let prev = null;
+      // --- 1. march the stations -----------------------------------------
+      //
       // MARCHED IN ARC LENGTH, not per sample. Stations are ~3 m apart, so a
-      // "one post per sample, skip if closer than SPACING" loop can only ever
+      // "one post per sample, skip if closer than BAY" loop can only ever
       // produce bays of 6 m — double what the reference shows. Interpolating
       // between the two bracketing samples puts the post exactly where the bay
       // wants it and lets the bay length be a design decision again.
-      for (let s = 0; s < total; s += SPACING) {
+      const st = [];
+      for (let s = 0; s < total; s += BAY) {
         const f = s / ds;
         const i0 = Math.floor(f) % n;
         const i1 = closed ? (i0 + 1) % n : Math.min(i0 + 1, n - 1);
         const t = f - Math.floor(f);
         const a = S[i0], b = S[i1];
-        if (a.wet || b.wet || noiseAt(s, side) <= GATE) { prev = null; continue; }
+        // The deck itself belongs to bridges.js, which builds its own timber
+        // railing along it. A second barrier out there would either duplicate
+        // that or hang over open water.
+        if (onDeck[i0] || onDeck[i1]) { st.push(null); continue; }
 
-        const hw = lerp(a.hw, b.hw, t), verge = lerp(a.verge, b.verge, t);
         let nx = lerp(a.nx, b.nx, t), nz = lerp(a.nz, b.nz, t);
         const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
         let tx = lerp(a.tx, b.tx, t), tz = lerp(a.tz, b.tz, t);
         const tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
-        // Clear of the guaranteed soft skirt (SKIRT_MIN) so the post is planted
-        // in the meadow rather than growing out of the road's own embankment.
-        const u = side * (hw + verge + 2.15);
-        const x = lerp(a.x, b.x, t) + nx * u, z = lerp(a.z, b.z, t) + nz * u;
-        if (overRoad(x, z, ri, i0, n, skip)) { prev = null; continue; }
+        const e = {
+          s, i0, t, a, b, nx, nz, tx, tz,
+          cx: lerp(a.x, b.x, t), cz: lerp(a.z, b.z, t),
+          hw: lerp(a.hw, b.hw, t), verge: lerp(a.verge, b.verge, t),
+          wetD: lerp(wetD[i0], wetD[i1], t),
+          guard: false,
+        };
 
-        const g = terrain.heightAt(x, z) - 0.14;   // planted, never floating
-        const cur = { x, z, g };
+        // --- does this station earn a guardrail? ---
+        // `ks` is curvature already smoothed over 24 m — raw k at 3 m stations
+        // carries enough sampling noise to invent corners that are not there.
+        const ks = lerp(a.ks ?? a.k, b.ks ?? b.k, t);
+        const r = 1 / Math.max(Math.abs(ks), 1e-6);
+        const outside = -Math.sign(ks) || 1;
+        // Bridge approach: both sides, but stopping short of the abutment so
+        // the steel never grows out of the bridge's own timber wing walls.
+        if (e.wetD > G_ABUTMENT && e.wetD < G_APPROACH) { e.guard = true; e.spec = true; }
+        else {
+          // WHAT A GUARDRAIL IS ACTUALLY FOR: stopping the car leaving the
+          // STAGE. So the question at every station is "how far does the ground
+          // fall on this side", and the answer has to be taken along a WHOLE
+          // PROFILE, not at one probe distance.
+          //
+          // The first version asked once, seven metres out past the verge. The
+          // wildlife frame runs along the lip of a bluff with the lake eleven
+          // metres below and got post-and-rail — a barrier the car goes
+          // straight through, over the edge, into the water. Traced: the
+          // terrain mesh's triangles are ~10 m across, the single probe landed
+          // on the last facet BEFORE the lip and read a 1.1 m drop, and two
+          // metres further out the ground fell fourteen. One sample of a
+          // faceted surface measures the facet, not the hill.
+          const roadY = lerp(a.y, b.y, t) + LIFT;
+          const base = e.hw + e.verge;
+          let bank = 0, hazard = 0;
+          for (const d of G_PROBES) {
+            const u = side * (base + d);
+            const fall = roadY - terrain.heightAt(e.cx + nx * u, e.cz + nz * u);
+            if (d <= 9 && fall > bank) bank = fall;
+            // Discounted by distance at 0.40 m/m, i.e. the ground has to keep
+            // falling steeper than about 22 degrees to score at all. Every road
+            // cut into a hillside has a downhill side that drops three or four
+            // metres; at a gentler discount that counted as a ravine and half
+            // the world's timber turned to steel.
+            const h = fall - d * 0.40;
+            if (h > hazard) hazard = h;
+          }
+          // 1. A corner the car cannot hold, with somewhere to fall beyond it.
+          // This is the client's own rule, so it is never rationed.
+          if (side === outside && r < G_TIGHT && (r < G_ALWAYS || bank > G_DROP)) {
+            e.guard = true; e.spec = true;
+          }
+          // 2. A FAST corner above a drop — the other half of the client's
+          // "fast or tight corners". Too wide for rule 1 to see, but the car
+          // arrives at it at full speed and there is a ravine on the outside.
+          //
+          // This started life as "a drop, corner or no corner", on the argument
+          // that a real stage guardrails a straight above a ravine. It does —
+          // but this world's roads are cut into hillsides and run round lakes,
+          // so "there is a drop on the downhill side" is true of most of the
+          // route, and the frame came back with the lakeside timber replaced by
+          // a kilometre of steel. The post-and-rail IS the reference's
+          // signature; steel that erases it has cost more than it bought. So
+          // the drop only counts on the OUTSIDE of a bend, and even then only
+          // as a candidate — see the budget below.
+          if (side === outside && r < G_FAST) e.haz = hazard;
+          // One witness in twenty, so the settled-terrain test costs a few
+          // hundred heightAt calls rather than tens of thousands.
+          if (witness.length < 400 && (witness.length * 20) < segs.length + 1) {
+            const u = side * (base + 13);
+            const wx = e.cx + nx * u, wz = e.cz + nz * u;
+            witness.push([wx, wz, terrain.heightAt(wx, wz)]);
+          }
+        }
+        st.push(e);
+      }
 
-        box(strip, x, g + POST_H * 0.5, z, tx, tz, POST_R, POST_R, POST_H * 0.5,
-          // The cap is the giveaway from above: in the reference it is a bright
-          // orange square sitting proud of the rails, one per bay.
-          colPost, colPost.clone().multiplyScalar(1.34));
+      // --- 2. ration the steel --------------------------------------------
+      //
+      // "Do not put guardrails everywhere; they should read as a deliberate
+      // safety measure at the dangerous places." The drop rule on its own does
+      // not respect that: in the wildlife world the road runs round a lake for
+      // most of its length, every metre of it genuinely is above a sixteen
+      // metre bank, and honouring that put steel on 78% of the route. True, and
+      // completely wrong — a stage where everything is guarded tells the driver
+      // nothing, and the timber fence is the reference's signature.
+      //
+      // So the drop rule is a ranking, not a test. The client's own two cases
+      // (bridge approach, corner tighter than 90 m) are taken in full; whatever
+      // budget is left goes to the steepest drops first and runs out.
+      {
+        let live = 0;
+        for (const e of st) if (e) live++;
+        let budget = Math.round(live * G_BUDGET);
+        for (const e of st) if (e && e.spec) budget--;
+        const cliffs = st.filter((e) => e && !e.spec && (e.haz ?? 0) > G_CLIFF)
+          .sort((p, q) => q.haz - p.haz);
+        for (let i = 0; i < cliffs.length && budget > 0; i++, budget--) cliffs[i].guard = true;
+      }
 
-        if (prev && Math.hypot(x - prev.x, z - prev.z) < SPACING * 1.9) {
+      // --- 3. tidy the guardrail runs -------------------------------------
+      // A guardrail two bays long is not a safety measure, it is litter; and a
+      // real one starts a little before the hazard and ends a little after it.
+      // So: erode runs shorter than G_MINRUN, then dilate what survives by one
+      // bay at each end.
+      const m = st.length;
+      const at = (i) => (closed ? ((i % m) + m) % m : (i < 0 || i >= m ? -1 : i));
+      const flag = new Uint8Array(m);
+      for (let i = 0; i < m; i++) flag[i] = st[i] && st[i].guard ? 1 : 0;
+      const kept = flag.slice();
+      for (let i = 0; i < m; i++) {
+        if (!flag[i]) continue;
+        const pj = at(i - 1);
+        if (pj >= 0 && flag[pj] && pj !== i) continue;   // not the start of a run
+        let run = 0;
+        while (run < m) { const j = at(i + run); if (j < 0 || !flag[j]) break; run++; }
+        if (run < G_MINRUN) {
+          for (let k = 0; k < run; k++) { const j = at(i + k); if (j >= 0) kept[j] = 0; }
+        }
+      }
+      const dil = kept.slice();
+      for (let i = 0; i < m; i++) {
+        if (!kept[i]) continue;
+        for (const d of [-1, 1]) { const j = at(i + d); if (j >= 0) dil[j] = 1; }
+      }
+      for (let i = 0; i < m; i++) if (st[i]) st[i].guard = !!dil[i];
+
+      // --- 4. place and emit ----------------------------------------------
+      let prev = null;
+      for (let q = 0; q < m; q++) {
+        const e = st[q];
+        if (!e) { prev = null; continue; }
+        const guard = e.guard;
+        // A timber fence is a field boundary standing back in the meadow; a
+        // guardrail is part of the road. Their offsets say so.
+        //
+        // ...unless the meadow is now a lake. When water.js digs the tarns the
+        // shoreline moves, and the offset that was a grassy verge at planning
+        // time can be six metres under. The baseline frame had a hundred metres
+        // of post-and-rail standing IN the water beside the hero corner, and
+        // the first version of the settled rebuild simply deleted it — correct,
+        // and a much worse picture, because that fence following the shore is
+        // the reference's signature.
+        //
+        // So the line walks INWARD until it finds a post base that stands clear
+        // of the water. Two things make that always succeed where it should:
+        // the walk goes right in to the verge, and the base is clamped to the
+        // road's own shoulder (below), so where the lake laps against the fill
+        // the fence ends up standing on the embankment at road level — which is
+        // exactly where a fence beside a reservoir road is.
+        const roadYAt = (uu) =>
+          lerp(sectionY(e.a, capU(e.a, uu)), sectionY(e.b, capU(e.b, uu)), e.t);
+        const off0 = guard ? G_OFFSET : 2.15;
+        let off = off0, x = 0, z = 0, g = 0, ok = false;
+        for (; off > 0.5; off -= 0.45) {
+          const uu = side * (e.hw + e.verge + off);
+          x = e.cx + e.nx * uu; z = e.cz + e.nz * uu;
+          // A post never sinks more than FOOT_DROP below the carriageway. It
+          // keeps the fence following the ground over ordinary undulation, and
+          // stops it walking down a bank or disappearing under a lake.
+          g = Math.max(terrain.heightAt(x, z) - 0.14, roadYAt(uu) - FOOT_DROP);
+          if (g > waterLevel + 0.25) { ok = true; break; }
+        }
+        if (!ok) { prev = null; continue; }
+        const u = side * (e.hw + e.verge + off);
+        // Timber is gated by the coverage noise; steel is a deliberate act and
+        // is never interrupted by it.
+        if (!guard && noiseAt(e.s, side) <= GATE) { prev = null; continue; }
+        if (overRoad(x, z, ri, e.i0, n, skip, guard ? 0.5 : 1.4)) { prev = null; continue; }
+
+        if (guard) {
+          // Bolted to the shoulder: the beam tracks the CARRIAGEWAY, and the
+          // post reaches down to whatever the ground is doing underneath it.
+          const roadY = roadYAt(u);
+          const foot = Math.max(Math.min(g, roadY) - 0.10, roadY - 1.70);
+          const top = roadY + G_POST_TOP;
+          barBox(strip, x, (foot + top) * 0.5, z, e.tx, e.tz,
+            G_POST_R, G_POST_R, (top - foot) * 0.5, cols.steelPost, cols.steelTop);
+          g = roadY;
+        } else {
+          barBox(strip, x, g + POST_H * 0.5, z, e.tx, e.tz, POST_R, POST_R, POST_H * 0.5,
+            // The cap is the giveaway from above: in the reference it is a
+            // bright orange square sitting proud of the rails, one per bay.
+            cols.post, cols.postTop);
+        }
+
+        const cur = { x, z, g, guard, nx: e.nx * side, nz: e.nz * side };
+        // Rails only span a bay whose two ends agree about what they are. A
+        // fence that stops and a guardrail that starts is exactly what a real
+        // stage looks like at the mouth of a bridge.
+        if (prev && prev.guard === guard && Math.hypot(x - prev.x, z - prev.z) < BAY * 1.9) {
           const dx = x - prev.x, dz = z - prev.z;
           const l = Math.hypot(dx, dz) || 1;
           const ax = dx / l, az = dz / l;
           const mx = (x + prev.x) * 0.5, mz = (z + prev.z) * 0.5;
-          for (const h of RAILS) {
-            // the rail follows the ground: its centre is the mean of the two
-            // post heights, so a fence on a slope steps down with the slope
-            const my = (prev.g + g) * 0.5 + h;
-            box(strip, mx, my, mz, ax, az, l * 0.5, RAIL_T, RAIL_H,
-              colRail, colRail.clone().multiplyScalar(1.14), false);
+          const my = (prev.g + g) * 0.5;
+          const v0 = strip.count;
+          if (guard) {
+            // ONE box, and the glint lives on its top face.
+            //
+            // The version before this put a separate bright crease along the
+            // middle of the beam, on the theory that a W-beam has one. At this
+            // camera height the whole beam is under two pixels wide, so the
+            // crease did not sit INSIDE the beam — it antialiased over all of
+            // it, and the guardrail rendered as a lavender wire. Detail smaller
+            // than the object it is detailing is not detail, it is a repaint.
+            barBox(strip, mx, my + (G_LO + G_HI) * 0.5, mz, ax, az,
+              l * 0.5, G_BEAM_T, (G_HI - G_LO) * 0.5, cols.steelDark, cols.steelGlint, false);
+          } else {
+            for (const h of RAILS) {
+              // the rail follows the ground: its centre is the mean of the two
+              // post heights, so a fence on a slope steps down with the slope
+              barBox(strip, mx, my + h, mz, ax, az, l * 0.5, RAIL_T, RAIL_H,
+                cols.rail, cols.railTop, false);
+            }
           }
+          const id = segs.length;
+          segs.push({
+            x: mx, z: mz, dx: ax, dz: az, half: l * 0.5,
+            // Unit normal pointing AWAY from the road. A guardrail deflection
+            // needs to know which way is back onto the stage, and a collision
+            // needs to know which face was struck; both are this vector.
+            nx: cur.nx, nz: cur.nz,
+            kind: guard ? 'guard' : 'fence', broken: false, id,
+          });
+          pans.push({
+            v0, v1: strip.count,
+            cx: mx, cy: my + (guard ? (G_LO + G_HI) * 0.5 : RAILS[1]), cz: mz,
+            ax, az, ox: cur.nx, oz: cur.nz, len: l,
+          });
         }
         prev = cur;
       }
     }
   });
+
+    return { strip, segs, pans, witness };
+  };
+
+  // ------------------------------------------------------------------ meshes
+  let plan = compile();
+  let pos = null;
+  const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshLambertMaterial({
+    vertexColors: true, flatShading: true, side: THREE.DoubleSide,
+  }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = false;
+  mesh.matrixAutoUpdate = false;
+  mesh.name = 'road-barriers-mesh';
+  // Never culled, for two reasons: the barrier network spans the whole map so
+  // its bounding sphere is the map anyway, and this mesh carries the fallback
+  // clock below — which only ticks on frames where it is actually drawn.
+  mesh.frustumCulled = false;
+  group.add(mesh);
+
+  /** Adopt a freshly compiled layout: geometry, ids, and the caller's array. */
+  const adopt = (next) => {
+    plan = next;
+    mesh.geometry.dispose();
+    mesh.geometry = next.strip.geometry();
+    pos = mesh.geometry.attributes.position;
+    mesh.visible = next.strip.count > 0;
+    segments.length = 0;
+    for (const sg of next.segs) segments.push(sg);
+    panels = next.pans;
+    byId = new Map();
+    for (const sg of segments) byId.set(sg.id, sg);
+  };
+  adopt(plan);
+
+  /**
+   * Rebuild once, on the first tick, if the ground moved under us. See the note
+   * above compile(). Guarded so it can only ever happen before anything has
+   * been broken — recompiling would renumber the segments.
+   */
+  let settled = false;
+  const resettle = () => {
+    if (settled) return;
+    settled = true;
+    let moved = false;
+    for (const w of plan.witness) {
+      if (Math.abs(terrain.heightAt(w[0], w[1]) - w[2]) > 0.6) { moved = true; break; }
+    }
+    if (!moved) return;
+    try { adopt(compile()); } catch { /* keep the eager layout rather than none */ }
+  };
+
+  // ------------------------------------------------------------------ debris
+  const debMat = new THREE.MeshLambertMaterial({ flatShading: true });
+  const deb = new THREE.InstancedMesh(splinterGeom(), debMat, DEBRIS_POOL);
+  deb.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(DEBRIS_POOL * 3), 3);
+  deb.castShadow = true;
+  deb.receiveShadow = false;
+  deb.frustumCulled = false;
+  deb.name = 'barrier-debris';
+  deb.visible = false;
+  group.add(deb);
+
+  const P = [];
+  for (let i = 0; i < DEBRIS_POOL; i++) {
+    P.push({
+      live: false, age: 0, rest: false,
+      px: 0, py: 0, pz: 0, vx: 0, vy: 0, vz: 0,
+      rx: 0, ry: 0, rz: 0, wx: 0, wy: 0, wz: 0, sc: 1,
+    });
+  }
+  let cursor = 0, live = 0;
+  const _d = new THREE.Object3D();
+  const _c = new THREE.Color();
+  // Everything below hides behind `dirty`: with no debris in flight the whole
+  // system costs one boolean test per frame.
+  let dirty = false;
+
+  const emit = (panel, speed, rng) => {
+    const heft = clamp(speed / 18, 0.5, 1.25);
+    const count = 7 + Math.floor(rng() * 4);
+    for (let i = 0; i < count; i++) {
+      const slot = cursor;
+      const p = P[slot];
+      cursor = (cursor + 1) % DEBRIS_POOL;
+      if (!p.live) live++;
+      const a = (rng() - 0.5) * panel.len;
+      p.live = true; p.rest = false; p.age = 0;
+      p.px = panel.cx + panel.ax * a + panel.ox * (rng() - 0.5) * 0.4;
+      p.py = panel.cy + (rng() - 0.4) * 0.6;
+      p.pz = panel.cz + panel.az * a + panel.oz * (rng() - 0.5) * 0.4;
+      // Thrown outward and up, with a share of the car's direction of travel
+      // along the rail. THE FIRST VERSION OF THESE NUMBERS PUT SPLINTERS FORTY
+      // METRES INTO THE MEADOW — a fence bay weighs thirty kilos and holds no
+      // energy; what it does is burst, drop, and skitter a few metres. The
+      // wreckage has to stay recognisably AT the hole it came from, or the
+      // player never connects the debris with the gap they just made.
+      const out = (1.3 + rng() * 2.0) * heft;
+      const along = (rng() - 0.5) * 3.2 * heft;
+      p.vx = panel.ox * out + panel.ax * along;
+      p.vz = panel.oz * out + panel.az * along;
+      p.vy = (2.4 + rng() * 2.6) * heft;
+      p.rx = rng() * TAU; p.ry = rng() * TAU; p.rz = rng() * TAU;
+      p.wx = (rng() - 0.5) * 15; p.wy = (rng() - 0.5) * 11; p.wz = (rng() - 0.5) * 15;
+      p.sc = 0.55 + rng() * 0.75;
+      _c.copy(cols.rail).multiplyScalar(0.82 + rng() * 0.42);
+      deb.instanceColor.setXYZ(slot, _c.r, _c.g, _c.b);
+    }
+    deb.instanceColor.needsUpdate = true;
+    dirty = true;
+  };
+
+  const step = (dt) => {
+    if (!dirty) return;
+    const h = Math.min(dt, 1 / 30);
+    let any = false;
+    for (let i = 0; i < DEBRIS_POOL; i++) {
+      const p = P[i];
+      if (!p.live) { _d.scale.setScalar(0); _d.updateMatrix(); deb.setMatrixAt(i, _d.matrix); continue; }
+      any = true;
+      p.age += h;
+      if (!p.rest) {
+        p.vy -= 17 * h;
+        p.px += p.vx * h; p.py += p.vy * h; p.pz += p.vz * h;
+        p.rx += p.wx * h; p.ry += p.wy * h; p.rz += p.wz * h;
+        // A touch proud of the turf: a splinter lying flat is 0.86 x 0.15 m and
+        // the grass swallowed most of them at rest, which threw away the whole
+        // point of debris — the wreckage is the evidence of the gap.
+        const gy = terrain.heightAt(p.px, p.pz) + 0.10;
+        if (p.py <= gy) {
+          p.py = gy;
+          if (Math.abs(p.vy) < 1.6) {
+            // Settled. Lay it flat — a splinter standing on end after it has
+            // stopped moving is the tell that this is a particle system.
+            p.rest = true; p.vx = p.vy = p.vz = 0; p.wx = p.wy = p.wz = 0;
+          } else {
+            p.vy = -p.vy * 0.30;
+            p.vx *= 0.55; p.vz *= 0.55;
+            p.wx *= 0.45; p.wy *= 0.7; p.wz *= 0.45;
+          }
+        }
+      } else {
+        // ease the last of the tumble out so it lies down rather than snapping
+        p.rx = lerp(p.rx, Math.round(p.rx / Math.PI) * Math.PI, Math.min(1, h * 9));
+        p.rz = lerp(p.rz, Math.round(p.rz / Math.PI) * Math.PI, Math.min(1, h * 9));
+      }
+      const fade = p.age > DEBRIS_LIFE - DEBRIS_FADE
+        ? clamp((DEBRIS_LIFE - p.age) / DEBRIS_FADE, 0, 1) : 1;
+      if (p.age >= DEBRIS_LIFE) { p.live = false; live--; }
+      _d.position.set(p.px, p.py, p.pz);
+      _d.rotation.set(p.rx, p.ry, p.rz);
+      _d.scale.setScalar(p.live ? p.sc * fade : 0);
+      _d.updateMatrix();
+      deb.setMatrixAt(i, _d.matrix);
+    }
+    deb.instanceMatrix.needsUpdate = true;
+    deb.visible = live > 0;
+    if (!any || live <= 0) { dirty = false; deb.visible = false; }
+  };
+
+  /** xorshift, so a break looks the same every time the same bay is hit. */
+  const rngFor = (id) => {
+    let s = (Math.imul(id + 1, 2654435761) ^ seed) >>> 0;
+    return () => {
+      s ^= s << 13; s >>>= 0;
+      s ^= s >> 17;
+      s ^= s << 5; s >>>= 0;
+      return s / 4294967296;
+    };
+  };
+
+  /**
+   * The car hit barrier `id` at `speed` m/s. Returns true if THIS hit destroyed
+   * it, which is the signal game.js needs to punch the car's speed and let it
+   * through; false means the barrier held and the car should be deflected.
+   */
+  const hit = (id, speed = Infinity) => {
+    const seg = byId.get(id);
+    if (!seg || seg.kind !== 'fence' || seg.broken) return false;
+    if (!(speed >= BREAK_SPEED)) return false;
+    seg.broken = true;
+    const pn = panels[id];
+    // Collapse the bay's rails onto their own centre: zero-area triangles,
+    // invisible, no buffer resize, no draw call churn, bounding sphere intact.
+    for (let v = pn.v0; v < pn.v1; v++) pos.setXYZ(v, pn.cx, pn.cy, pn.cz);
+    pos.needsUpdate = true;
+    emit(pn, speed, rngFor(id));
+    return true;
+  };
+
+  let extDriven = false;
+  const update = (dt) => { extDriven = true; resettle(); step(dt); };
+
+  // Fallback clock, hung on the MESH — three only calls onBeforeRender for
+  // things it actually draws, so the same hook on the Group never fired once
+  // and the settled-terrain rebuild below silently never happened.
+  //
+  // `update` belongs to game.js, but until it is wired the debris would hang
+  // motionless in the air, which looks far more broken than no feature at all.
+  // Disarms itself the first time anything calls update().
+  let lastT = -1;
+  mesh.onBeforeRender = () => {
+    resettle();
+    if (extDriven || !dirty) return;
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
+    if (lastT < 0) { lastT = now; return; }
+    const dt = Math.min(0.05, Math.max(0, now - lastT));
+    lastT = now;
+    step(dt);
+  };
+
+  const reset = () => {
+    for (const seg of segments) seg.broken = false;
+    for (let i = 0; i < DEBRIS_POOL; i++) P[i].live = false;
+    live = 0; dirty = true; step(1 / 60);
+  };
+
+  return {
+    group, segments, hit, update, reset,
+    /** Diagnostics only. */
+    get counts() {
+      return {
+        fence: segments.filter((s) => s.kind === 'fence').length,
+        guard: segments.filter((s) => s.kind === 'guard').length,
+      };
+    },
+    breakSpeed: BREAK_SPEED,
+  };
 }
 
 function buildFurniture(ctx, routes, colours) {
@@ -1687,7 +2280,6 @@ function buildFurniture(ctx, routes, colours) {
   const boards = [];
   const kerbs = [];
   const wall = new Strip();
-  const fence = new Strip();
 
   const wallCol = new THREE.Color(palette.rock).lerp(new THREE.Color(palette.rockShadow), 0.42);
   const wallTop = new THREE.Color(palette.roadEdge).lerp(new THREE.Color(palette.rock), 0.30);
@@ -1766,8 +2358,63 @@ function buildFurniture(ctx, routes, colours) {
   // fence renders as a dark line and the client's most recognisable piece of
   // roadside furniture disappears into the meadow.
   const timber = new THREE.Color(palette.trunk ?? 0x6b4a30).lerp(new THREE.Color(0xb07c42), 0.95);
-  buildFence(fence, routes, terrain, seed ?? 1337,
-    timber.clone().multiplyScalar(0.94), timber);
+  // Steel, and it has to stay STEEL. The temptation is to warm it toward the
+  // meadow so it sits in the palette, but a warm grey rail beside a warm brown
+  // fence is two of the same object; the whole point of a guardrail is that the
+  // driver clocks it as "this one will not give" from a hundred metres. So it
+  // is pushed the other way — a touch of the sky's blue in it — and it earns
+  // its place in the frame with a single bright crease along the top rather
+  // than by being pale all over, which would blow the %bright measurement.
+  // MEASURED, NOT PICKED. 0x8e979f is what "cool grey" looks like in a swatch,
+  // and under this light rig — full sun on an upward-facing face plus the sky
+  // term — every top face of it clipped toward white and the guardrail rendered
+  // as a lavender pipe lying beside the road. The body is therefore two stops
+  // down from the swatch: it is the LIT result that has to be mid grey, not the
+  // albedo. Kept cool (blue ahead of red) so it never reads as weathered timber.
+  // PRE-COMPENSATED FOR THE LIGHT RIG, and this is not optional.
+  //
+  // renderer.js lights an upward-facing face with a warm sun, a strongly blue
+  // hemisphere, and a blue-tinted bounce fill at 1.85x; grade.js then lifts blue
+  // again on the dark end. Measured off an actual frame, the transfer from
+  // albedo to pixel on a horizontal face is (0.43, 0.49, 1.03) in linear — blue
+  // gets two and a half times what red does. Grass survives that because it has
+  // green to spare. A NEUTRAL grey does not: 0x8e979f, an unremarkable cool grey
+  // in a swatch, rendered as rgb(98,109,160). Lilac. The only object in the
+  // frame belonging to no palette at all, and the eye went straight to it.
+  //
+  // So this is not the colour of the guardrail. It is the colour that BECOMES
+  // the guardrail — a dark cool grey, about rgb(86,94,106) on screen. To
+  // re-derive it after any lighting change: sample the beam's top face in a
+  // shot, divide the linear pixel by the linear albedo to get the transfer,
+  // then divide the wanted pixel colour by that transfer.
+  //
+  // Two rounds of that solve, checked against the frame each time: 0x8e979f
+  // gave rgb(98,109,160), 0x6e725c gave rgb(103,112,108) — right hue, but level
+  // with the pale dust of the shoulder it stands on, so the barrier vanished
+  // wherever it was not against grass. Down another eighth of a stop.
+  const steel = new THREE.Color(0x64665b);
+  const barrierCols = {
+    post: timber.clone().multiplyScalar(0.94),
+    // The cap is the giveaway from above: in the reference it is a bright
+    // orange square sitting proud of the rails, one per bay.
+    postTop: timber.clone().multiplyScalar(1.34),
+    rail: timber,
+    railTop: timber.clone().multiplyScalar(1.14),
+    steel,
+    steelDark: steel.clone().multiplyScalar(0.82),
+    // The post HEAD has to be darker than the beam it stands in. Brighter and
+    // every post turns into a bright dot; the row of dots then reads as
+    // reflective markers and the beam between them disappears.
+    steelTop: steel.clone().multiplyScalar(0.78),
+    // The whole "slightly glinting" budget, spent on the one face the camera
+    // actually sees. A third above the body is enough to separate the beam from
+    // its own posts and from the shoulder it stands on; more and it is a wire.
+    steelGlint: steel.clone().multiplyScalar(1.34),
+    steelPost: steel.clone().multiplyScalar(0.70),
+  };
+  const barriers = buildBarriers(routes, terrain, seed ?? 1337, barrierCols,
+    ctx.biome?.waterLevel ?? -Infinity);
+  group.add(barriers.group);
 
   const mat = new THREE.MeshLambertMaterial({ flatShading: true });
   const dummy = new THREE.Object3D();
@@ -1800,17 +2447,6 @@ function buildFurniture(ctx, routes, colours) {
   instance(kerbGeom(), kerbs, (i) => (i % 2 ? red : white), false);
   instance(boardGeom(), boards, () => boardCol);
 
-  if (fence.count) {
-    const m = new THREE.Mesh(fence.geometry(), new THREE.MeshLambertMaterial({
-      vertexColors: true, flatShading: true, side: THREE.DoubleSide,
-    }));
-    m.castShadow = true;
-    m.receiveShadow = false;
-    m.matrixAutoUpdate = false;
-    m.name = 'road-fences';
-    group.add(m);
-  }
-
   if (wall.count) {
     const m = new THREE.Mesh(wall.geometry(), new THREE.MeshLambertMaterial({
       vertexColors: true, flatShading: true, side: THREE.DoubleSide,
@@ -1822,7 +2458,7 @@ function buildFurniture(ctx, routes, colours) {
     group.add(m);
   }
 
-  return { group, colliders };
+  return { group, colliders, barriers };
 }
 
 // ---------------------------------------------------------------------------
@@ -2589,6 +3225,26 @@ export function createRoadNetwork(ctx) {
     surfaceAt,
     length: main.length,
     colliders: furniture.colliders,
+    /**
+     * BREAKABLE FENCES AND FIXED GUARDRAILS.
+     *
+     *   segments: [{ x, z, dx, dz, half, kind:'fence'|'guard', broken, id }]
+     *     Every barrier bay in the world, as a centre point, a unit direction
+     *     along it and a half-length. `broken` is live — it flips the instant
+     *     hit() destroys the bay, so a collision loop can skip it for free.
+     *
+     *   hit(id, speed) -> boolean
+     *     Report an impact. Returns TRUE only if this hit destroyed the bay,
+     *     which is the signal to let the car through and take ~25% off its
+     *     speed. Returns false for a guardrail (never breaks — deflect and
+     *     slide), for an already-broken bay, and for a timber bay hit below
+     *     `breakSpeed` (7 m/s).
+     *
+     *   update(dt)
+     *     Animates the debris. Costs one boolean test per frame when there is
+     *     none in flight.
+     */
+    barriers: furniture.barriers,
     /** Points the bridge builder needs: places where the route crosses water. */
     waterCrossings: main.crossings.concat(...spurRoutes.map((r) => r.crossings)),
   };
