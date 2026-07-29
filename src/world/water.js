@@ -1,5 +1,18 @@
 import * as THREE from 'three';
 import { Rng } from '../core/rng.js';
+// THE LAKE'S STONE IS THE MEADOW'S STONE.
+//
+// The shore boulders were coloured straight off `palette.rock` (0x7d7268, a warm
+// brown-grey) on a plain Lambert material, and they shot pale LAVENDER — big
+// pink-grey crystals piled round every waterline, unmistakable in
+// shots/mine/wildlife.png and the worst thing in that frame. buildkit.js has the
+// answer already, written down twice by whoever owns the props: a literally
+// neutral albedo cannot resist a blue sky ambient, so the meadow's stone triad
+// is built at 0.62 of value with blue pulled back a third, and it carries a
+// near-white crown and a half-value shadow face. Deriving the same triad here
+// rather than re-inventing it means a stone at the waterline and a stone ten
+// metres up the bank are the same rock, which is what the reference shows.
+import { derivePalette } from './buildkit.js';
 
 /**
  * WATER — stylised alpine lakes.
@@ -126,10 +139,36 @@ export const LAKE_COLORS = {
     // too much red and twelve too little green, which is a lake lit like a
     // swimming pool rather than one with light in it. The red mostly came in
     // through the pale end of the ramp, so that is where most of it comes out.
-    deep: 0x06618f,
-    mid: 0x0c86b4,
-    shallow: 0x2ba6cc,
-    shore: 0x59c2d8,
+    // RE-MEASURED PIXEL BY PIXEL, AND THE ANSWER IS TWO NUMBERS.
+    //
+    // Sampling the reference's lake from its palest shallows to its deepest
+    // corner (tools/_pix.mjs, eight points):
+    //
+    //     palest   [ 7,132,219]   b/g 1.66
+    //     mid      [ 0,107,185]   b/g 1.73
+    //     deepest  [ 0, 76,151]   b/g 1.99
+    //
+    // and ours, at the same points of our own lake, [18,103,197] .. [39,108,161].
+    //
+    // 1. THE REFERENCE LAKE HAS NO RED IN IT. Not "less red" — zero to seven
+    //    levels, from the foam line to the bottom. Every swatch here carried
+    //    red (6/12/43/89) and the render adds about six more on top, so our
+    //    water pixels averaged 31 against the reference's 7 and the whole body
+    //    read a step toward grey. Red goes to nothing across the ramp.
+    //
+    // 2. AND IT IS NOT TEAL. Our shore swatch had b/g = 1.11 and green at 194,
+    //    half again the reference's HIGHEST green anywhere; the reference's
+    //    shallows are a bright pale BLUE, and its water gets relatively bluer
+    //    as it deepens, not greener. That is why our shelf read as a band of
+    //    turquoise haze lying on the shore rather than as shallow water — the
+    //    single most-remarked defect in this lake over three rounds.
+    //
+    // The values below are the reference's own targets divided back through the
+    // grade's measured response (green x0.75, blue x0.97, red +6).
+    deep: 0x00689d,
+    mid: 0x008bbc,
+    shallow: 0x00a0d3,
+    shore: 0x00b5e7,
     // A shade off white. The bloom pass squares whatever the brightest pixel
     // in the frame is, and at 0xf2fbff the foam line was it — a 1.2 m lip came
     // back as a glowing three-metre band of haze along every near shore.
@@ -455,11 +494,59 @@ function vnoise(x, z) {
        + (vhash(xi, zi + 1) * (1 - u) + vhash(xi + 1, zi + 1) * u) * v;
 }
 
-/** Metres the bed rolls up or down here. Wavelengths ~120 m, ~60 m, ~25 m. */
+/**
+ * Metres the bed rolls up or down here.
+ *
+ * MEASURED, AND THE SPECTRUM WAS THE PROBLEM, NOT THE AMPLITUDE.
+ *
+ * tools/blue.mjs reports two numbers over the water population: the spread of
+ * tone across the whole body, and the mean luma STEP between pixels ten metres
+ * apart. Ours came back sd 16.2 / local step 3.8 against the reference's
+ * 16.7 / 7.23 — the same total spread, half the local structure. That is
+ * "reads as one flat fill" stated as a number, and it says the body is a smooth
+ * GRADIENT rather than a lake: at 120 m, 60 m and 24 m over a basin 165 m
+ * across there are barely two features in the whole surface.
+ *
+ * So the short end of the spectrum carries most of the weight now. Wavelengths
+ * ~120 m, ~60 m, ~28 m, ~14 m; the last two are what a ten-metre step can see.
+ */
 function bedRoll(x, z) {
-  return (vnoise(x * 0.0083 + 11.3, z * 0.0083 - 4.1) - 0.5) * 2.6
-       + (vnoise(x * 0.0165 - 7.7, z * 0.0165 + 21.9) - 0.5) * 1.9
-       + (vnoise(x * 0.041 + 3.5, z * 0.041 + 9.2) - 0.5) * 0.8;
+  return (vnoise(x * 0.0083 + 11.3, z * 0.0083 - 4.1) - 0.5) * 2.4
+       + (vnoise(x * 0.0165 - 7.7, z * 0.0165 + 21.9) - 0.5) * 2.0
+       + (vnoise(x * 0.036 + 3.5, z * 0.036 + 9.2) - 0.5) * 1.8
+       + (vnoise(x * 0.072 - 14.1, z * 0.072 + 5.6) - 0.5) * 1.1;
+}
+
+/**
+ * THE SURFACE IS CUT PAPER, LIKE EVERYTHING ELSE IN THIS WORLD.
+ *
+ * This is the answer to "the water reads as one flat fill", and it is not a
+ * shader problem at all. Cropping the reference lake at 4x shows what its water
+ * actually is: FLAT POLYGONAL FACETS, two to three metres across, each a
+ * slightly different blue — five or ten levels apart, no more — with hard edges
+ * between them. It is the same low-poly language as the meadow and the trees.
+ * Ours was a smooth per-fragment gradient, which is an airbrush; every octave of
+ * noise added to it over three rounds was averaged out by its own smoothness.
+ *
+ * So the tone is stamped ONCE PER TRIANGLE at build time and handed to the
+ * shader as an attribute whose three vertices carry the same value, which makes
+ * the varying constant across the facet. The lattice is a 4 m grid, so a facet
+ * is about fifty pixels at the capture camera — the size the reference's are.
+ *
+ * Quantised to six steps because two adjacent facets should be either the same
+ * tone or a clear step apart, never a whisker apart: a continuous field over
+ * discrete facets reads as banding artefacts rather than as water.
+ */
+function toneAt(x, z) {
+  const a = vnoise(x * 0.115 + 4.4, z * 0.115 - 9.1);   // ~8.7 m patches
+  const b = vnoise(x * 0.34 - 2.2, z * 0.34 + 6.7);     // ~3 m
+  const t = a * 0.60 + b * 0.40;
+  // STRETCHED HARD, or the six steps are never used. vnoise sums to a field with
+  // a standard deviation of about 0.15, so at x1.5 almost every facet quantised
+  // to the middle two levels and neighbouring facets were a couple of levels
+  // apart — measured, the facet edges were visible at 4x and invisible at 1x.
+  // The reference's adjacent facets differ by up to twenty-five levels of blue.
+  return Math.round(Math.max(0, Math.min(1, (t - 0.5) * 2.6 + 0.5)) * 5) / 5;
 }
 
 /**
@@ -480,6 +567,12 @@ function shoalField(x, z) {
   const a = vnoise(x * 0.0212 + 31.7, z * 0.0212 - 12.3);
   const b = vnoise(x * 0.0098 - 5.1, z * 0.0098 + 27.4);
   const s = Math.max(a, b * 0.96);
+  // BACK TO 0.50, and the reason is the FRAME and not the field. Dropping the
+  // threshold to 0.44 does put half again as many shoal crests in the water, but
+  // a shoal RAISES the bed, and shallower bed means paler and drier water:
+  // measured, hero_alpine's lattice coverage fell from 3.98% to 2.92% of frame
+  // for 336 extra stones. The stones are worth having; a quarter of the water is
+  // not the price. The higher draw RATE on the crests that do exist is kept.
   const t = Math.max(0, (s - 0.50) / 0.50);
   return t * t * (3 - 2 * t);
 }
@@ -530,7 +623,27 @@ function shoalField(x, z) {
  * Nothing downstream has to know: the berm that closes the shoreline sits at
  * u = 0.88-1.02 and is outside the water either way.
  */
-const WATERLINE = 0.78;
+// MEASURED AGAIN, THE OTHER WAY. Two rounds ago this was cut from 0.90 to 0.78
+// because the frame was 24% blue against the reference's 11%. It now measures
+// 3.7 / 9.1 / 8.5 per cent over the three presets, mean 7.1 - a third UNDER the
+// reference, not over. (The brief's 14.3% figure is shots/r10; r11 had already
+// halved it.) Raising the waterline is the cheapest way back because it is the
+// one lever that grows a basin AWAY from the road: the scenic sites are placed
+// at D = WATERLINE * Rc + MARGIN down-view, so the near shore stays exactly
+// MARGIN metres from the carriageway however big the body behind it gets, and
+// the run-off, the rim and the bridge are all untouched. Wetted area goes as the
+// square, so 0.78 -> 0.86 is a quarter more water.
+//
+// LADDERED, not guessed: 0.78 gave 3.7/9.1/8.5 (mean 7.1), 0.84 gave 3.5/9.9/8.7
+// (7.4), 0.86 gives 3.8/10.2/8.9 (7.6) and 0.88 gives 3.7/14.4/8.9 (9.0). 0.88
+// raises the MEAN nearest the target but it does it entirely on lake_bridge,
+// which goes to fourteen and a half per cent with water arriving in the bottom
+// rows of the frame beside the car - which is the client's "covers far too much
+// frame" all over again. 0.86 lands the two water-bearing presets on 10.2 and
+// 8.9 against the reference's 10.9, which is the number that actually matters.
+// hero_alpine stays at 3.8 and no waterline fixes that: half of that frame is
+// carriageway, and its basin is behind the lens. See the report.
+const WATERLINE = 0.86;
 
 /**
  * ...AND THE SHELF WAS AUTHORED FOR A BASIN THAT NO LONGER EXISTS.
@@ -554,16 +667,54 @@ const WATERLINE = 0.78;
  * approach — a car that runs wide meets a foot of water and drives out of it —
  * and it is deep enough to be blue everywhere the camera can actually see.
  */
-function bedFrac(u) {
-  // The curve is authored against a waterline at 0.90; rescaling the radius is
-  // what moves it, so the shape keeps its proportions instead of being squeezed
-  // out of existence by editing five thresholds by hand.
-  const v = u * (0.90 / WATERLINE);
-  if (v <= 0.53) return 1;
-  if (v <= 0.735) return 1 - 0.647 * sstep(0.53, 0.735, v);
-  if (v <= 0.834) return 0.353 - 0.235 * sstep(0.735, 0.834, v);
-  if (v <= 0.90) return 0.118 * (1 - sstep(0.834, 0.90, v));
-  return -0.32 * sstep(0.90, 1.12, v);
+/**
+ * ...AND STATING IT IN FRACTIONS OF A RADIUS WAS THE WHOLE DEFECT.
+ *
+ * Every version of this curve above is authored in normalised elliptical radius
+ * — and the basins are not one size. planLakes offers Rc = 140/116/94, the
+ * clash pass then shrinks a conflicting basin by 0.74 up to twice, and the
+ * crossing lobes come in at 58 down to 29. So the identical curve produced a
+ * thirty-five metre shelf on a big scenic tarn and a NINE metre one on a shrunk
+ * lobe, which is a 1:1 wall — and it is the shrunk ones that cluster along the
+ * route, so they are what the camera sees. Measured with tools/waterprobe.mjs
+ * before this change: median 3 m from the shore to a metre of water, 11 m to
+ * three metres. Three metres of shelf is eight pixels at the capture camera.
+ * There is nowhere in eight pixels to put a pale band, a foam lip, a submerged
+ * stone or a lily pad, so the frame could only ever show grass, a blurred
+ * lavender smear, and then flat cobalt — which is exactly what it showed.
+ *
+ * The profile is therefore stated in METRES FROM THE WATERLINE and the ellipse
+ * only decides where the waterline is. Every basin on the map, whatever its
+ * size, now gets the same readable approach:
+ *
+ *    m from shore   0     6      15      30      52
+ *    depth          0    1.0    3.0     6.0     8.5   (metres)
+ *    reads as     foam  pale   cobalt  deep    floor
+ *
+ * Small basins simply stop partway along it and are genuinely shallower, which
+ * is what a small tarn is. `sstep` between the knots rather than a straight
+ * line is deliberate: the flattening at each knot is a break of slope, and a
+ * break of slope is a band of constant depth, which the colour ramp renders as
+ * a band of constant tone. Free structure in the middle of the water.
+ */
+const BED_KNOTS = [[0, 0], [6, 1.0], [15, 3.0], [30, 6.0], [52, 8.5]];
+
+/**
+ * @param {number} m  metres inside the waterline; negative is up the bank
+ * @returns {number}  bed depth as a fraction of CARVE.DEPTH, negative on land
+ */
+function bedFrac(m) {
+  if (m <= 0) {
+    // The bank. A 1:7 rise, capped at 2.9 m: this is the old curve's -0.32 of
+    // DEPTH, and it is what the berm below closes the shoreline against.
+    return -Math.min(2.9, -m * 0.14) / CARVE.DEPTH;
+  }
+  for (let i = 1; i < BED_KNOTS.length; i++) {
+    const [x0, y0] = BED_KNOTS[i - 1];
+    const [x1, y1] = BED_KNOTS[i];
+    if (m <= x1) return (y0 + (y1 - y0) * sstep(x0, x1, m)) / CARVE.DEPTH;
+  }
+  return 1;
 }
 
 /** Two-pass chamfer distance transform over a square grid of zero-seeds. */
@@ -1126,10 +1277,15 @@ export function planLakes(ctx, P) {
       const ua = (dx * L.tx + dz * L.tz) / L.Ra;
       const uc = (dx * L.nx + dz * L.nz) / L.Rc;
       const u = Math.hypot(ua, uc);
-      // THE BED PROFILE. See bedFrac() — one continuous curve from the floor
-      // out to the dry bank, replacing a `dig` and a `berm` that used to be
-      // computed separately and fought each other into a wall.
-      const bf = bedFrac(u);
+      // METRES, NOT FRACTIONS. `Rdir` is how far it is from the basin's centre
+      // to its u = 1 boundary in THIS direction, so (WATERLINE - u) * Rdir is
+      // signed metres inside the waterline — positive out in the water. That is
+      // the unit the bed profile, and therefore the whole readable shelf, is
+      // authored in; see bedFrac().
+      const Rdir = u > 1e-4
+        ? Math.hypot(ua * L.Ra, uc * L.Rc) / u
+        : Math.min(L.Ra, L.Rc);
+      const bf = bedFrac((WATERLINE - u) * Rdir);
       const w = neckW(L, dx, dz);
       const nk = w > 0.35;
       const g = guardOf(L, x, z, w);
@@ -1334,10 +1490,40 @@ export function carveLakes(ctx, plan) {
     // reading as an edge rather than as a beach. Painting the wetted bed with
     // the biome's `sand` swatch gave a pale ochre strand that from this camera
     // was the same colour as the road.
-    const silt = new THREE.Color(palette?.rock ?? 0x8f9099).lerp(
-      new THREE.Color(palette?.terrain?.sand ?? 0xb9ae92), 0.22,
-    );
-    const wetc = new THREE.Color(palette?.rockShadow ?? 0x5f6069);
+    // ...AND THE BED IS WHERE THE REMAINING RED WAS COMING FROM.
+    //
+    // The shelf is deliberately glassy — alpha 0.62 in the first two metres — so
+    // a third of every shallow pixel IS the bed. With the bed painted warm rock
+    // (0x7d7268, red 125) and warm sand (red 215) that put twenty to thirty
+    // levels of red into water the reference keeps at zero, which is most of the
+    // gap that survived recolouring the ramp itself. A submerged bed seen
+    // through blue water is a BLUE-GREY thing: the same stone, with its warmth
+    // taken out and a little of the lake's own colour put in.
+    const cool = (hex, k, tint) => {
+      const c0 = new THREE.Color(hex);
+      const l = 0.2126 * c0.r + 0.7152 * c0.g + 0.0722 * c0.b;
+      // neutralise, then dim, then push toward the water it is seen through
+      const c = c0.lerp(new THREE.Color(l, l, l), 0.85)
+        .multiplyScalar(k)
+        .lerp(new THREE.Color(0x0f5c86), tint);
+      // AND NO MORE RED THAN THE WATER OVER IT HAS. The reference's lake holds
+      // red at zero to seven levels from the foam line to the bottom, and the
+      // bed is a third of every shallow pixel at this alpha - so a bed that is
+      // merely "cool" still lifts the water population's red. Ours measured 29
+      // on the 0.6 zoom preset, where the shelf is most of the visible water,
+      // against 11-19 on the wide ones. Capped at half the green, which is what
+      // a grey stone under blue water actually is.
+      c.r = Math.min(c.r, c.g * 0.50);
+      return c;
+    };
+    // LIGHT, and cool. The first cool() values were dark enough that the
+    // shallows came out DARKER than the open water - a slab of wet slate lying
+    // inside the shore, visible across the whole near bank of the 0.6 zoom
+    // preset. Through blue water a shallow bed reads PALER than the deeps,
+    // because there is less water over it; that is the whole reason a shelf is
+    // legible at all.
+    const silt = cool(palette?.rock ?? 0x8f9099, 0.86, 0.30);
+    const wetc = cool(palette?.rockShadow ?? 0x5f6069, 0.92, 0.44);
     // THE STRAND. The note above is right about the ROAD — an ochre band beside
     // the carriageway reads as more carriageway — and wrong about the shore.
     // The reference's waterline is not grass meeting blue: look at the top of
@@ -1350,9 +1536,11 @@ export function carveLakes(ctx, plan) {
     // mixed with the blue into a wide lavender-grey band that read as haze
     // lying on the shore — conspicuous on wildlife, where the near bank fills
     // a third of the frame. Wet gravel is darker than dry sand anyway.
-    const strand = new THREE.Color(palette?.terrain?.sand ?? 0xb9ae92)
-      .lerp(new THREE.Color(palette?.rock ?? 0x8f9099), 0.34)
-      .lerp(new THREE.Color(palette?.rockShadow ?? 0x5f6069), 0.55);
+    // A COOL WET STRAND, and only a hint of the sand's warmth left in it — see
+    // the note on `cool` above. A pale warm band under glassy water is a
+    // sandbank, and it is the thing the wildlife capture kept coming back with.
+    const strand = cool(palette?.terrain?.sand ?? 0xb9ae92, 0.82, 0.28)
+      .lerp(new THREE.Color(palette?.terrain?.sand ?? 0xb9ae92), 0.10);
     const c = new THREE.Color();
 
     // THE BANK KEEPS THE MEADOW'S COLOUR.
@@ -1555,14 +1743,20 @@ function nearestLake(lakes, x, z) {
 const VERT = /* glsl */ `
   attribute float aDepth;
   attribute float aShore;
+  attribute float aTone;
+  attribute float aBank;
   varying float vDepth;
   varying float vShore;
+  varying float vTone;
+  varying float vBank;
   varying vec2 vWorld;
   varying vec3 vPos;
   uniform float uTime;
   void main() {
     vDepth = aDepth;
     vShore = aShore;
+    vTone = aTone;
+    vBank = aBank;
     vec3 p = position;
     // A slow swell, killed off in the shallows so the waterline stays put.
     float k = smoothstep(0.0, 2.5, aDepth);
@@ -1588,6 +1782,8 @@ const FRAG = /* glsl */ `
   uniform float uFogDensity;
   varying float vDepth;
   varying float vShore;
+  varying float vTone;
+  varying float vBank;
   varying vec2 vWorld;
   varying vec3 vPos;
 
@@ -1654,11 +1850,28 @@ const FRAG = /* glsl */ `
     // The shore distance is kept for one job only: a pale lip pinned to the
     // waterline itself, which depth alone cannot place accurately at the 4 m
     // lattice resolution.
+    // ...AND THE RAMP WAS AUTHORED FOR A LAKE THAT DOES NOT EXIST.
+    //
+    // It saturated at uDeep by 5.8 m and the deep-drift term below only started
+    // at 4.2 m. Measured with tools/waterprobe.mjs, the middle of an alpine
+    // basin is 5.1-5.9 m deep: so the body of every lake rendered as uMid with
+    // a whisker of uDeep mixed in, the deep term sat at 0.15 and did nothing,
+    // and a depth field that genuinely varies by seven to nine metres across a
+    // basin came out as ONE bright cyan-blue. That is the client's "one flat
+    // fill", and it was never the noise fields — it was a ramp measuring in the
+    // wrong units. Reaching uDeep by 4.6 m puts the actual spread of depths
+    // across the whole width of the ramp.
     vec3 col = uShore;
-    col = mix(col, uShallow, smoothstep(0.05, 0.55, d));
-    col = mix(col, uMid,     smoothstep(0.65, 2.30, d));
-    col = mix(col, uDeep,    smoothstep(2.60, 5.80, d));
-    col = mix(col, uShore,   (1.0 - smoothstep(0.0, 1.8, s)) * 0.30);
+    col = mix(col, uShallow, smoothstep(0.05, 0.45, d));
+    col = mix(col, uMid,     smoothstep(0.55, 1.90, d));
+    col = mix(col, uDeep,    smoothstep(2.20, 4.60, d));
+    // A pale lip pinned to the waterline itself, which depth alone cannot place
+    // at the 4 m lattice resolution. NARROWER AND WEAKER than it was: at 1.8 m
+    // and 30% it fired on every waterline including the ones in the MIDDLE of a
+    // merged lake, where a shoal crest or a neighbouring basin's bank comes up -
+    // and there, with the foam on top of it, it read as a pale plume lying
+    // across open water rather than as a shore.
+    col = mix(col, uShore,   (1.0 - smoothstep(0.0, 1.1, s)) * 0.18 * vBank);
 
     // THE DEEP END HAS TO KEEP MOVING, or the bed's relief is invisible.
     //
@@ -1671,10 +1884,14 @@ const FRAG = /* glsl */ `
     // reads as a cloud shadow lying on a flat colour; real deep water goes
     // greener as well as darker, and that is what makes the drift look like
     // water rather than like lighting.
-    float deep = smoothstep(4.2, 11.0, d);
-    col *= 1.0 - 0.19 * deep;
-    col.g += 0.030 * deep;
-    col.b -= 0.020 * deep;
+    // ...KEYED ON THE DEPTHS THAT EXIST, for the same reason as the ramp above.
+    // 4.2 -> 11.0 m over a bed whose middle is 5.1-5.9 m meant this term sat at
+    // 0.15 everywhere and the bed's real seven metres of relief was invisible.
+    // 2.6 -> 8.0 puts it across the middle of the basin, where the flatness is.
+    float deep = smoothstep(2.6, 8.0, d);
+    col *= 1.0 - 0.26 * deep;
+    col.g += 0.038 * deep;
+    col.b -= 0.030 * deep;
 
     // Broad ripple bands. Posterised, because everything else in this world is
     // cut paper and a smooth gradient reads as a different game. Signed about
@@ -1682,40 +1899,66 @@ const FRAG = /* glsl */ `
     // strongest band anywhere by eleven per cent and left every other pixel at
     // the base value, so the field read as a faint stain on a flat colour
     // instead of as structure.
-    vec2 p = vWorld * 0.013;
-    float w = noise(p + vec2(uTime * 0.05, uTime * 0.032));
-    w += 0.5 * noise(p * 2.4 - vec2(uTime * 0.07, 0.0));
-    w /= 1.5;
-    // TWO OCTAVES SUMMED AND HALVED IS A FIELD THAT NEVER LEAVES THE MIDDLE.
-    // Measured on the histogram, w sat between 0.35 and 0.65 almost everywhere,
-    // so a five-step posterise only ever produced the middle three steps and
-    // the band term came out at plus or minus five per cent — invisible, which
-    // is why the open water still read as one value after the field was added.
-    // Stretching it about its mean is what turns it into structure.
-    w = clamp((w - 0.5) * 2.4 + 0.5, 0.0, 1.0);
-    float band = floor(w * 5.0) / 5.0;
-    col *= 1.0 + (band - 0.4) * 0.30;
+    // SCALE. THIS IS WHY FIVE ROUNDS OF "ADD A TONAL DRIFT" CHANGED NOTHING.
+    //
+    // Every noise wavelength in this shader was authored in tens or hundreds of
+    // metres - 77 m ripple bands, a 312 m drift, 13 m lanes - on the assumption
+    // that the capture frame is a hundred and twenty metres of ground and a tarn
+    // fills a good part of it. The first half of that is true and the second is
+    // not. Probing the live shader with a fract(vWorld.x * 0.04) ramp in the red
+    // channel and reading the period straight off the render puts the camera at
+    // about TWELVE PIXELS PER METRE: 1600 px is 133 m of ground, and the visible
+    // part of a basin is thirty to forty metres across - four hundred pixels. So
+    // a 77 m field put HALF a feature across the whole body of water and a 312 m
+    // field put a fiftieth of one. Both are indistinguishable from a constant,
+    // which is what the frame kept showing however hard the amplitude was
+    // pushed: measured, a +-45% stripe at 31 m was invisible in the render.
+    //
+    // The reference settles it from the other end. Its lake carries its
+    // structure at 30-60 px - one and a half to three metres - ripple patches,
+    // half-metre lily pads, submerged stones. Ripples are METRES.
+    // AND THE FINE END HAS TO CARRY THE WEIGHT, not the coarse one. The measure
+    // (tools/blue.mjs) compares pixels 2.3 m apart, because that is the scale the
+    // reference's water carries its ripple patches at; an 8.7 m octave at full
+    // amplitude and a 1.7 m one at 15% put almost nothing into that window.
+    // THE FACETS. aTone is stamped once per triangle at build time (toneAt in
+    // water.js) so this step is constant across the facet and hard at its edge,
+    // which is what makes the surface read as cut paper. Value AND a little
+    // chroma: the reference's facets differ in hue as well as brightness, a
+    // paler facet being slightly greener, which is light in water rather than
+    // light ON it.
+    col *= 1.0 + (vTone - 0.5) * 0.44;
+    col.g *= 1.0 + (vTone - 0.5) * 0.13;
+    col.b *= 1.0 - (vTone - 0.5) * 0.07;
+
+    // A weak sub-facet ripple under it, so a big facet is not itself flat. Kept
+    // small on purpose: at any strength it fights the facet edges, and the
+    // facets are the thing that reads.
+    vec2 p = vWorld * 0.30;                                // ~3.4 m
+    float w = noise(p + vec2(uTime * 0.16, uTime * 0.11));
+    w += 0.70 * noise(p * 2.2 - vec2(uTime * 0.23, 0.0));  // ~1.5 m
+    w /= 1.70;
+    col *= 0.955 + 0.090 * w;
 
     // WIND LANES.
     //
     // A lake seen from above is crossed by long stripes of ruffled and glassy
     // water lying across the wind, and that is the one piece of structure the
-    // open middle of the reference's tarn actually carries. One direction,
-    // stretched about fifteen to one, posterised to three steps so it reads as
-    // cut paper. Faded out in the shallows, where the foam and the bed are
-    // already doing the work and a stripe would only fight them.
+    // open middle of the reference tarn actually carries. Stretched about
+    // fourteen to one - forty-five metres along the wind, three and a bit
+    // across - and posterised to three steps so it reads as cut paper rather
+    // than as a gradient. Faded out in the shallows, where the foam and the bed
+    // are already doing the work and a stripe would only fight them.
     vec2 lane = vec2(vWorld.x * 0.85 + vWorld.y * 0.53,
                     -vWorld.x * 0.53 + vWorld.y * 0.85);
-    float lanes = noise(vec2(lane.x * 0.0055, lane.y * 0.075) + vec2(0.0, uTime * 0.03));
+    float lanes = noise(vec2(lane.x * 0.022, lane.y * 0.30));
     lanes = floor(lanes * 3.0) / 3.0;
-    col *= 1.0 + (lanes - 0.5) * 0.11 * smoothstep(0.6, 2.4, d);
+    col *= 1.0 + (lanes - 0.5) * 0.18 * smoothstep(0.6, 2.4, d);
 
-    // A second, much slower field, so the open water carries a broad tonal
-    // drift rather than one flat value out to the horizon. The reference's
-    // lake is mostly a single blue too — but it is not the SAME single blue
-    // from one side to the other, and at this frame size that difference is
-    // what stops a hundred metres of it reading as a painted slab.
-    col *= 0.925 + 0.155 * noise(vWorld * 0.0032 + vec2(uTime * 0.006, 0.0));
+    // And a broad drift over the whole body, so the two ends of a tarn are not
+    // the same blue. Forty-five metres: about one and a half features across the
+    // visible water, which is a gradient and is meant to be one.
+    col *= 0.945 + 0.115 * noise(vWorld * 0.022 + vec2(uTime * 0.01, 0.0));
 
     // --- foam at the waterline ---------------------------------------------
     // A bright lip about half a metre wide, chewed up by two noise octaves so
@@ -1728,7 +1971,11 @@ const FRAG = /* glsl */ `
     // the lip lands inside one lattice cell at this camera distance and is
     // chewed away by the shore noise before it reaches a pixel; over two and a
     // half it stops being a lip and becomes a milky bank of surf.
-    float edge = 0.32 + chew * 0.72 + chew2 * 0.34;
+    // NARROWER. 0.32-1.38 m of lip is twenty to fifty-five pixels on the 0.6
+    // zoom preset, and the bloom pass spreads that into a milky plume lying
+    // across the water - unmistakable in shots/mine/wildlife.png at cycle 8,
+    // where it read as smoke rather than as surf. A lip is centimetres.
+    float edge = 0.20 + chew * 0.42 + chew2 * 0.22;
     // Dies off on BOTH sides of the waterline. Before it was keyed on an
     // unsigned distance, so every vertex the lattice carried past the shore
     // read as "zero metres from the water" and got the full lip — which on a
@@ -1751,18 +1998,28 @@ const FRAG = /* glsl */ `
     // is what the gate is for. So the gate stays and it opens earlier, and the
     // lip is allowed to be white where it is there at all.
     float gate = smoothstep(0.26, 0.66, chew * 0.75 + chew2 * 0.45);
-    float foam = clamp(lip + wash, 0.0, 1.0) * gate;
+    float foam = clamp(lip + wash, 0.0, 1.0) * gate * vBank;
     // A LITTLE QUIETER. The lattice now fades over four metres of shore rather
     // than one and a half, so the lip sits inside a band that is already
     // half-transparent — and at 0.46 the bloom pass turned the sum into a
     // glowing rope tracing every facet corner of the near shore.
-    col = mix(col, uFoam, foam * 0.34);
+    // 0.34 WAS NOT A FOAM LINE, IT WAS A HINT OF ONE. The reference puts a
+    // crisp near-white collar round every stone that breaks the surface and a
+    // white lip along most of its shore; ours mixed a third of the foam colour
+    // into a band that is itself half transparent, so the render showed grass
+    // meeting blue with a faint pale smudge between. The gate above is what
+    // keeps it BROKEN rather than a piping, so the strength can go up.
+    // ...AND 0.58 WAS TOO MUCH once the lip narrowed: what the eye reads as a
+    // foam line is its EDGE, not its area, and the bloom squares whatever the
+    // brightest pixel is. 0.42 with a lip a third of a metre wide is a crisp
+    // white collar; 0.58 with one two metres wide was a plume.
+    col = mix(col, uFoam, foam * 0.42);
 
     // --- sun glitter --------------------------------------------------------
     // Sparse and restrained. At 1.1x this fed the bloom pass two soft white
     // blobs the size of a car in every crossing frame, which read as smudges on
     // the lens rather than as sun on water.
-    float glint = pow(max(0.0, noise(p * 7.0 + uTime * 0.22)), 26.0);
+    float glint = pow(max(0.0, noise(p * 1.7 + uTime * 0.22)), 26.0);
     col += uSun * glint * 0.45 * smoothstep(0.6, 3.0, d);
 
     // GLASSY OVER THE WHOLE SHELF, not merely at the lip.
@@ -1783,8 +2040,15 @@ const FRAG = /* glsl */ `
     // see. The shoals put stone within a metre or two of the surface out in the
     // open water; at 0.68 rising to opaque by 3.2 m those boulders were behind
     // four fifths of a coat of cobalt and might as well not have been built.
-    float alpha = mix(0.62, 0.965, smoothstep(0.2, 4.2, d));
-    alpha = max(alpha, foam * 0.70);
+    // 0.62 WAS TOO MUCH GLASS ONCE THE SHELF WAS WIDENED. The bed is a third of
+    // every shallow pixel at that alpha, and the shelf is now fifteen metres
+    // wide instead of three — so the bed's own colour, not the ramp, was setting
+    // the tone of the whole near shore, and it is what kept twenty levels of red
+    // in water the reference holds at zero. The bed is repainted cool now (see
+    // carveLakes) and the water closes over it faster; a stone under a metre is
+    // still a shape you can read.
+    float alpha = mix(0.78, 0.975, smoothstep(0.2, 3.4, d));
+    alpha = max(alpha, foam * 0.80);
     // THE LATTICE CLIPS ITSELF — AND IT HAS TO FINISH BEFORE THE TERRAIN GETS
     // A CHANCE TO.
     //
@@ -1826,7 +2090,22 @@ const FRAG = /* glsl */ `
     // wide. Four metres puts the lattice's own soft edge outside the worst
     // facet error, so the visible shoreline is always this ramp, which rides on
     // the noisy shore distance and is therefore organic.
-    alpha *= smoothstep(-1.2, 4.0, sg);
+    // ...AND THE FADE IS FOUR METRES WIDE ONLY WHERE THERE IS A REAL SHORE.
+    //
+    // Four metres of shore distance is right against a bank, where it has to
+    // outrun the terrain mesh's own error: an 8.7 m facet whose chord sits half a
+    // metre off the smooth field moves the DRAWN waterline four metres sideways,
+    // and the lattice has to have gone before the terrain gets there or the frame
+    // shows the facet polygon with a bright rim on it.
+    //
+    // In the middle of a merged lake it is exactly wrong. A shoal crest or a
+    // neighbouring basin's bank coming up out there is a waterline with no bank
+    // behind it, so the same fade turned a broad swathe of open water 40-60%
+    // transparent over pale ground — and THAT, not the foam, is the milky plume
+    // lying across the water in the 0.6 zoom capture. (Gating the foam on vBank
+    // changed the frame not at all, which is how this was found.) A metre and a
+    // bit is enough out there, because there is no facetted bank to hide.
+    alpha *= smoothstep(-1.2, mix(1.3, 4.0, vBank), sg);
     if (alpha < 0.02) discard;
 
     // Match the scene's exponential fog so the lake recedes correctly.
@@ -1936,7 +2215,7 @@ export class Water {
    * unmistakably wrong, so it is masked here too.
    */
   _buildPlanned(T, plan) {
-    const pos = [], dep = [], sho = [];
+    const pos = [], dep = [], sho = [], ton = [], bnk = [];
     const acc = this._rockAcc();
     const pads = {
       rng: new Rng(((getLakeContext(this.biome)?.seed ?? 1337) * 40503) ^ 0x1111),
@@ -2058,18 +2337,69 @@ export class Water {
         }
       }
 
+      // FOAM BELONGS TO A SHORE, AND A MERGED LAKE HAS WATERLINES IN THE MIDDLE.
+      //
+      // The shore attribute is a distance transform to dry cells, and a shoal
+      // crest or a neighbouring basin's bank coming up in the open water is a
+      // dry cell like any other — so the lip and the pale wash fired out there
+      // and the bloom pass spread them into a milky plume lying across the
+      // water, which is the loudest thing left in the 0.6 zoom capture. `bank`
+      // is the same test the lily pads use: how much genuinely dry ground is
+      // within twelve metres. A shore has a quadrant of it; a mid-lake spit has
+      // a cell or two. The rock collars are stamped back to 1 below, because a
+      // stone that breaks the surface does earn foam wherever it stands.
+      const bank = new Float32Array(M * M);
+      for (let j = 0; j < M; j++) {
+        for (let i = 0; i < M; i++) {
+          let dry = 0, seen = 0;
+          for (let dj = -3; dj <= 3; dj++) {
+            const jj = j + dj;
+            if (jj < 0 || jj >= M) continue;
+            for (let di = -3; di <= 3; di++) {
+              const ii = i + di;
+              if (ii < 0 || ii >= M) continue;
+              seen++;
+              if (depth[jj * M + ii] < -0.5) dry++;
+            }
+          }
+          bank[j * M + i] = seen ? sstep(0.045, 0.20, dry / seen) : 0;
+        }
+      }
+
       const F = {
-        depth, shore, VN: M, N: E, cell, x0, z0, level: L.level,
+        depth, shore, bank, VN: M, N: E, cell, x0, z0, level: L.level,
         keepOut: (x, z) => plan.dRoute(x, z) < (L.neck ? 13 : 15),
       };
       this._scatterRocksInto(acc, T, F);
       this._scatterPads(pads, F);
 
       const KEEP = -2.5;
+      // A REGULAR GRID IS ITS OWN TELL. With one tone per facet the lattice's
+      // 4 m squares came out as a field of identical diamonds all pointing the
+      // same way — visible as a quilt in the capture. Jittering each grid VERTEX
+      // in plan (never in height, so the surface stays level) turns them into
+      // irregular triangles like the reference's. Keyed on (i, j) so a corner
+      // shared by four cells gets one answer and the mesh stays watertight; the
+      // depth and shore attributes are still sampled on the true grid, which is
+      // an error of at most a metre on a shelf that runs fifteen.
+      const jx = (i, j) => (vhash(i * 7 + 13, j * 11 + 5) - 0.5) * cell * 0.62;
+      const jz = (i, j) => (vhash(i * 5 + 91, j * 3 + 47) - 0.5) * cell * 0.62;
       const push = (i, j) => {
-        pos.push(x0 + i * cell, L.level, z0 + j * cell);
+        pos.push(x0 + i * cell + jx(i, j), L.level, z0 + j * cell + jz(i, j));
         dep.push(depth[j * M + i]);
         sho.push(Math.max(-60, Math.min(60, shore[j * M + i])));
+        bnk.push(bank[j * M + i]);
+      };
+      // ONE TONE PER TRIANGLE. See toneAt() — the same value on all three
+      // vertices, so the varying is CONSTANT across the facet and the surface
+      // comes out as cut paper rather than as an airbrush.
+      const tri = (ai, aj, bi, bj, ci, cj) => {
+        push(ai, aj); push(bi, bj); push(ci, cj);
+        const t = toneAt(
+          x0 + ((ai + bi + ci) / 3) * cell,
+          z0 + ((aj + bj + cj) / 3) * cell,
+        );
+        ton.push(t, t, t);
       };
       for (let j = 0; j < E; j++) {
         for (let i = 0; i < E; i++) {
@@ -2078,8 +2408,8 @@ export class Water {
           const a = depth[k], b = depth[k + 1];
           const c = depth[k + M], e = depth[k + M + 1];
           if (a < KEEP && b < KEEP && c < KEEP && e < KEEP) continue;
-          push(i, j); push(i, j + 1); push(i + 1, j);
-          push(i + 1, j); push(i, j + 1); push(i + 1, j + 1);
+          tri(i, j, i, j + 1, i + 1, j);
+          tri(i + 1, j, i, j + 1, i + 1, j + 1);
         }
       }
     }
@@ -2098,6 +2428,8 @@ export class Water {
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
     geo.setAttribute('aDepth', new THREE.BufferAttribute(new Float32Array(dep), 1));
     geo.setAttribute('aShore', new THREE.BufferAttribute(new Float32Array(sho), 1));
+    geo.setAttribute('aTone', new THREE.BufferAttribute(new Float32Array(ton), 1));
+    geo.setAttribute('aBank', new THREE.BufferAttribute(new Float32Array(bnk), 1));
     geo.computeBoundingSphere();
     const m = new THREE.Mesh(geo, this.material);
     m.name = 'lakeSurface';
@@ -2159,6 +2491,8 @@ export class Water {
     const pos = [];
     const dep = [];
     const sho = [];
+    const ton = [];
+    const bnk = [];
     // 2.5 m of headroom: keep a ring of dry vertices so the shoreline
     // triangles exist and the terrain, not the mesh boundary, does the cutting.
     const KEEP = -2.5;
@@ -2166,14 +2500,21 @@ export class Water {
       pos.push(-half + i * cell, this.level, -half + j * cell);
       dep.push(depth[j * VN + i]);
       sho.push(Math.max(-60, Math.min(60, shore[j * VN + i])));
+      bnk.push(1);
+    };
+    const tri = (ai, aj, bi, bj, ci, cj) => {
+      push(ai, aj); push(bi, bj); push(ci, cj);
+      const t = toneAt(-half + ((ai + bi + ci) / 3) * cell,
+                       -half + ((aj + bj + cj) / 3) * cell);
+      ton.push(t, t, t);
     };
     for (let j = 0; j < N; j++) {
       for (let i = 0; i < N; i++) {
         const a = depth[j * VN + i], b = depth[j * VN + i + 1];
         const c = depth[(j + 1) * VN + i], e = depth[(j + 1) * VN + i + 1];
         if (a < KEEP && b < KEEP && c < KEEP && e < KEEP) continue;
-        push(i, j); push(i, j + 1); push(i + 1, j);
-        push(i + 1, j); push(i, j + 1); push(i + 1, j + 1);
+        tri(i, j, i, j + 1, i + 1, j);
+        tri(i + 1, j, i, j + 1, i + 1, j + 1);
       }
     }
     if (!pos.length) return null;
@@ -2182,6 +2523,8 @@ export class Water {
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
     geo.setAttribute('aDepth', new THREE.BufferAttribute(new Float32Array(dep), 1));
     geo.setAttribute('aShore', new THREE.BufferAttribute(new Float32Array(sho), 1));
+    geo.setAttribute('aTone', new THREE.BufferAttribute(new Float32Array(ton), 1));
+    geo.setAttribute('aBank', new THREE.BufferAttribute(new Float32Array(bnk), 1));
     geo.computeBoundingSphere();
     const m = new THREE.Mesh(geo, this.material);
     m.name = 'lakeSurface';
@@ -2227,7 +2570,10 @@ export class Water {
     // and unmistakably a stray polygon again. A lily pad is a dark, slightly
     // yellow green and it is the one thing on the lake that is NOT the colour
     // of the lake.
-    const green = [0x2b5622, 0x35682a, 0x22461a, 0x3c7130];
+    // DARKER STILL. Shot at 0x35682a a pad was a bright chip of green against
+    // cobalt; the reference's pads are close in value to the shaded side of the
+    // meadow, not to its lit side.
+    const green = [0x21451b, 0x2a5522, 0x1a3715, 0x2f5c26];
     const c = new THREE.Color();
     /**
      * IS THERE A SHORE HERE?
@@ -2281,7 +2627,10 @@ export class Water {
         // shore, a raft of leaves floating over a meadow.
         // The shelf is a real shelf now, so the band can be the one lily pads
         // actually live in rather than the one that happened to exist.
-        if (d < 0.8 || d > 1.8) continue;
+        // A WIDER BAND, because the shelf is a real shelf now: 0.8-1.8 m was
+        // four metres of ground on the old profile and is nine on this one, but
+        // rafts want somewhere to sit on a shore that shelves at 1:6.
+        if (d < 0.6 || d > 2.6) continue;
         // Rafts, never a sprinkle — and only in the corner of a bay, so a wide
         // shelf does not come out carpeted in leaves.
         // TIGHT AGAINST THE SHORE. At fifteen metres the outer pads of a raft
@@ -2297,17 +2646,27 @@ export class Water {
         if (rng.float() > (kind === 'shoal' ? 0.020 : 0.011)) continue;
         const cx = x0 + i * cell, cz = z0 + j * cell;
         pads.rafts++; if (kind === 'shoal') pads.shoalRafts++;
-        const count = 4 + rng.int(0, 7);
+        // BIG ENOUGH TO EXIST AT THIS CAMERA. A 1.1 m leaf is one pixel from a
+        // hundred and forty metres up; the reference's rafts read as a patch of
+        // dark green with leaf edges in it, which takes both more pads and
+        // bigger ones. This is the cheapest thing in the world that says "the
+        // water here is shallow and still", and it was invisible.
+        const count = 14 + rng.int(0, 14);
         for (let k = 0; k < count; k++) {
           const a = rng.float() * Math.PI * 2;
-          const r = rng.float() * 5.2;
+          const r = rng.float() * 5.6;
           const px = cx + Math.cos(a) * r, pz = cz + Math.sin(a) * r * 0.8;
           // only where there is still water under it
           const ii = Math.round((px - x0) / cell), jj = Math.round((pz - z0) / cell);
           if (ii < 0 || jj < 0 || ii >= VN || jj >= VN) continue;
           const dd = depth[jj * VN + ii];
-          if (dd < 0.6 || dd > 2.0) continue;
-          const R = 0.55 + rng.float() * 0.45;
+          if (dd < 0.45 || dd > 2.9) continue;
+          // MEASURED OFF THE REFERENCE. Its pads are twelve to sixteen pixels
+          // across in a 1656 px frame at about twenty pixels per metre, so a pad
+          // is a little over half a metre. At 2-4 m across ours were bigger than
+          // the boulders beside them and read as green paper cut-outs lying on
+          // the lake — the exact failure the note above records for the colour.
+          const R = 0.45 + rng.float() * 0.42;
           const rot = rng.float() * Math.PI * 2;
           c.set(green[rng.int(0, 3)]);
           // A pentagon with one notch: a circle at this size is five pixels of
@@ -2368,7 +2727,22 @@ export class Water {
       proto.push(g);
       protoSy.push(sy);
     }
-    return { rng, proto, protoSy, pos: [], nor: [], col: [], n: 0, nShoal: 0 };
+    // The meadow's own stone triad — see the import note. Wrapped because
+    // derivePalette wants a full palette and this module must never be the
+    // reason the page fails to load.
+    let stone;
+    try {
+      const K = derivePalette(this.palette, this.biome?.id);
+      stone = { stoneBody: K.stoneBody, stoneTop: K.stoneTop, stoneLow: K.stoneLow };
+    } catch {
+      const b = new THREE.Color(this.palette?.rock ?? 0x8f9099).multiplyScalar(0.62);
+      stone = {
+        stoneBody: b,
+        stoneTop: b.clone().lerp(new THREE.Color(1, 1, 1), 0.30),
+        stoneLow: b.clone().multiplyScalar(0.5),
+      };
+    }
+    return { rng, proto, protoSy, stone, pos: [], nor: [], col: [], n: 0, nShoal: 0 };
   }
 
   _finishRocks(acc) {
@@ -2393,9 +2767,7 @@ export class Water {
   _scatterRocksInto(acc, T, F) {
     const { depth, shore, VN, N, cell, x0, z0, level } = F;
     const { rng, proto, protoSy, pos, nor, col } = acc;
-    const P = this.palette;
-    const base = new THREE.Color(P.rock ?? 0x8f9099);
-    const dark = new THREE.Color(P.rockShadow ?? 0x5f6069);
+    const K = acc.stone;
     const stamps = [];
 
     const place = (x, z, r, y, lit, collar) => {
@@ -2423,16 +2795,26 @@ export class Water {
       const nm = new THREE.Matrix3().setFromMatrix4(m).invert().transpose();
       const p = g.attributes.position.array;
       const nn = g.attributes.normal.array;
-      // Less spread toward the shadow swatch. At 0.55 a good third of the
-      // shore population came out near-charcoal, and a dark stone lying on lit
-      // meadow at this camera angle reads as a hole in the ground rather than
-      // as granite. The reference's boulders are all within a stop of each
-      // other and all of them are LIGHT.
-      const c = base.clone().lerp(dark, rng.float() * 0.38).multiplyScalar(lit);
+      // THREE PLANES PER STONE, not one flat colour.
+      //
+      // Every lake boulder used to be painted a single value, so a four-metre
+      // granite block came back as one pale silhouette — and against the
+      // meadow's stone, which carries a near-white crown and a half-value
+      // shadow face, ours read as a paper cut-out. The ramp is keyed on the
+      // vertex normal's y exactly the way props.js's `rawLit` is: sky-facing
+      // facets take the crown, horizontal-and-below takes the shadow.
+      const body = K.stoneBody.clone().lerp(K.stoneLow, rng.float() * 0.30);
+      const top = K.stoneTop.clone().lerp(K.stoneBody, 0.18 + rng.float() * 0.30);
+      const c = new THREE.Color();
       const v = new THREE.Vector3(), nv = new THREE.Vector3();
       for (let i = 0; i < p.length; i += 3) {
         v.set(p[i], p[i + 1], p[i + 2]).applyMatrix4(m);
         nv.set(nn[i], nn[i + 1], nn[i + 2]).applyMatrix3(nm).normalize();
+        // t0/t1 match `boulder()` in props.js: a rounded stone has no single
+        // sky plane, so the crown ramp starts high and the shadow bites early.
+        if (nv.y >= 0.50) c.copy(body).lerp(top, sstep(0.50, 0.98, nv.y));
+        else c.copy(K.stoneLow).lerp(body, sstep(-0.30, 0.50, nv.y));
+        c.multiplyScalar(lit);
         pos.push(v.x, v.y, v.z);
         nor.push(nv.x, nv.y, nv.z);
         col.push(c.r, c.g, c.b);
@@ -2473,11 +2855,30 @@ export class Water {
         // and the client's "most polygons have no detail at all" is loudest
         // over the empty middle of a lake. Anything under two and a half metres
         // qualifies, wherever it is.
-        const onShoal = sh > 26 && d > 0.15 && d < 2.8;
-        if (sh > 26 && !onShoal) continue;
+        const onShoal = sh > 20 && d > 0.15 && d < 2.8;
+        if (sh > 20 && !onShoal) continue;
         // A shoal crest is a small target and it is the whole point of the
         // exercise, so it gets a denser draw than a metre of open bank.
-        const near = sh <= 26 ? 1 - sh / 26 : 0.85;
+        // TWENTY METRES, NOT TWENTY-SIX — and the reason is the profile above.
+        // These rates were set against a bed that reached three metres of water
+        // eleven metres from the shore; it now takes fifteen, and the same
+        // per-cell probability over a half-again wider band came back as a rock
+        // GARDEN: 5208 boulders on hero_alpine, a continuous rubble collar round
+        // every tarn (shots/mine/lake_bridge.png at cycle 1). The reference has
+        // a stone every ten or twenty metres of shoreline, in families, with
+        // clear water and clear grass between them.
+        // THE PEAK BELONGS JUST INSIDE THE WATERLINE, NOT JUST OUTSIDE IT.
+        //
+        // `sh` is SIGNED — negative up the bank — so `1 - sh / 20` scored dry
+        // ground above 1.0 and wet ground below it, and the population went
+        // where the score was: measured on the cycle-2 capture, not one
+        // submerged boulder anywhere in either of lake_bridge's tarns, every
+        // stone sitting on grass. The reference's shore is stone standing IN the
+        // shallows with the meadow behind. This is a bump: zero six metres up
+        // the bank, full at three metres of water, gone by twenty.
+        const near = sh > 20 ? 0.85
+          : sh < 3 ? Math.max(0, (sh + 6) / 9)
+          : Math.max(0, 1 - (sh - 3) / 19);
         // A stone whose top is under the surface is only legible where the
         // water is glassy, which is against the bank. Out in the open it is a
         // grey plate lying ON the lake with a ring of foam round it — the same
@@ -2496,7 +2897,22 @@ export class Water {
         // in it every ten or twenty metres and half of them are under the
         // surface. These rates were set when the bank was a wall and the band
         // they had to fill was two metres wide; the shelf is fifteen now.
-        if (rng.float() > (emergent ? 0.055 : 0.032) * (0.28 + near * near)) continue;
+        // ...AND CUT BY HALF AGAIN once the shelf was widened. See the note on
+        // `near` above: measured 5208 stones on hero_alpine, 3447 on
+        // lake_bridge. At these rates it is about a third of that, which puts a
+        // family every fifteen to twenty-five metres of shoreline.
+        // The SUBMERGED half of the population is the one the reference reads
+        // through its shallows and the one we had none of, so it gets the same
+        // rate as the emergent half rather than two thirds of it.
+        // A SHOAL GETS ITS OWN, MUCH HIGHER RATE. This is the mission's "put
+        // stones out there that show through", and at the shore rate a shoal
+        // crest of a few hundred square metres drew about ONE stone - measured,
+        // 106 of 897 on lake_bridge, spread over fifty-four basins, so the middle
+        // of any given lake had none. The reference's emergent boulders are not
+        // in its pale shallows at all: they stand in full cobalt with a white
+        // collar round them, which is exactly what a shoal crest is for.
+        const rate = onShoal ? 0.052 : (emergent ? 0.026 : 0.026);
+        if (rng.float() > rate * (0.28 + near * near)) continue;
         const x = x0 + i * cell + (rng.float() - 0.5) * cell;
         const z = z0 + j * cell + (rng.float() - 0.5) * cell;
         // Not under the bridge deck, and not on the knife of ground the road
@@ -2507,7 +2923,10 @@ export class Water {
         // emergent one rising only half its radius above a bed that had already
         // been pushed down by the seating rule broke the surface by twenty
         // centimetres — a grey speck, not a boulder.
-        const r = emergent ? 1.5 + rng.float() * 2.6 : 1.1 + rng.float() * 1.6;
+        // SMALLER. The reference's shore stones are four to eight metres ACROSS,
+        // i.e. a radius of two to four; at 1.5-4.1 the biggest of ours were
+        // eight-metre blocks and, standing in a crowd, read as a quarry tip.
+        const r = emergent ? 1.3 + rng.float() * 1.7 : 1.2 + rng.float() * 1.5;
         // Centre height above the bed. Emergent rocks break the surface;
         // submerged ones stay a comfortable margin under it.
         // A CLEAR METRE UNDER, or it is a plate and not a stone. At 0.9 the top
@@ -2542,7 +2961,10 @@ export class Water {
         // Only something that reaches the surface gets a foam collar.
         const collar = (rise + r * 0.5) - d > -0.7;
         acc.n++; if (onShoal) acc.nShoal++;
-        place(x, z, r, bed + rise, emergent ? 1.0 : 0.9, collar);
+        // A submerged stone is seen through a blue filter, so painting it a
+        // tenth darker than an emergent one on top of that made it a smudge.
+        // Lit slightly BRIGHTER is what lets it read as a shape under water.
+        place(x, z, r, bed + rise, emergent ? 1.0 : 1.06, collar);
         // STONES COME IN GROUPS.
         //
         // One boulder per draw put singletons all along the shore, and a lone
@@ -2550,7 +2972,7 @@ export class Water {
         // object that has been placed rather than as geology. Every shore in
         // the reference has them in threes and fours — one big, two small, one
         // half drowned — so each draw plants a little family instead.
-        const mates = rng.int(0, 3);
+        const mates = rng.int(0, 2);
         for (let m = 0; m < mates; m++) {
           const ang = rng.float() * Math.PI * 2;
           const rad = r * (1.1 + rng.float() * 1.9);
@@ -2566,7 +2988,7 @@ export class Water {
             const hh = T.heightAt(mx2 + ox, mz2 + oz);
             if (hh < mbed) mbed = hh;
           }
-          place(mx2, mz2, mr, mbed + mRise, mEm ? 1.0 : 0.9,
+          place(mx2, mz2, mr, mbed + mRise, mEm ? 1.0 : 1.06,
             (mRise + mr * 0.5) - md > -0.7);
         }
       }
@@ -2591,6 +3013,9 @@ export class Water {
           // lake around every boulder.
           const e = Math.max(0.05, Math.hypot(dx, dz) - st.r);
           if (e < shore[k]) shore[k] = e;
+          // ...and it counts as a bank, so the foam gate above lets the collar
+          // through even in the middle of open water.
+          if (F.bank) F.bank[k] = 1;
         }
       }
     }
