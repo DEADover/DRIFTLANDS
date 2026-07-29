@@ -86,25 +86,55 @@ function fir(rng, K, o = {}) {
   // seg 12 and 8 tiers is ~210 triangles against the old 80. Across ~37 000
   // conifers that is about +4.6 M, spent on the subject of the frame.
   const tiers = o.tiers ?? rng.int(8, 9);
-  const seg = o.seg ?? 12;
+  const seg = o.seg ?? 14;
   // Radius ladder first, because both the trunk length and the tier spacing are
   // derived from it — the old code advanced by a jittered fraction of the TIER
   // height, which made total height a random walk and is why "6-9 tiers" once
   // grew a 30 m mast.
-  const taper = o.taper ?? rng.float(0.875, 0.903);
-  const dropK = o.dropK ?? rng.float(0.56, 0.68);
+  /**
+   * THE PROFILE, AND WHY A CONSTANT TAPER CANNOT BE IT.
+   *
+   * A fixed shrink per tier is a geometric series, so the tree is a straight
+   * cone whose top tier is still 45-50% of the base width — and above that
+   * stump the leader had to be a big smooth triangle to reach a point at all.
+   * On the sheet that read as a paper dart floating over the tree, which was the
+   * single worst thing in the first shot of this geometry. A conifer's real
+   * outline is nearly straight down the flanks and then closes FAST over the top
+   * quarter, which is a power curve: (remaining/total)^e with e about 0.55 gives
+   * a top tier under a third of the base and a leader that is a tip rather than
+   * a hat.
+   */
+  const profE = o.profE ?? rng.float(0.50, 0.62);
+  /**
+   * DROOP, SWEPT AND MEASURED ON THE SHEET. At 0.62 of the tier radius the flap
+   * tips protrude as long thin THORNS and the tree reads as a thistle; the
+   * reference's tips barely clear the row below. 0.34-0.46 keeps the serration
+   * (it is what the silhouette is made of) without the spikes.
+   */
+  const dropK = o.dropK ?? rng.float(0.34, 0.46);
   // `stepK` is the tier advance as a fraction of the tier's OWN radius, and it
   // has to stay a little above `dropK` or the tips of one skirt hang below the
   // shoulder of the next one down and the stack closes into a smooth cone. The
   // ratio that reads as "rows of drooping points" is about 1.15.
-  const stepK = o.stepK ?? rng.float(0.68, 0.78);
+  const stepK = o.stepK ?? rng.float(0.48, 0.56);
   const rad = [];
-  let rr = rng.float(2.20, 2.70) * wide;
-  for (let i = 0; i < tiers; i++) { rad.push(rr); rr *= taper * rng.float(0.985, 1.015); }
-  const step = rad.map((v) => stepK * v * tall);
+  const r0 = rng.float(2.20, 2.70) * wide;
+  for (let i = 0; i < tiers; i++) {
+    rad.push(r0 * Math.pow((tiers - i) / tiers, profE) * rng.float(0.965, 1.035));
+  }
+  /**
+   * WHORLS ARE EVENLY SPACED. The first version advanced each tier by a fraction
+   * of its OWN radius, which packs the top of the tree into a smooth spike while
+   * the bottom rows sit a metre and a half apart — and a smooth spike is what the
+   * client is calling "no detail". Rows in target_01 are evenly spaced from the
+   * skirt to the leader, so the step is a fraction of the tree's BASE radius,
+   * with a fifth of the old proportional behaviour kept so the top rows tighten
+   * a little as they narrow.
+   */
+  const step = rad.map((v) => stepK * (r0 * 0.80 + v * 0.20) * tall);
   const rise = step.reduce((a, c) => a + c, 0);
-  const leaderH = rad[tiers - 1] * 1.35 * tall;
-  const drop0 = dropK * rad[0] * tall;
+  const leaderH = rad[tiers - 1] * 2.4 * tall;
+  const drop0 = dropK * r0 * tall;
   // The bare pole, as a fraction of the whole tree. 0.075 is read off the
   // reference: you see grass under the skirt and a stub of bark, never a leg.
   const trunkH = drop0 + (o.bareK ?? 0.075) * (rise + leaderH);
@@ -112,7 +142,7 @@ function fir(rng, K, o = {}) {
   // Open-ended and six-sided: the top is inside the canopy and the bottom is in
   // the turf, so both caps are pure waste. It runs up past the second tier's
   // shoulder so no gap can open between bark and needles.
-  const trunkLen = trunkH + rad[0] * 1.1;
+  const trunkLen = trunkH + r0 * 1.1;
   b.raw(new THREE.CylinderGeometry(tr * 0.66, tr * 1.7, trunkLen, 6, 1, true)
     .translate(0, trunkLen / 2, 0), K.trunkBark);
 
@@ -133,13 +163,23 @@ function fir(rng, K, o = {}) {
     b.rawLit(
       firFrond(r, r * (o.crownK ?? 0.31), dropK * r * tall, seg,
         { inner: o.inner, notch: o.notch, notchK: o.notchK }, rng),
-      K.leafRamp[ci], K.leafRamp[NR - 1],
-      // The ramp is WIDE now and it has to be: `firFrond` hands it normal.y in
-      // three clean bands (crown 0.86, flap 0.44, notch wall -0.01) and a
-      // narrow 0.16-0.56 window put all three at the top of the ramp, which is
-      // the flat green the client is looking at. t1 0.80 keeps the full lit
-      // rung for the crown facets only.
-      { t0: 0.06, t1: 0.80, low: K.leafRamp[0], l0: -0.26 },
+      K.leafRamp[ci], K.leafSun,
+      /**
+       * THE RAMP WINDOW IS SOLVED FROM THE GEOMETRY, not tuned by eye.
+       *
+       * `firFrond` hands `mergeColored` normal.y in three clean bands — crown
+       * facets 0.86, flap halves 0.44, notch walls about 0.00 — so the window
+       * only has to put one band at each end of the ramp and the middle band in
+       * the middle. Solving for that:
+       *
+       *     t0 0.18, t1 0.78, l0 -0.02  ->  notch 3% toward body (i.e. shade),
+       *                                     flap 42% toward lit, crown 100%
+       *
+       * The previous window (0.06 / 0.80 / -0.26) put the notch wall 93% of the
+       * way to the BODY colour, which is why a tier with three geometric bands
+       * still rendered as one green: the ramp was reading them all as "up".
+       */
+      { t0: 0.20, t1: 0.86, low: K.leafShade, l0: -0.02 },
     );
     b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.
@@ -151,12 +191,12 @@ function fir(rng, K, o = {}) {
   // The leader: a thin spire above the last full skirt. A `firFrond` is wrong
   // here — its crown facets would go steep and dark — so this stays a star cone
   // in the lit rung, which is what the reference's tip is.
-  b.push(0, y, 0, rng.float(0, Math.PI * 2));
-  b.rawLit(firTier(rad[tiers - 1] * 0.66, leaderH, 6, leaderH * 0.13, 0.66, rng),
-    K.leafRamp[NR - 2], K.leafRamp[NR - 1],
-    { t0: 0.05, t1: 0.72, low: K.leafRamp[1], l0: -0.22 });
+  b.push(0, y - step[tiers - 1] * 0.55, 0, rng.float(0, Math.PI * 2));
+  b.rawLit(firTier(rad[tiers - 1] * 0.86, leaderH, 6, leaderH * 0.20, 0.60, rng),
+    K.leafRamp[NR - 2], K.leafSun,
+    { t0: 0.22, t1: 0.62, low: K.leafRamp[0], l0: -0.10 });
   b.pop();
-  return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y + leaderH };
+  return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y - step[tiers - 1] * 0.55 + leaderH };
 }
 
 function scotsPine(rng, K) {
@@ -809,31 +849,31 @@ const MAKERS = {
   // Short, full, heavy skirts, a slow taper and a wide crown — the "shorter
   // fuller fir" of the reference frame. Fewer tiers, but each one deeper.
   firOld: (r, K) => fir(r, K, {
-    tall: 0.94, wide: 1.30, tiers: 7, seg: 14,
-    dropK: 0.76, stepK: 0.60, taper: 0.925, bareK: 0.10, inner: 0.58,
+    tall: 0.90, wide: 1.28, tiers: 8, seg: 14,
+    dropK: 0.46, stepK: 0.44, profE: 0.42, bareK: 0.10, inner: 0.38,
   }),
   // TALL NARROW SPIRE. Not a needle: at wide 0.72 with six tiers this once came
   // out as a 22 m green spike three metres across, which read as litter. The
-  // narrowness now comes from a FAST taper and SHORT frills instead of from a
-  // thin base, so the bottom of the tree still has a skirt on it.
+  // narrowness comes from SHORT frills and a fast-closing profile rather than
+  // from a thin base, so the bottom of the tree still has a skirt on it.
   firSpire: (r, K) => fir(r, K, {
-    tall: 1.0, wide: 0.80, tiers: 10, seg: 10,
-    dropK: 0.42, stepK: 0.98, taper: 0.860, crownK: 0.38,
+    tall: 1.02, wide: 0.84, tiers: 10, seg: 10,
+    dropK: 0.30, stepK: 0.56, profE: 0.72, crownK: 0.34, inner: 0.30,
   }),
   firYoung: (r, K) => fir(r, K, {
-    tall: 0.72, wide: 0.68, tiers: 6, seg: 10,
-    dropK: 0.62, stepK: 0.74, taper: 0.88, bareK: 0.05,
+    tall: 0.74, wide: 0.70, tiers: 6, seg: 12,
+    dropK: 0.42, stepK: 0.56, profE: 0.52, bareK: 0.05, inner: 0.36,
   }),
   // The bottom of the size ladder. The reference is full of knee-to-waist-high
   // conifers filling the gaps between the hero trees; without them the meadow
   // reads as mown. Cheapest member: 4 tiers at seg 8 is 64 triangles of skirt.
   firSapling: (r, K) => fir(r, K, {
-    tall: 0.78, wide: 0.34, tiers: 4, seg: 8,
-    dropK: 0.60, stepK: 0.80, taper: 0.87, bareK: 0.05,
+    tall: 0.80, wide: 0.36, tiers: 4, seg: 8,
+    dropK: 0.44, stepK: 0.58, profE: 0.56, bareK: 0.05, inner: 0.32,
   }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
   firSnowOld: (r, K) => fir(r, K, {
-    snow: true, tall: 1.2, wide: 1.2, tiers: 7, seg: 12, dropK: 0.76, taper: 0.92,
+    snow: true, tall: 0.92, wide: 1.24, tiers: 8, seg: 12, dropK: 0.46, stepK: 0.46, profE: 0.46,
   }),
   scotsPine, broadleaf, birch, maple, snag, stump,
   saguaro, barrelCactus, ocotillo, scrub, windPine,
@@ -878,6 +918,9 @@ const MAKERS = {
  * one species 400 px tall on a flat lawn under the game's own light rig.
  */
 export { MAKERS };
+
+/** Tooling hook: build a conifer from an explicit parameter set. */
+export const FIR_TEST = (rng, K, o) => fir(rng, K, o);
 
 // ---------------------------------------------------------------------------
 // BIOME MIXES
@@ -1464,10 +1507,66 @@ export class PropScatter {
       shade(b2, j + dir * 0.125, -0.045),
     ]).sort((p, q) => lum(p) - lum(q));
 
+    /**
+     * THE TWO ENDS OF A CONIFER'S VALUE RANGE, MEASURED INSIDE ONE TREE.
+     *
+     * `leafRamp` is a four-rung ladder for the BODY of successive tiers, and its
+     * rungs are deliberately close together (1.28 to 1.80 of the palette green,
+     * a factor of 1.4) because a wood should hold three or four greens at one
+     * exposure, not four exposures. Using its two ends as the lit/shadow anchors
+     * of a single tier was the mistake: masking the foliage pixels of ONE tree
+     * and taking percentiles gives
+     *
+     *                       p10    p50    p90    brightest decile
+     *     target_01          34     73    133    rgb(138,167,38)
+     *     ours (r11)         56     85     95    rgb( 78,107,47)
+     *
+     * — a range of 3.9x inside one reference fir against 1.7x inside one of ours.
+     * That single number is the client's "reads as a cut-out": a solid with light
+     * on it spans four stops, a cut-out spans one. So the tier ramp gets its own
+     * anchors, far outside the body ladder.
+     *
+     * The lit end is a WARM YELLOW-GREEN, not a brighter version of the body.
+     * Measured on the hero frame, the brightest decile of our foliage ran
+     * rgb(102,131,24) — red at 78% of green — against the reference's
+     * rgb(150,165,26), red at 91%. In linear terms that is red at 0.80 of green
+     * rather than 0.58, which is past anything `tier()`'s `warm` can reach (it
+     * tops out at 0.62), so it is set directly. Blue goes to almost nothing: the
+     * reference's lit needles are 0.014 blue-to-green and the hemisphere ambient
+     * will put plenty of blue back.
+     */
+    const leafSun = (() => {
+      const c = levelled(fol[(vi + 1) % n]).clone();
+      if (!alp) return shade(c, 0.16, -0.06);
+      c.multiplyScalar(2.75 * (1 + j * 1.6));
+      c.r = c.g * 0.80;
+      c.b = c.g * 0.16;
+      return c;
+    })();
+    /**
+     * ...and the shadow end. This is the note that goes in the notch walls —
+     * the near-vertical facets between two flaps — and it must be a CLEAR step,
+     * not a shading nuance. Careful, though: round 6 put 6.1% of the frame in
+     * the bottom luma bucket against the reference's 0.9% and the wood read as
+     * soot. The reference's own darkest decile INSIDE a tree is rgb(9,36,21),
+     * i.e. luma 0.12 — dark, and nowhere near black. 0.50 of the palette green
+     * with red and blue held at a third of it lands there.
+     */
+    const leafShade = (() => {
+      const c = levelled(fol[vi % n]).clone();
+      if (!alp) return shade(c, -0.05, 0.04);
+      c.multiplyScalar(0.50);
+      c.r = c.g * 0.44;
+      c.b = c.g * 0.36;
+      return c;
+    })();
+
     return {
       ...D,
       leaf,
       leafRamp,
+      leafSun,
+      leafShade,
       leafPale: leaf.map((c) => shade(c, 0.10, -0.05)),
       /**
        * CONIFER BARK, and why it is not `bark`.

@@ -534,7 +534,16 @@ export function firFrond(r, hUp, drop, seg, o = {}, rng) {
   const f = rng ? (a, b) => rng.float(a, b) : (a, b) => (a + b) / 2;
   const half = Math.max(3, Math.round(seg / 2));
   const S = half * 2;
-  const inner = o.inner ?? 0.62;   // shoulder ring, as a fraction of r
+  /**
+   * THE SHOULDER RING, SWEPT. At 0.55-0.70 the crown fan is a large near-flat
+   * plateau, and once the tiers are evenly spaced the row above stops covering
+   * it — so the tree renders as a stack of pale polygons with a fringe of thorns
+   * round it, which is exactly the "flat colour per facet, reads as a cut-out"
+   * note. At 0.28-0.42 the flaps reach nearly to the trunk, the crown fan
+   * shrinks to a few small triangles at the axis, and what you see is rows of
+   * pads with dark creases between them — the reference's structure.
+   */
+  const inner = o.inner ?? 0.34;   // shoulder ring, as a fraction of r
   /**
    * THE NOTCH RADIUS IS NOT A FREE PARAMETER — it is solved.
    *
@@ -557,13 +566,18 @@ export function firFrond(r, hUp, drop, seg, o = {}, rng) {
     const rr = r * inner * f(0.90, 1.10);
     I.push([Math.cos(a) * rr, r * f(-0.045, 0.045), Math.sin(a) * rr]);
   }
+  const da = (Math.PI * 2) / S;
   for (let i = 0; i < S; i++) {
-    const a = (i / S) * Math.PI * 2 + spin;
     const long = i % 2 === 0;
-    // Long tips get most of the jitter: an uneven hem is most of what stops a
-    // stand of instanced firs from reading as one repeated object.
-    const rr = long ? r * f(0.88, 1.10) : r * notch * f(0.86, 1.14);
-    const y = long ? -drop * f(0.80, 1.28) : -drop * f(0.22, 0.50);
+    // ANGULAR jitter as well as radial. Without it the hem is a mathematically
+    // regular star, and 15 000 instances of one regular star is exactly the "all
+    // one shape" note — the yaw per instance hides nothing, because a regular
+    // star looks the same from every yaw. Nudging each tip up to a third of a
+    // segment round makes the flaps different WIDTHS, which is what an uneven
+    // fringe actually is.
+    const a = (i / S) * Math.PI * 2 + spin + da * f(-0.30, 0.30);
+    const rr = long ? r * f(0.86, 1.10) : r * notch * f(0.88, 1.12);
+    const y = long ? -drop * f(0.78, 1.30) : -drop * f(0.20, 0.52);
     O.push([Math.cos(a) * rr, y, Math.sin(a) * rr]);
   }
   const v = [];
