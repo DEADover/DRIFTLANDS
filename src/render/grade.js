@@ -165,7 +165,33 @@ export const GRADES = {
     // is 9/255 short, and that one number is the difference between a legible
     // dark GREEN tree (the reference) and a teal silhouette (ours). Green is
     // bounce, not sky, so it also gets no toe; see liftToe below.
-    lift: [0.022, 0.052, 0.105],
+    // ROUND 7: THE LIFT WAS THE TEAL, AND IT WAS ALSO THE SATURATION DEFICIT.
+    //
+    // MEASURED (tools/depth_rp.mjs — isolates the conifer-canopy population,
+    // the one thing that appears at every depth in both frames, instead of
+    // averaging the whole picture):
+    //
+    //                      ours            target
+    //   canopy rgb     [27,57,34]      [28,52,23]
+    //
+    // Red lands. Blue is 11/255 over and green 5/255 over, and 11 of blue on a
+    // green of 57 is precisely the difference between the reference's warm dark
+    // green and our teal. Where it comes from is arithmetic: at canopy luma 0.19
+    // the (1-luma)^2 ramp is 0.656, so the old lift delivered +17.6/255 of blue
+    // and +3.7/255 of red to every pixel in a tree.
+    //
+    // And it was the frame's saturation too. Saturation is (max-min)/max and on
+    // a green the min channel is blue, so a blue lift is a DESATURATION knob
+    // wearing a different name. SWEPT (tools/sweep_rp.mjs, five settings in one
+    // page load): blue 0.105 -> 0.075 -> 0.050 moves frame saturation
+    // 0.733 -> 0.754 -> 0.775 against the reference's 0.756, and canopy blue
+    // 34 -> 28 -> 22 against its 23. Two independent measurements agreeing on
+    // the same knob is as close to proof as this gets.
+    //
+    // 0.060 / 0.040 is where both land: frame saturation 0.759, dark% 32.5 on
+    // the nose, canopy [29,56,25]. The green comes down with it because the
+    // same sweep showed canopy green 58 against the reference's 52.
+    lift: [0.022, 0.040, 0.060],
     // The lift now falls off as (1-col)^3, so this amplitude reaches a dark
     // tree face nearly in full and sunlit grass barely at all. It is what puts
     // the sky back into our shadows: measured shadowed grass went from
@@ -487,6 +513,22 @@ export const GRADES = {
     // and the whole tint is lifted because the bucket it governs was 7x too
     // populated.
     aoTint: [0.52, 0.555, 0.575],
+    // GROUND-ONLY FACET SMOOTHING. See the essay in post.js. MEASURED: our
+    // adjacent meadow facets differ by ~30/255 while the entire shadow map is
+    // worth a p99 of 15/255 — the seam between two triangles of grass is the
+    // strongest line in the frame. This softens that seam over ~7 output pixels
+    // and touches nothing whose depth-derived normal is not near-horizontal.
+    surface: 0.75,
+    surfacePx: 10.0,
+    // How steep a surface still counts as ground, as cos(slope). Started at
+    // 0.80 (36 degrees) which is fine for a meadow and left every HILLSIDE
+    // faceted — plainly visible in lake_bridge, whose left slope is the whole
+    // left half of the frame. 0.55 is 57 degrees, which covers any terrain a
+    // car could be near. Trees and boulders survive it because they are small:
+    // the ring straddles their edges, and the cover^2 term in post.js falls off
+    // hard. Checked by eye at 0.80 / 0.66 / 0.55 in both shots — the conifer
+    // tiers are pixel-identical.
+    groundSlope: 0.55,
     bloom: 0.10,
     bloomWide: 0.06,
     bloomThreshold: 0.88,
@@ -531,7 +573,16 @@ export const GRADES = {
     dappleWarm: 0.10,
     // Eased off: this is a 1.6 m brush texture and the scatter it was standing
     // in for (flowers, tussocks) is coming back into the meadow this round.
-    dappleFine: 0.15,
+    // ROUND 7, MEASURED (tools/facet_rp.mjs — mean luma step between two green
+    // ground pixels 6 px apart, the statistic "the ground reads as flat facets"
+    // is really about): the reference scores 20.74 and we score 7.70. Our meadow
+    // is under-detailed by a factor of nearly three, and almost all of that gap
+    // is CONTENT — the reference's local contrast is bushes, tufts, flowers and
+    // their own small shadows. This octave can only add luminance variation, and
+    // swept at the frequencies it now runs at (see post.js) 0.15/0.26/0.36 buys
+    // 7.61/7.89/8.24. 0.26 is as far as it goes before it reads as noise instead
+    // of as grass; the rest of that gap belongs to the scatter, not to post.
+    dappleFine: 0.26,
     grain: 0.006,
     dappleMetres: 24,
   },

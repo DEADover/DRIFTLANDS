@@ -84,6 +84,8 @@ const AO_FRAG = /* glsl */ `
   ${DEPTH_UTIL}
   uniform vec2 uTexel;        // 1 / ao-buffer size
   uniform vec2 uAspect;       // (1/aspect, 1) so a world radius maps isotropically
+  uniform vec3 uUpV;          // world +Y in VIEW space — see the groundness note
+  uniform float uGroundLo;    // cos of the steepest slope still counted as ground
   uniform float uR1;          // tight contact radius (metres)
   uniform float uR2;          // wide cavity radius (metres)
   uniform float uIntensity;
@@ -134,6 +136,7 @@ const AO_FRAG = /* glsl */ `
   void main() {
     float d = rawDepth(vUv);
     if (d >= 0.9999) { gl_FragColor = vec4(1.0, 1.0, 0.0, 1.0); return; }
+    // (groundness — the blue channel — is written at the end of this shader)
 
     vec3 P = viewPos(vUv, d);
 
@@ -177,7 +180,16 @@ const AO_FRAG = /* glsl */ `
     // Fade AO out with distance: it is a foreground grounding cue, not haze.
     ao = mix(ao, 1.0, smoothstep(uFade * 0.55, uFade, dist));
 
-    gl_FragColor = vec4(ao, dist / uFar, 0.0, 1.0);
+    // GROUNDNESS. 1 where the depth buffer says this pixel is a near-horizontal
+    // surface — meadow, road, lake — and 0 on a tree, a rock face or the car.
+    // The composite uses it to smooth the ground's facet seams and NOTHING
+    // else's: a conifer's tiers and a boulder's planes are the art direction,
+    // a 15 m triangle of grass is an artefact. Written here because the AO pass
+    // has already paid for the depth-derived normal, and it rides through the
+    // same bilateral blur, so it is edge-aware for free.
+    float ground = smoothstep(uGroundLo, uGroundLo + 0.17, dot(N, uUpV));
+
+    gl_FragColor = vec4(ao, dist / uFar, ground, 1.0);
   }
 `;
 
@@ -189,21 +201,22 @@ const AO_BLUR_FRAG = /* glsl */ `
   uniform vec2 uDir;      // texel-space blur direction
 
   void main() {
-    vec2 c = texture2D(tAO, vUv).rg;
+    vec3 c = texture2D(tAO, vUv).rgb;
     float centreDepth = c.g;
-    float sum = c.r, wsum = 1.0;
+    float sum = c.r, gsum = c.b, wsum = 1.0;
     for (int i = 1; i <= 4; i++) {
       float fi = float(i);
       float w = exp(-0.5 * (fi * fi) / 5.0);
       vec2 o = uDir * fi;
-      vec2 a = texture2D(tAO, vUv + o).rg;
-      vec2 b = texture2D(tAO, vUv - o).rg;
+      vec3 a = texture2D(tAO, vUv + o).rgb;
+      vec3 b = texture2D(tAO, vUv - o).rgb;
       float wa = w * exp(-abs(a.g - centreDepth) * 140.0);
       float wb = w * exp(-abs(b.g - centreDepth) * 140.0);
       sum += a.r * wa + b.r * wb;
+      gsum += a.b * wa + b.b * wb;
       wsum += wa + wb;
     }
-    gl_FragColor = vec4(sum / wsum, centreDepth, 0.0, 1.0);
+    gl_FragColor = vec4(sum / wsum, centreDepth, gsum / wsum, 1.0);
   }
 `;
 
@@ -378,6 +391,8 @@ const COMPOSITE_FRAG = /* glsl */ `
 
   uniform float uAOStrength;
   uniform vec3  uAOTint;
+  uniform float uSurface;      // ground-only facet-seam smoothing, 0..1
+  uniform float uSurfacePx;    // its radius in OUTPUT pixels
   uniform float uBloom;
   uniform float uBloomWide;
   uniform float uDofNear;
@@ -421,6 +436,76 @@ const COMPOSITE_FRAG = /* glsl */ `
     float d = rawDepth(vUv);
     float dist = -viewZ(d);
 
+    // ---- SURFACE SMOOTHING: the ground, and only the ground.
+    //
+    // MEASURED (tools/shadowmask_rp.mjs + tools/facet_rp.mjs, alpine hero):
+    // switching the shadow map off changes the frame by a mean of 0.93/255 and
+    // a p99 of 15/255, while two adjacent meadow facets differ by ~30/255. The
+    // strongest line in our picture is the seam between two triangles of grass,
+    // and it is twice the contrast of the shadow it is competing with. That is
+    // the "flat facets vs continuous surface" note, in numbers.
+    //
+    // Half of that step is LIGHTING (fixed at the source — see GROUND_TEMPER in
+    // renderer.js) and half is the terrain's per-face VERTEX COLOUR, which no
+    // lighting change can touch. This can: a small depth-weighted average,
+    // applied only where the depth buffer says the surface is near-horizontal
+    // and only where the whole neighbourhood belongs to that same surface.
+    //
+    // It is NOT a blur of the picture, and the two gates are what make the
+    // difference. GROUNDNESS (written by the AO pass) is 0 on every conifer,
+    // boulder, post and car, so their facets — which ARE the art direction —
+    // are untouched. COVER falls off wherever the ring straddles a depth
+    // discontinuity, so a silhouette stays razor sharp and nothing bleeds
+    // across it: a tree's edge against the meadow is as hard as it ever was.
+    // What is left is exactly the population that has no depth step at all,
+    // which is the facet seam.
+    if (uSurface > 0.001 && d < 0.9999) {
+      float g = texture2D(tAO, vUv).b;
+      if (g > 0.01) {
+        // THE TAP TEST IS A PLANE TEST, NOT A DEPTH TEST, AND THAT IS THE WHOLE
+        // DIFFERENCE. A depth threshold cannot separate "the next facet of the
+        // same hillside" from "the top of a boulder": at 7 px on a 52-degree
+        // camera both are within a metre. Measured on the first attempt, a
+        // relative depth window at 0.010..0.030 of distance left a bright halo
+        // round every rock and turned the bushes to mush. Distance off the
+        // CENTRE PIXEL'S TANGENT PLANE separates them exactly — a coplanar
+        // neighbour is 0 m off it however far away or however steep the slope,
+        // and anything standing on the ground is its own height off it.
+        vec3 P = viewPos(vUv, d);
+        vec2 e = uOutTexel;
+        vec3 pR = viewPos(vUv + vec2(e.x, 0.0), rawDepth(vUv + vec2(e.x, 0.0)));
+        vec3 pL = viewPos(vUv - vec2(e.x, 0.0), rawDepth(vUv - vec2(e.x, 0.0)));
+        vec3 pU = viewPos(vUv + vec2(0.0, e.y), rawDepth(vUv + vec2(0.0, e.y)));
+        vec3 pD = viewPos(vUv - vec2(0.0, e.y), rawDepth(vUv - vec2(0.0, e.y)));
+        vec3 sx = abs(pR.z - P.z) < abs(P.z - pL.z) ? pR - P : P - pL;
+        vec3 sy = abs(pU.z - P.z) < abs(P.z - pD.z) ? pU - P : P - pD;
+        vec3 Ns = normalize(cross(sx, sy));
+        if (Ns.z < 0.0) Ns = -Ns;
+
+        vec3 acc = col;
+        float wsum = 1.0;
+        // Two rings on a 5-turn spiral: 12 taps, no visible sampling pattern.
+        for (int i = 0; i < 12; i++) {
+          float a = (float(i) + 0.5) / 12.0;
+          float ang = a * 31.4159265;
+          float rr = i < 6 ? 0.55 : 1.0;
+          vec2 o = vec2(cos(ang), sin(ang)) * (uSurfacePx * rr) * uOutTexel;
+          float dt = rawDepth(vUv + o);
+          float h = abs(dot(Ns, viewPos(vUv + o, dt) - P));
+          // ...and the TAP has to be ground too. The plane test alone still let
+          // the salmon out of a boulder's base into the grass beside it, because
+          // where a rock meets the ground it IS in the ground's plane. Its flank
+          // is not near-horizontal, so groundness rejects it and the halo goes.
+          float w = dt >= 0.9999 ? 0.0
+                  : (1.0 - smoothstep(0.20, 0.65, h)) * texture2D(tAO, vUv + o).b;
+          acc += texture2D(tScene, vUv + o).rgb * w;
+          wsum += w;
+        }
+        float cover = (wsum - 1.0) / 12.0;
+        col = mix(col, acc / wsum, uSurface * g * cover * cover);
+      }
+    }
+
     // ---- depth of field: soften only the far distance (miniature cue)
     if (uDofAmount > 0.001 && d < 0.9999) {
       float f = smoothstep(uDofNear, uDofFar, dist) * uDofAmount;
@@ -451,9 +536,25 @@ const COMPOSITE_FRAG = /* glsl */ `
       // one flat value from edge to edge. This octave is ~1.6 m — about 30 px at
       // the focus — so it breaks the facet into something with tooth, the way the
       // reference's grass does, without softening a single silhouette.
+      // FREQUENCY MATTERS MORE THAN AMPLITUDE HERE, AND THE BAND IS NARROW.
+      //
+      // At 15x/37x of the lobe scale these octaves are 1.6 m and 0.65 m — three
+      // to eight OUTPUT PIXELS at the focus — and once the ground stopped being
+      // cut up by facet seams that read as digital speckle on top of the grass
+      // rather than as grass. At 6x/15x (4.0 m / 1.6 m) it stopped reading as
+      // anything at all: MEASURED with tools/facet_rp.mjs, quadrupling the
+      // amplitude at those frequencies moved the meadow's mean 6-px luma step
+      // from 7.70 to 8.60 against the reference's 20.74, i.e. it is invisible
+      // to the one statistic it exists to serve.
+      //
+      // 9x/22x is 2.7 m and 1.1 m — 13 and 5 output pixels — which is the band
+      // the statistic actually looks at and still coarse enough to read as
+      // mottled grass. It does NOT close the gap to the reference and is not
+      // meant to: the reference's local contrast is bushes, tufts, flowers and
+      // their own little shadows, and no amount of luminance noise is those.
       if (uDappleFine > 0.0001) {
-        float f = vnoise(wp.xz * (uDappleScale * 15.0)) - 0.5;
-        f += (vnoise(wp.xz * (uDappleScale * 37.0) + 4.4) - 0.5) * 0.55;
+        float f = vnoise(wp.xz * (uDappleScale * 9.0)) - 0.5;
+        f += (vnoise(wp.xz * (uDappleScale * 22.0) + 4.4) - 0.5) * 0.55;
         col *= 1.0 + f * uDappleFine;
       }
     }
@@ -705,7 +806,8 @@ const COMPOSITE_FRAG = /* glsl */ `
     if (uDebug > 0.5) {
       if (uDebug < 1.5) col = vec3(ao);
       else if (uDebug < 2.5) col = vec3(fract(dist * 0.02));
-      else col = texture2D(tBloom, vUv).rgb * 4.0;
+      else if (uDebug < 3.5) col = texture2D(tBloom, vUv).rgb * 4.0;
+      else col = vec3(texture2D(tAO, vUv).b);
     }
 
     // ---- dither (kills banding in the sky ramp)
@@ -749,7 +851,7 @@ class Pass {
 const DEBUG = (() => {
   try {
     const v = new URLSearchParams(location.search).get('debugpost');
-    return { ao: 1, depth: 2, bloom: 3 }[v] ?? 0;
+    return { ao: 1, depth: 2, bloom: 3, ground: 4 }[v] ?? 0;
   } catch { return 0; }
 })();
 
@@ -822,6 +924,8 @@ export function createPostFX(ctx) {
     // Tight radius = the contact pool at the base of a tree/rock/post, which is
     // what actually grounds an object in the references. Wide radius only
     // deepens real cavities. Both in METRES.
+    uUpV: { value: new THREE.Vector3(0, 1, 0) },
+    uGroundLo: { value: 0.80 },
     uR1: { value: 2.2 },
     uR2: { value: 8.0 },
     uIntensity: { value: 2.4 },
@@ -889,6 +993,8 @@ export function createPostFX(ctx) {
     uSplitHi: { value: 0.95 },
     uAOStrength: { value: 0.6 },
     uAOTint: { value: new THREE.Vector3(0.55, 0.60, 0.70) },
+    uSurface: { value: 0.0 },
+    uSurfacePx: { value: 7.0 },
     uBloom: { value: 0.35 },
     uBloomWide: { value: 0.25 },
     uDofNear: { value: 260 },
@@ -974,6 +1080,9 @@ export function createPostFX(ctx) {
       u.uSplitHi.value = g.splitRange?.[1] ?? 0.95;
       u.uAOStrength.value = g.ao;
       u.uAOTint.value.fromArray(g.aoTint);
+      u.uSurface.value = g.surface ?? 0;
+      u.uSurfacePx.value = g.surfacePx ?? 7.0;
+      aoPass.u.uGroundLo.value = g.groundSlope ?? 0.80;
       u.uBloom.value = g.bloom;
       u.uBloomWide.value = g.bloomWide;
       u.uDofAmount.value = g.dof;
@@ -1024,6 +1133,8 @@ export function createPostFX(ctx) {
 
       // -------------------------------------------------------------- 2. AO
       aoPass.u.uAspect.value.set(1 / cam.aspect, 1);
+      // World up, in view space: what "this pixel is ground" is measured against.
+      aoPass.u.uUpV.value.set(0, 1, 0).transformDirection(cam.matrixWorldInverse);
       aoPass.render(rtAO);
       aoBlur.u.tAO.value = rtAO.texture;
       aoBlur.u.uDir.value.set(1 / this._half[0], 0);

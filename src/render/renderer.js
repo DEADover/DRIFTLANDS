@@ -19,6 +19,154 @@ import * as THREE from 'three';
  * texels so the shadow edges do not crawl while the camera moves.
  */
 
+/**
+ * GROUND TEMPERING — why the meadow reads as facets and the reference does not.
+ *
+ * MEASURED (tools/shadowmask_rp.mjs, alpine hero): switching the shadow map off
+ * entirely changes 5.9% of the frame, by a mean of 0.93/255 and a p99 of 15/255.
+ * MEASURED off the same frame, two adjacent meadow facets differ by ~30/255. So
+ * the strongest line in our picture is not a shadow, a silhouette or a contact —
+ * it is the seam between two triangles of grass, and it is twice the contrast of
+ * the thing it is competing with. That is the whole "flat facets vs continuous
+ * surface" note in one number.
+ *
+ * The mesh is not ours to change and the reference is low-poly too, so the fix
+ * is not more triangles: it is that a heightfield's SHADING normal does not have
+ * to be its geometric one. Pulling a near-horizontal facet's normal toward world
+ * up compresses the lighting difference between neighbours — a low-pass filter
+ * on the normal field, which is exactly what a smooth-shaded mesh would give —
+ * while a facet steep enough to be a bank, a cliff or a rock face keeps its own
+ * normal and its own hard edge. Large-scale terrain form survives because the
+ * blend is partial; what dies is the seam.
+ *
+ * It is deliberately opt-in per material (`GROUND_TEMPER`), applied in
+ * `_ensureShadowCasters` to the terrain and the road only. Trees, rocks,
+ * buildings and props must keep every facet they have: their faceting is the
+ * art direction, the meadow's is an artefact of a 15 m triangle.
+ */
+const TEMPER_STRENGTH = 0.72;
+/** cos of the steepest facet that gets tempered at all (0.50 = 60 deg slope). */
+const TEMPER_LO = 0.50;
+/** Which meshes are "ground". Everything else keeps every facet it has. */
+const TEMPER = /^(terrain|ground|road-(main|spur))/;
+
+if (!THREE.ShaderChunk.normal_fragment_begin.includes('GROUND_TEMPER')) {
+  THREE.ShaderChunk.normal_fragment_begin = THREE.ShaderChunk.normal_fragment_begin.replace(
+    '// non perturbed normal for clearcoat among others',
+    /* glsl */ `
+#ifdef GROUND_TEMPER
+	{
+		vec3 upV = normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz );
+		float upness = dot( normal, upV );
+		float w = GROUND_TEMPER * smoothstep( GROUND_TEMPER_LO, 1.0, upness );
+		normal = normalize( mix( normal, upV, w ) );
+	}
+#endif
+
+// non perturbed normal for clearcoat among others`
+  );
+}
+
+/**
+ * PENUMBRA — three ships FIVE taps at ONE radius, and neither is a soft shadow.
+ *
+ * TWO separate defects, and fixing one without the other makes the picture
+ * worse — measured, both ways round.
+ *
+ * 1. TAP COUNT. three r185's PCF branch takes 5 Vogel-disk samples rotated per
+ *    pixel by interleaved gradient noise. That is right at the default radius of
+ *    one texel, where the disc is a pixel wide. We ask for a penumbra of a metre
+ *    and more — 22 texels at our fitted frustum — and five samples across a
+ *    44-texel disc do not integrate it, they SAMPLE it: the edge comes back as a
+ *    chunky per-pixel stipple that reads as a hard edge with dirt on it. Which
+ *    is the client's note verbatim: "a single flat dark tone with hard edges".
+ *
+ * 2. ONE RADIUS FOR EVERY CASTER. Tried first, and it is worth writing down
+ *    because it looked obviously right: 16 taps at a fixed 1.45 m penumbra.
+ *    MEASURED (tools/shadowmask_rp.mjs), the frame went from 5.90% of pixels
+ *    carrying a cast shadow to 4.00%, and the strongest shadow in it from 52/255
+ *    to 38/255 — the shadows got SOFTER AND WEAKER AND FEWER. Of course they
+ *    did: a fence post is 1.5 m tall and throws a 1.0 m shadow, so a 1.45 m
+ *    penumbra is wider than the shadow and dissolves it completely. The
+ *    reference has both — tight dark post shadows AND soft wide tree shadows —
+ *    because a real penumbra is set by the caster's distance, not by a constant.
+ *
+ * So: a blocker probe. A hardware comparison sampler cannot return a blocker
+ * depth, which is why PCSS is usually called impossible here — but it CAN be
+ * asked a yes/no question about a depth we choose. Probing the same disc twice,
+ * once at the receiver's own depth and once a slab further toward the light,
+ * gives "what fraction of my blockers are more than SLAB metres above me", and
+ * that is exactly the quantity the penumbra width is proportional to. 6 + 6
+ * probe taps, then 16 taps at the radius they choose.
+ *
+ * PERF, measured against the bench baseline running in its own worktree on its
+ * own port (tools/perf_rp.mjs, alpine hero, 1600x900, ssaa 1.5): the whole
+ * shadow system costs 1.58 ms before and 2.41 ms after. No geometry, draw call
+ * or supersample change — 175 calls and 10,078,475 triangles either way.
+ *
+ * The slab is expressed in normalised depth, so it depends on the shadow
+ * camera's depth range — which is why that range is PINNED (see SHADOW_RANGE)
+ * instead of being derived from the fitted box like it used to be.
+ */
+const SHADOW_TAPS = 16;
+const SHADOW_PROBE = 6;
+/** Depth range of the shadow camera, metres. Pinned so SLAB below means metres. */
+const SHADOW_RANGE = 720;
+/** A caster this far above a receiver already throws a fully soft edge. */
+const SHADOW_SLAB = 3.0;
+/** Narrowest penumbra, as a fraction of the widest — the contact-hard end. */
+const SHADOW_TIGHT = 0.16;
+// Guarded on a marker, not just on finding the original: a module re-execution
+// (vite HMR) would otherwise fail the search and log a false alarm.
+if (!THREE.ShaderChunk.shadowmap_pars_fragment.includes('rWide')) {
+  const CH = THREE.ShaderChunk.shadowmap_pars_fragment;
+  const a = CH.indexOf('shadow = (\n\t\t\t\t\ttexture( shadowMap, vec3( shadowCoord.xy + vogelDiskSample( 0, 5, phi )');
+  const end = ') * 0.2;';
+  const b = a >= 0 ? CH.indexOf(end, a) : -1;
+  if (b > a) {
+    const slab = (SHADOW_SLAB / SHADOW_RANGE).toFixed(7);
+    const body = `float rWide = shadowRadius * texelSize.x;
+
+				// How much of what blocks me is high above me, and how much is
+				// sitting on me? Two probes of the same disc at two depths.
+				//
+				// THE PROBE IS NOT ROTATED PER PIXEL, AND THAT IS DELIBERATE.
+				// Rotating it by phi like the PCF loop does was the first version
+				// and it printed a heavy speckle across every soft shadow in the
+				// meadow — isolated with tools/tweak_rp.mjs (switch the shadow map
+				// off and the speckle goes; switch the AO and the fine dapple off
+				// and it stays). The reason is that this probe does not average
+				// into the result, it SELECTS A RADIUS: six noisy taps give a
+				// noisy 'high', a noisy radius, and neighbouring pixels resolving
+				// to tight-and-black or wide-and-grey at random. What it is
+				// estimating — how tall the thing casting this shadow is — varies
+				// slowly across the ground, so it wants a fixed pattern whose
+				// error is spatially coherent, not a per-pixel one.
+				float lit = 0.0, litHigh = 0.0;
+				for ( int i = 0; i < ${SHADOW_PROBE}; i ++ ) {
+					vec2 o = vogelDiskSample( i, ${SHADOW_PROBE}, 0.0 ) * rWide;
+					lit += texture( shadowMap, vec3( shadowCoord.xy + o, shadowCoord.z ) );
+					litHigh += texture( shadowMap, vec3( shadowCoord.xy + o, shadowCoord.z - ${slab} ) );
+				}
+				float occAll = 1.0 - lit * ${(1 / SHADOW_PROBE).toFixed(6)};
+				float occHigh = 1.0 - litHigh * ${(1 / SHADOW_PROBE).toFixed(6)};
+				float high = occAll > 0.002 ? clamp( occHigh / occAll, 0.0, 1.0 ) : 0.0;
+				// three already declared 'radius' above us; assign, do not shadow it.
+				radius = mix( rWide * ${SHADOW_TIGHT.toFixed(3)}, rWide, high );
+
+				shadow = 0.0;
+				for ( int i = 0; i < ${SHADOW_TAPS}; i ++ ) {
+					shadow += texture( shadowMap, vec3( shadowCoord.xy + vogelDiskSample( i, ${SHADOW_TAPS}, phi ) * radius, shadowCoord.z ) );
+				}
+				shadow *= ${(1 / SHADOW_TAPS).toFixed(6)};`;
+    THREE.ShaderChunk.shadowmap_pars_fragment = CH.slice(0, a) + body + CH.slice(b + end.length);
+  } else if (typeof console !== 'undefined') {
+    // Loud, because the shadows silently going chunky is exactly the kind of
+    // regression that survives a round.
+    console.warn('[renderer] shadow PCF patch did not apply — three internals moved');
+  }
+}
+
 export function createRenderer(container, { pixelRatio } = {}) {
   const renderer = new THREE.WebGLRenderer({
     // No MSAA on the default framebuffer: everything is drawn into an
@@ -78,8 +226,18 @@ export function sunElevationFor(p) {
   return THREE.MathUtils.clamp(p?.sunElevation ?? 0.7, SHADOW_ELEVATION[0], SHADOW_ELEVATION[1]);
 }
 
-/** World-space width of the shadow penumbra, in metres. */
-const PENUMBRA = 0.85;
+/**
+ * World-space width of the shadow penumbra, in metres.
+ *
+ * MEASURED off ref/target_01 (tools/crop_rp.mjs at 5x on the fence line at
+ * (950,30)): the reference's post shadows fade over roughly 2 px of the 1600-wide
+ * frame, i.e. ~0.4 m of ground, and its TREE shadows fade over four or five
+ * times that — the classic penumbra-grows-with-caster-height. We cannot vary it
+ * per caster (see SHADOW_TAPS above), so this is a single number chosen to sit
+ * between the two, now that there are enough taps for it to be smooth rather
+ * than stippled.
+ */
+const PENUMBRA = 0.95;
 
 /**
  * Shadow budget (see _ensureShadowCasters). Instanced scatter with at least
@@ -170,6 +328,7 @@ function shadowFloor(p) {
 }
 
 const _c = new THREE.Color();
+const _bounce = new THREE.Color();
 /**
  * Palettes supply HUE; the rig supplies VALUE. Each light colour is pulled
  * toward white by `desat` and then normalised to unit luminance, so a light's
@@ -265,7 +424,27 @@ export class LightRig {
     this.hemi.groundColor.copy(tint(p.ambientGround, desat + 0.06)).multiplyScalar(0.85);
     this.hemi.intensity = PI * ambTerm;
 
-    this.fill.color.copy(tint(p.ambientSky, Math.max(0, desat - 0.06)));
+    // THE FILL IS BOUNCE, AND BOUNCE IS NOT SKY-COLOURED.
+    //
+    // This light was given the sky's hue, which means every term that reaches a
+    // shadow in this rig was cool: hemisphere sky above, cool fill from the
+    // side, a cool AO tint and a cool shadowTint in the grade. Four cool
+    // multiplies is how a green shadow becomes teal, and it is why the round-6
+    // notes below spend three paragraphs putting red back by hand.
+    //
+    // Physically the two ambient terms are different lights. What arrives from
+    // ABOVE a shadowed patch of meadow is sky, and it is blue. What arrives
+    // from the SIDE is sunlight that has already hit the lit ground next to it
+    // — one bounce off a yellow-green meadow under a warm sun — and it is warm.
+    // The reference has exactly that split: its shade is blue where it opens to
+    // the sky and warm where it sits beside lit ground.
+    //
+    // So the fill takes the palette's GROUND bounce colour, pushed a little
+    // toward the sun's own warmth. `tint` normalises luminance, so this changes
+    // hue only: the level, and every measured statistic that depends on it, is
+    // untouched.
+    _c.setHex(p.ambientGround).lerp(_bounce.setHex(p.sunColor), 0.35);
+    this.fill.color.copy(tint(_c.getHex(), 0.30));
     // Directional, so only ~half the surfaces see it — hence a multiplier above
     // 1. But 1.7 was aiming it straight at the one thing the frame needed dark.
     // MEASURED (tools/measure.mjs): the reference puts 15.0% of its pixels in
@@ -312,7 +491,12 @@ export class LightRig {
     c.top = this._half;
     c.bottom = -this._half;
     c.near = 1;
-    c.far = 2.6 * this._half + 420;
+    // PINNED, not fitted. The blocker probe in the shader patch above expresses
+    // its slab in normalised depth, so "3 metres" is only 3 metres if this range
+    // is a constant. It used to be 2.6 * half + 420, which drifted 623..732 with
+    // the sun angle and would have made the penumbra breathe with it. The box is
+    // still fitted in X and Y, which is what the texel density depends on.
+    c.far = 1 + SHADOW_RANGE;
     c.updateProjectionMatrix();
 
     // Penumbra in METRES, not texels: three scales the Vogel disk by
@@ -365,6 +549,17 @@ export class LightRig {
       const m = o.material;
       if (!m || m.transparent || m.depthWrite === false) return; // water, skids, fx
       o.receiveShadow = true;
+      // Ground tempering (see the essay at the top of this file). Matched by
+      // name because only the ground and the road want it — everything else in
+      // the frame is supposed to look faceted.
+      if (TEMPER.test(o.name) && !m.defines?.GROUND_TEMPER) {
+        m.defines = {
+          ...(m.defines ?? {}),
+          GROUND_TEMPER: TEMPER_STRENGTH.toFixed(3),
+          GROUND_TEMPER_LO: TEMPER_LO.toFixed(3),
+        };
+        m.needsUpdate = true;
+      }
       const r = o.geometry?.boundingSphere?.radius
         ?? (o.geometry?.computeBoundingSphere?.(), o.geometry?.boundingSphere?.radius ?? 0);
       // Mass scatter smaller than the contact-AO radius: not worth a shadow pass.
