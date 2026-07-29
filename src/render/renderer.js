@@ -81,6 +81,15 @@ export function sunElevationFor(p) {
 /** World-space width of the shadow penumbra, in metres. */
 const PENUMBRA = 0.85;
 
+/**
+ * Shadow budget (see _ensureShadowCasters). Instanced scatter with at least
+ * SCATTER_COUNT copies and a per-instance radius below MIN_CASTER metres is
+ * grounded by the contact AO in post.js instead of by the shadow map.
+ * MIN_CASTER is deliberately just under the AO's tight radius (2.2 m).
+ */
+const MIN_CASTER = 2.0;
+const SCATTER_COUNT = 300;
+
 /** Value of a fully-lit horizontal surface, as a fraction of its albedo. */
 const KEY = 0.97;
 
@@ -108,7 +117,15 @@ function shadowFloor(p) {
   // flat. Alpine's share is 0.229, so the old curve handed it 0.455; this one
   // hands it 0.331. Still a clean coloured step, never a hole: measured darkPct
   // (fraction of the frame below luma 18) stays at 0.16%.
-  return THREE.MathUtils.clamp(0.235 + 0.42 * share, 0.30, 0.48);
+  //
+  // ROUND 4, MEASURED (tools/patch_rp.mjs): grass in tree shadow in target_01
+  // is luma 43-74 with R/G 0.53-0.74; ours was luma 69 with R/G 0.83 — a step
+  // that is both too shallow and too warm, because a shallow step leaves the
+  // (red-heavy) direct term still visible in it. Alpine's share is 0.229, so
+  // the old curve handed it 0.331 and this one hands it 0.293. Measured frame
+  // p05 moves 49 -> 44 against the reference's 33, and darkPct (fraction below
+  // luma 18) stays under 0.5%: still a coloured step, still not a hole.
+  return THREE.MathUtils.clamp(0.20 + 0.405 * share, 0.26, 0.46);
 }
 
 const _c = new THREE.Color();
@@ -257,6 +274,23 @@ export class LightRig {
    * no shadow reads as floating no matter how good the rest of the image is.
    * Cheap rescan — the graph is a few hundred nodes and this runs twice a
    * second. Owners can opt out with `userData.noShadow = true`.
+   *
+   * IT IS ALSO THE SHADOW BUDGET.
+   *
+   * MEASURED (tools/inventory_rp.mjs + tools/perf_rp.mjs, alpine hero, 1600x900):
+   * the frame draws 3.00M triangles, of which 2.89M are ALSO drawn into the
+   * shadow map — so the shadow pass is half the triangle count of the whole
+   * frame and 22.6% of its time. Dropping the shadow map from 4096 to 2048 buys
+   * only 3.2%, which says the cost is geometry submission, not fill. The only
+   * honest saving is to submit less geometry.
+   *
+   * The scatter is where it lives: 8.3k grass tussocks, 1.7k flower clumps and
+   * 4.9k pebble slabs together are 1.1M of those triangles, and every one of
+   * them is a sub-2-metre object whose entire contribution to the image is a
+   * soft dark pool at its own base — which post.js's 2.2 m contact AO already
+   * draws, from depth, for free. So mass scatter below MIN_CASTER metres does
+   * not enter the shadow map. Trees, rocks, posts, buildings, animals and the
+   * car all clear the threshold and are untouched.
    */
   _ensureShadowCasters() {
     this.scene.traverse((o) => {
@@ -265,11 +299,16 @@ export class LightRig {
       const m = o.material;
       if (!m || m.transparent || m.depthWrite === false) return; // water, skids, fx
       o.receiveShadow = true;
+      const r = o.geometry?.boundingSphere?.radius
+        ?? (o.geometry?.computeBoundingSphere?.(), o.geometry?.boundingSphere?.radius ?? 0);
+      // Mass scatter smaller than the contact-AO radius: not worth a shadow pass.
+      if (o.isInstancedMesh && o.count >= SCATTER_COUNT && r < MIN_CASTER) {
+        if (o.castShadow) o.castShadow = false;
+        return;
+      }
       if (o.castShadow) return;
       // Ground planes receive but must not cast: a 1600m heightfield in the
       // shadow frustum destroys the depth range for everything else.
-      const r = o.geometry?.boundingSphere?.radius
-        ?? (o.geometry?.computeBoundingSphere?.(), o.geometry?.boundingSphere?.radius ?? 0);
       if (r > 160) return;
       o.castShadow = true;
     });

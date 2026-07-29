@@ -35,11 +35,22 @@ const BASE = {
   // Display-space knee. Everything above it is compressed toward, but never
   // onto, white AFTER the grade has had its way. Protects the dust plume.
   hiKnee: 0.88,
+  // Display-space knee at the BOTTOM, mirroring hiKnee. Below it, values are
+  // compressed toward — but never onto — zero, so a hard contrast cannot clip
+  // a channel flat. 0 = off (the old behaviour).
+  loKnee: 0.0,
   saturation: 1.12,
   shadowTint: [1, 1, 1],
   highTint: [1, 1, 1],
+  // Luma window the split-tone ramps across. The default is the whole range,
+  // which quietly tints the midtones too; see the essay in post.js.
+  splitRange: [0.05, 0.95],
   ao: 0.55,
   aoIntensity: 1.0,
+  // Wide cavity radius in METRES (the tight contact radius is fixed at 2.2 m).
+  // Big values buy the broad darkening between and under clumps of trees that
+  // the references have; they cost nothing, the sample count is unchanged.
+  aoWide: 8.0,
   aoTint: [0.56, 0.61, 0.70],
   bloom: 0.16,
   bloomWide: 0.11,
@@ -90,13 +101,36 @@ export const GRADES = {
   // root, a deeper shadow floor in the rig, and low-frequency broken light. The
   // saturation knob is still where round 2 left it, near 1.05.
   'Alpine Meadows': {
-    exposure: 1.0,
+    // ROUND 4, MEASURED (tools/measure_rp.mjs, 1600x900, hero_alpine vs the
+    // reference normalised to the same size):
+    //
+    //                      reference   round 3    want
+    //   frame luma p05        33          54       ~40
+    //   frame luma p50        97         102        ~97
+    //   frame luma p95       159         169       ~159
+    //   frame mean            97         108        ~98
+    //   meadow tonal spread  110          87       >100
+    //   open-meadow B/G     0.12        0.22       ~0.14
+    //
+    // Every one of those says the same thing twice: the picture is a stop too
+    // bright at the top and nowhere near dark enough at the bottom. Round 3
+    // spent its effort widening the top of the range; the range it was missing
+    // was underneath. So: pull the exposure down (the tone curve's identity
+    // region means this is a clean linear scale, not a crush), take the lift
+    // off the shadows, and stop the split-tone from tinting sunlit grass.
+    exposure: 0.93,
     shoulder: 0.82,
     white: 1.0,
-    // NO CRUSHED BLACKS. Shadow is a coloured step, so the lift is small but
-    // blue-weighted: it opens the darks and tints them toward the sky instead
-    // of letting them collapse to neutral.
-    lift: [0.028, 0.038, 0.066],
+    // NO CRUSHED BLACKS — but the old lift was 0.066 of blue added at
+    // (1 - col), i.e. +11/255 of blue still arriving at mid-grass. That is a
+    // veil, not a shadow colour. Halved, and the sky colour in the darks now
+    // comes from shadowTint on a ramp that ends before the meadow does.
+    lift: [0.0, 0.030, 0.195],
+    // The lift now falls off as (1-col)^3, so this amplitude reaches a dark
+    // tree face nearly in full and sunlit grass barely at all. It is what puts
+    // the sky back into our shadows: measured shadowed grass went from
+    // B/G 0.03 (no blue at all — a brown hole) toward the reference's 0.22-0.41.
+    liftFalloff: 4.0,
     gamma: [1.0, 1.0, 1.0],
     // MEASURED: the reference frame's mean is R/G = 0.885 and its lit grass is
     // R/G = 0.868 — a yellow-green. Ours came out 0.840 and 0.756: the same
@@ -104,36 +138,69 @@ export const GRADES = {
     // "ours is more olive / less alpine". The gain fixes the hue at the root
     // rather than asking the split-tone to do it in the top third of the range,
     // where a meadow does not live.
-    gain: [1.025, 0.995, 0.955],
+    // ROUND 4, MEASURED per patch rather than per frame (tools/patch_rp.mjs).
+    // The frame-mean R/G that round 3 tuned against is dominated by our very
+    // wide road, so it hid the truth: open meadow measured R/G 0.93 against the
+    // reference's 0.84, and the road 1.33 against 1.27. Both are too red by
+    // about the same 4%, which is exactly what the round-3 gain added. Taking
+    // it back off lands the road on the reference and the meadow most of the
+    // way there; the rest of the meadow's yellow is in the albedo, not here.
+    gain: [0.990, 1.005, 0.955],
+    // 1.26 was tried and reverted (shots/g8): it moved frame p95 by one value
+    // and cost one at the median. The top of our range is governed by hiKnee,
+    // not by the contrast, so this knob has nothing left to give here.
     contrast: 1.30,
     contrastPivot: 0.325,
     hiKnee: 0.72,
+    // Alpine runs contrast 1.30 about a pivot of 0.325, which without this
+    // clips every channel under 0.075 — i.e. all of the blue in the meadow.
+    loKnee: 0.055,
     saturation: 1.065,
-    shadowTint: [0.90, 0.955, 1.17],
+    // Shadow eats red: measured R/G in target_01's shadowed grass is 0.53-0.74
+    // against 0.79 in the sun. A tint that only cools cannot do that; this one
+    // takes red out as well.
+    shadowTint: [0.84, 0.96, 1.22],
     highTint: [1.055, 1.012, 0.92],
+    // Cool tint spent only on what is actually in shadow. 0.52 is just above
+    // the luma of grass under a conifer in target_01 and well below open
+    // meadow, so the two get different colours instead of the same wash.
+    splitRange: [0.02, 0.46],
     // Objects are grounded by a soft dark pool at their base in every
     // reference frame — that pool is this, not the cast shadow.
-    ao: 0.76,
+    ao: 0.84,
     // Measured against the AO debug buffer (?debugpost=ao): at 1.15 the buffer
     // was almost pure white — nothing was grounded. 2.4 gave the soft dark pool
     // the references have at the base of every tree, rock and post. 3.6 is that
     // same pool re-levelled after the radius-scaled height gate in post.js
     // stopped counting terrain creases as occluders.
     aoIntensity: 3.6,
+    // MEASURED off target_01: the meadow is not one value with objects on it,
+    // it has broad darker ground THROUGH and BETWEEN the tree clumps — its
+    // grass spread is 110 luma against our 86. At 8 m this term only deepened
+    // what was already a cavity; at 15 m a stand of firs shades the ground
+    // around it, which is the single biggest "painted, not rendered" cue left.
+    aoWide: 18.0,
     aoTint: [0.36, 0.48, 0.60],
     bloom: 0.10,
     bloomWide: 0.06,
     bloomThreshold: 0.88,
     // The reference is sharp corner to corner: only a whisper of far softening.
     dof: 0.20,
-    vignette: 0.26,
+    // MEASURED: target_01's twelve row means run 79 / 113 / 77 top to bottom —
+    // the edges sit at 70% of the peak. Ours ran 96 / 117 / 90, i.e. 77%.
+    vignette: 0.31,
     ca: 0.0011,
     // Alpine is the meadow biome, so it is the one that most needs the field
     // broken up. Measured target spread 91 luma vs our flat 54 — see the essay
     // above MEADOW_NOISE in post.js.
-    dapple: 0.22,
-    dappleWarm: 0.06,
-    dappleFine: 0.19,
+    dapple: 0.36,
+    // The reference's field is yellow-green where the sun lands and blue-green
+    // in the hollows, and that warm/cool split across the meadow is most of why
+    // it reads as painted rather than lit. 0.06 was almost invisible.
+    dappleWarm: 0.10,
+    // Eased off: this is a 1.6 m brush texture and the scatter it was standing
+    // in for (flowers, tussocks) is coming back into the meadow this round.
+    dappleFine: 0.15,
     grain: 0.006,
     dappleMetres: 24,
   },

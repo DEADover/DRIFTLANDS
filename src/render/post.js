@@ -359,14 +359,18 @@ const COMPOSITE_FRAG = /* glsl */ `
   uniform float uAspectRatio;
 
   uniform vec3  uLift;
+  uniform float uLiftFall;
   uniform vec3  uGamma;
   uniform vec3  uGain;
   uniform float uContrast;
   uniform float uContrastPivot;
   uniform float uHiKnee;
+  uniform float uLoKnee;
   uniform float uSaturation;
   uniform vec3  uShadowTint;
   uniform vec3  uHighTint;
+  uniform float uSplitLo;
+  uniform float uSplitHi;
 
   uniform float uAOStrength;
   uniform vec3  uAOTint;
@@ -465,7 +469,7 @@ const COMPOSITE_FRAG = /* glsl */ `
 
     col = toSRGB(col);
 
-    col = col * uGain + uLift * (1.0 - col);
+    col = col * uGain;
     col = pow(max(col, 0.0), uGamma);
     // CONTRAST PIVOTS ON THE PICTURE'S KEY VALUE, NOT ON MID-GREY.
     // Measured: our meadow and target_01's meadow agree almost exactly at the
@@ -475,9 +479,71 @@ const COMPOSITE_FRAG = /* glsl */ `
     // instead of gaining it. Pivoting at the meadow's own median leaves the mid
     // where it already matched and spends the contrast on the two tails.
     col = (col - uContrastPivot) * uContrast + uContrastPivot;
+
+    // ---- LOW KNEE: the mirror of uHiKnee, and it was the missing half.
+    //
+    // A contrast of 1.30 pivoted at 0.325 maps 0.0 to -0.098, so EVERY channel
+    // below 0.075 was clipped flat to zero. Our grass carries 12/255 of blue in
+    // the sun and 4/255 in shadow — the entire blue record of the meadow lives
+    // under that threshold, and the clip is why measured B/G came out 0.00-0.08
+    // against the reference's 0.12 in sun and 0.22-0.41 in shadow. A clipped
+    // channel is also the most "rendered"-looking thing an image can do: it
+    // flattens every dark area to one hue and it bands where the clip begins.
+    //
+    // v' = k*k / (2k - v) for v < k. It is C1 at the knee (value AND slope
+    // match), it is monotonic, and it never reaches zero — pure black lands at
+    // k/2 instead of clipping. Per channel, deliberately: the darks desaturate
+    // very slightly as they compress, which is what film does and what the
+    // reference's near-blacks look like.
+    if (uLoKnee > 0.0001) {
+      vec3 kk = vec3(uLoKnee);
+      vec3 comp = kk * kk / max(2.0 * kk - col, 1e-4);
+      col = mix(comp, col, step(kk, col));
+    }
+
+    // ---- LIFT, AFTER the contrast, weighted by LUMA.
+    //
+    // Before the contrast it could not survive it: 0.10 of blue added to a
+    // shadow became 0.031, and (0.031 - 0.325) * 1.3 + 0.325 is negative. A
+    // lift is a BLACK POINT, and a black point that the contrast can undo is
+    // not one. So it acts here, on the graded image, where what it adds is what
+    // the picture gets.
+    //
+    // The weight comes from the PIXEL's luma, not from the channel being
+    // lifted. Tried per-channel first (measured, shots/g2): grass has almost no
+    // blue even in full sun — 12/255 — so (1 - col.b)^4 was 0.87 and the blue
+    // lift landed on SUNLIT meadow at nearly full strength, taking B/G from
+    // 0.12 back up to 0.26 and undoing the whole point. Luma decides whether a
+    // pixel is in shadow; the channel value only says what colour it is.
+    //
+    // MEASURED against target_01: shadowed grass there is R/G 0.53-0.74,
+    // B/G 0.22-0.41 — red eaten, blue surviving. A multiply can never produce
+    // that from our shadow, whose blue channel is 4/255; only an additive term
+    // can, and this is the one.
+    //
+    // THE REORDER IS SHARED, so it moves the other four biomes too. Worked
+    // through: their lifts are 0.012-0.052 at contrasts of 1.10-1.16, so the
+    // change is the difference between multiplying the lift by the contrast and
+    // not — under 1/255 in every case. Not worth a per-biome branch that the
+    // next person would have to keep alive; uLiftFall defaults to 1.0 and
+    // uLoKnee to 0.0, which leaves their curve shape exactly as authored.
+    float liftW = pow(max(1.0 - dot(max(col, 0.0), LUMA), 0.0), uLiftFall);
+    col += uLift * liftW;
+
     float l = dot(max(col, 0.0), LUMA);
     col = mix(vec3(l), col, uSaturation);
-    col *= mix(uShadowTint, uHighTint, smoothstep(0.05, 0.95, l));
+    // SPLIT-TONE, ON A RAMP THAT ENDS BEFORE THE MEADOW DOES.
+    //
+    // MEASURED (tools/patch_rp.mjs): target_01's open meadow is #505f0c —
+    // B/G 0.12. Ours was #5f6c18, B/G 0.22, i.e. nearly twice the blue in the
+    // mid greens, and that milkiness is most of why our field read olive and
+    // "rendered" next to the reference's chartreuse. The blue was not wrong,
+    // it was in the wrong PLACE: this ramp ran 0.05..0.95, so grass at luma
+    // 0.39 still took 64% of the SHADOW tint (+8% blue) even though it is fully
+    // sunlit. The reference keeps its blue strictly for what is IN shadow —
+    // shadowed grass there is B/G 0.46. Ending the ramp at uSplitHi puts the
+    // cool tint back where a sky fill would actually land it.
+    col *= mix(uShadowTint, uHighTint, smoothstep(uSplitLo, uSplitHi, l));
 
     // ---- highlight roll-off, in DISPLAY space, after the grade.
     // The scene-referred shoulder above cannot protect the top end from what the
@@ -566,7 +632,23 @@ export function createPostFX(ctx) {
   let camera = ctx.camera;
   const geo = fsGeometry();
 
-  const maxPixels = 9.2e6;   // supersampling budget
+  /**
+   * SUPERSAMPLE BUDGET.
+   *
+   * `maxPixels` is only a ceiling for very large windows; at every size we
+   * actually ship (1600x900 .. 1920x1080) the clamp below is what decides, so
+   * SSAA is the knob that matters. It is the linear factor: 2.0 renders four
+   * times the pixels of the output, 1.5 renders 2.25x.
+   *
+   * Every derived buffer is sized from W,H — i.e. from the SUPERSAMPLED size —
+   * so this factor also scales the AO pass (W/2), the far-field blur (W/2) and
+   * both bloom chains (W/4, W/8). At 2.0 the "half-res" AO is really running at
+   * full output resolution. Dropping to 1.5 therefore buys a bigger saving than
+   * the raster count alone suggests, and MEASURED (tools/perf_rp.mjs, alpine
+   * hero, 1600x900) it is the single largest honest saving in the frame.
+   */
+  const SSAA = 1.5;
+  const maxPixels = 9.2e6;   // supersampling budget for oversized windows
   let W = 2, H = 2, ss = 1;
 
   const colorOpts = {
@@ -663,14 +745,18 @@ export function createPostFX(ctx) {
     uAspectRatio: { value: 1.777 },
     uExposure: exposureU, uShoulder: shoulderU, uWhite: whiteU,
     uLift: { value: new THREE.Vector3(0, 0, 0) },
+    uLiftFall: { value: 1.0 },
     uGamma: { value: new THREE.Vector3(1, 1, 1) },
     uGain: { value: new THREE.Vector3(1, 1, 1) },
     uContrast: { value: 1 },
     uContrastPivot: { value: 0.5 },
     uHiKnee: { value: 0.88 },
+    uLoKnee: { value: 0.0 },
     uSaturation: { value: 1 },
     uShadowTint: { value: new THREE.Vector3(1, 1, 1) },
     uHighTint: { value: new THREE.Vector3(1, 1, 1) },
+    uSplitLo: { value: 0.05 },
+    uSplitHi: { value: 0.95 },
     uAOStrength: { value: 0.6 },
     uAOTint: { value: new THREE.Vector3(0.55, 0.60, 0.70) },
     uBloom: { value: 0.35 },
@@ -705,10 +791,11 @@ export function createPostFX(ctx) {
     setCamera(cam) { if (cam) camera = cam; },
 
     setSize(w, h) {
+      this._size = [w, h];
       const dpr = renderer.getPixelRatio();
       const outW = Math.max(2, Math.round(w * dpr));
       const outH = Math.max(2, Math.round(h * dpr));
-      ss = THREE.MathUtils.clamp(Math.sqrt(maxPixels / (outW * outH)), 1.0, 2.0);
+      ss = this._ssOverride ?? THREE.MathUtils.clamp(Math.sqrt(maxPixels / (outW * outH)), 1.0, SSAA);
       W = Math.max(2, Math.round(outW * ss));
       H = Math.max(2, Math.round(outH * ss));
 
@@ -739,14 +826,18 @@ export function createPostFX(ctx) {
       u.uShoulder.value = g.shoulder;
       u.uWhite.value = g.white;
       u.uLift.value.fromArray(g.lift);
+      u.uLiftFall.value = g.liftFalloff ?? 1.0;
       u.uGamma.value.fromArray(g.gamma);
       u.uGain.value.fromArray(g.gain);
       u.uContrast.value = g.contrast;
       u.uContrastPivot.value = g.contrastPivot ?? 0.5;
       u.uHiKnee.value = g.hiKnee ?? 0.88;
+      u.uLoKnee.value = g.loKnee ?? 0.0;
       u.uSaturation.value = g.saturation;
       u.uShadowTint.value.fromArray(g.shadowTint);
       u.uHighTint.value.fromArray(g.highTint);
+      u.uSplitLo.value = g.splitRange?.[0] ?? 0.05;
+      u.uSplitHi.value = g.splitRange?.[1] ?? 0.95;
       u.uAOStrength.value = g.ao;
       u.uAOTint.value.fromArray(g.aoTint);
       u.uBloom.value = g.bloom;
@@ -761,6 +852,7 @@ export function createPostFX(ctx) {
       u.uDappleScale.value = 1 / (g.dappleMetres ?? 34);
       bright.u.uThreshold.value = g.bloomThreshold;
       aoPass.u.uIntensity.value = g.aoIntensity;
+      aoPass.u.uR2.value = g.aoWide ?? 8.0;
     },
 
     render() {
@@ -854,6 +946,13 @@ export function createPostFX(ctx) {
 
     /** Optional hint: how far the focus point is, if the camera does not say. */
     setFocusDistance(d) { this._focusDist = d; },
+
+    /** Bench hook: force a supersample factor (null = back to the default). */
+    setSupersample(v) {
+      this._ssOverride = v == null ? null : THREE.MathUtils.clamp(v, 1.0, 2.0);
+      if (this._size) this.setSize(this._size[0], this._size[1]);
+    },
+    get supersample() { return ss; },
 
     dispose() {
       for (const rt of [rtScene, rtAO, rtAOb, rtHalf, rtHalfB, rtQ, rtQb, rtE, rtEb]) rt.dispose();
