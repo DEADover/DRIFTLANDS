@@ -206,7 +206,14 @@ function fir(rng, K, o = {}) {
       // whose body was effectively `leafShade` itself — and a shade albedo lit by
       // ambient alone falls off the bottom of the scale. The gradient still runs
       // dark-to-light; it just no longer starts at the shadow anchor.
-      .lerp(K.leafRamp[Math.max(0, NR - 3)], 0.42 + 0.58 * t * t);
+      // The TOP of the gradient is the brightest body rung, not the second
+      // darkest. This is where the frame's foliage brightness actually lives:
+      // measured, three quarters of the reference's foliage pixels sit above 129
+      // while three quarters of ours sat above 94, and those are the up-facing
+      // frill tops at moderate normal.y — i.e. BODY colour, not highlight. Raising
+      // `leafSun` could never reach them, because the area-weighted normal.y
+      // histogram puts only 2.5% of a fir above 0.8.
+      .lerp(K.leafRamp[NR - 2], 0.30 + 0.70 * t * t);
     const litc = K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.25 + 0.75 * t);
     b.push(0, y, 0, rng.float(0, Math.PI * 2));
     b.rawLit(
@@ -244,7 +251,25 @@ function fir(rng, K, o = {}) {
        * whole 0.0-0.3 population — 24% of the area — to the shadow rung, which is
        * where the reference's missing #172e17 lives.
        */
-      { t0: 0.46, t1: 1.00, low: K.leafShade, l0: 0.04 },
+      /**
+       * WHERE THE FRAME'S BRIGHTNESS ACTUALLY COMES FROM. Re-running the
+       * area-weighted normal.y histogram after the flaps were widened:
+       *
+       *     ny   0.0  0.1  0.2  0.3  0.4  0.5  0.6  0.7  0.8
+       *     %   16.0  2.1  7.2  7.6 11.0 12.2 11.0 27.6  2.1
+       *
+       * — one band, ny 0.7, holds 28% of a fir's area, and it is the band the
+       * camera sees most of. Whatever fraction of the lit rung THAT band gets is
+       * the canopy's brightness, and at t1 0.86 it was 54% of the way to a 2.6x
+       * anchor, i.e. 2.16x the palette green against the old ramp's brightest rung
+       * at 1.80x. That alone was +0.011 on the frame mean. t1 1.10 puts the band
+       * back near 1.87x and leaves the genuinely shallow crown facets as the
+       * highlight, which is what a highlight is.
+       *
+       * Raising t0 does nothing about it — the band is above t0 either way. That
+       * is the sort of thing the histogram tells you and eyeballing does not.
+       */
+      { t0: 0.52, t1: 1.10, low: K.leafShade, l0: 0.04 },
     );
     b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.
@@ -1624,9 +1649,16 @@ export class PropScatter {
     const leafSun = (() => {
       const c = levelled(fol[(vi + 1) % n]).clone();
       if (!alp) return shade(c, 0.16, -0.06);
-      c.multiplyScalar(2.45 * (1 + j * 1.6));
-      c.r = c.g * 0.80;
-      c.b = c.g * 0.16;
+      /**
+       * ...and blue at 0.16 of green was too austere. Measured on the frame, our
+       * brightest foliage decile came back rgb(116,126,9) against the reference's
+       * rgb(150,165,26): red-to-green now matches to within 1% (0.92 vs 0.91) but
+       * the blue had collapsed to a third of the reference's, which is what makes
+       * a lit needle read as acid rather than as sunlit green.
+       */
+      c.multiplyScalar(2.60 * (1 + j * 1.6));
+      c.r = c.g * 0.78;
+      c.b = c.g * 0.30;
       return c;
     })();
     /**
