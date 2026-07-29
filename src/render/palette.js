@@ -105,7 +105,63 @@
 // 0.20 -> 0.53): the reference's green pixels spread from L 0.12 at the 5th
 // percentile to 0.55 at the 95th, ours only 0.17 -> 0.45, and a compressed ramp
 // is half of why.
-const ALPINE_RAMP = [0x16311f, 0x2c4a20, 0x566d1f, 0x7e8f20, 0xa6af2e, 0x929d45];
+// ROUND 7 — THE ACID FIX, and it is a GREEN-CHANNEL fix, not a yellow one.
+//
+// Measured with tools/crop.mjs (green pixels split into five luma tiers, mean
+// R/G per tier, hero_alpine 1600x900 against the reference at the same scale):
+//
+//     luma tier      ours R/G   reference R/G
+//     0.14-0.28        0.50         0.63
+//     0.28-0.42        0.72         0.83     <- 49% of our green pixels
+//     0.42-0.56        0.81         0.90     <- 23%
+//
+// Every tier of our meadow sits 0.09-0.13 of R/G BELOW the reference, i.e. our
+// grass is about ten degrees of hue further round toward pure green, at every
+// value. That is the acid: at G = 140 the reference puts R at 126 and we put it
+// at 113, and 113/140/9 is chartreuse where 126/141/12 is olive.
+//
+// It is not the grade — grade.js already runs gain [1.050, 0.995, 1.105], i.e.
+// it is ALREADY adding 5% red. It is not the facet push either: that is a
+// multiplicative gain on LINEAR HSL lightness, and below l = 0.5 that scales all
+// three channels together, so it cannot rotate a hue. It is the albedo.
+//
+// So the ramp rotates warm — but NOT UNIFORMLY, and the first pass at it that
+// did rotate uniformly printed mustard. The rotation belongs at the BOTTOM and
+// the MIDDLE of the ramp only. Measured per dominant bin on a sunlit meadow
+// crop, the reference's brightest grass is #828f00 / #758f00 / #8f9c00 —
+// R/G 0.80-0.92, green still ahead of red — and a uniform +0.08 of R/G put ours
+// at #9c8f0d / #a99c0d, R/G 1.08, which is RED ahead of green: mustard, not
+// grass. Meanwhile the r06 acid bins (#5d8b00, #748b00) were index 2 of this
+// ramp under full sun, not index 4, which is why index 2 is where the big warm
+// step goes and index 4 barely moves at all.
+//
+//   index    0     1     2     3     4     5
+//   was    0.45  0.59  0.79  0.88  0.95  0.93   R/G
+//   now    0.58  0.73  0.89  0.91  0.89  0.89
+//
+// Lowering G rather than only raising R is deliberate — it also takes luma and
+// saturation off, and we were over on both.
+//
+// The BOTTOM of the ramp also loses a third of its blue. Our single biggest
+// dominant bin was #17462e — rgb(23,70,46), B/G 0.66 — where the reference's
+// single biggest bin is #172e17, rgb(23,46,23), B/G 0.50 with red and blue
+// EQUAL. Deep shade in the reference is a dark green; ours was drifting teal,
+// and a teal floor under a yellow-green meadow is half of why the meadow read
+// as acid: the eye judges the grass against what sits next to it.
+//
+// BLUE IS A CONSTANT, NOT A FRACTION. This is the other half of the acid, and
+// it only shows up if you read the reference's dominant bins as a ladder:
+//
+//   #172e17  #2e4617  #465d17  #8b8b17      B = 23, 23, 23, 23
+//   G  =  46      70       93      139
+//
+// Blue does not move at all while green triples. That is the signature of a
+// constant sky fill sitting on top of a green that gets brighter — and it means
+// the reference's B/G FALLS from 0.50 in shade to 0.17 in sun. Ours rose with
+// green (B = 26,35,34,35,48,71, ending at B/G 0.46 on the brightest swatch),
+// which is why our sunlit grass was simultaneously too pale AND too weak in
+// chroma while the shade went teal. Blue is now flat at 26-46 across the ramp.
+const ALPINE_RAMP = [0x172816, 0x2e3f1a, 0x5d6821, 0x7e8b2f, 0x96a837, 0x86963b];
 const AUTUMN_RAMP = [0x3b4c28, 0x5a682e, 0x83803a, 0xac974a, 0xccb466, 0xe6d59a];
 const DESERT_RAMP = [0xe8d5a4, 0xdcb476, 0xcf8546, 0xbc5730, 0xa33c27, 0xc9713c];
 const COAST_RAMP = [0x104a46, 0x0f6f4c, 0x1e924c, 0x54a548, 0x9c9a56, 0xcfc084];
@@ -132,8 +188,8 @@ export const PALETTES = {
     // tint (which eats red) stacked with grade.js's `lift: [0, 0.030, 0.195]`
     // (which adds blue and no red, ramped as (1-col)^4 so it only bites on
     // pixels that are already near black). Both live outside this file.
-    ambientSky: 0xa8d4f2,
-    ambientGround: 0x86a05c,
+    ambientSky: 0xb8d0de,
+    ambientGround: 0x90a052,
     ambientIntensity: 1.1,
     fogColor: 0xbfe0f2,
     fogDensity: 0.00085,
@@ -145,9 +201,11 @@ export const PALETTES = {
       // noise stack, so the meadow has to be able to reach L 0.60 on a sunlit
       // rise and L 0.19 in a hollow without either end being a different
       // material. Keep them one hue family apart, not one value apart.
-      lowland: 0x143020,     // damp draws and tarn shores — bluest green here
-      patchA: 0xbfc453,      // sun-bleached alp grass: hue 64, S 0.58, L 0.73
-      patchB: 0x172f20,      // shaded heath / bilberry: hue 140, S 0.53, L 0.16
+      lowland: 0x152718,     // damp draws and tarn shores — bluest green here
+      patchA: 0xa2bb4e,      // sun-bleached alp grass. R stays a hair UNDER G:
+                             // the reference's sunlit bins run R/G 0.80-0.92 and
+                             // the moment red leads, grass reads as mustard.
+      patchB: 0x1c2516,      // shaded heath / bilberry: hue 125, S 0.53, L 0.13
       scree: 0xa9a596,       // pale limestone — cliff faces ONLY, never meadow
       cliff: 0x6a6055,       // warm grey rock (ref boulders read #605753)
       soil: 0x8a6236,
@@ -181,7 +239,7 @@ export const PALETTES = {
     // set, matching the reference's own firs (#1a331a is S 0.49, #0d261a is
     // 0.66), with the darkest variant lifted back to L 0.20 so its underside
     // stops falling into the black hole the AO and the grade lift make of it.
-    foliage: [0x25492f, 0x2e5b39, 0x1e3b28, 0x35673d],
+    foliage: [0x25432c, 0x2e5335, 0x1e3625, 0x355f39],
     trunk: 0x6b4a30,
     rock: 0x7d7268,
     rockShadow: 0x4e463f,

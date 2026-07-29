@@ -149,7 +149,15 @@ export const BIOMES = {
     label: 'Alpine Meadows',
     waterLevel: -8.0,
     size: 1700,
-    segments: 196,
+    // 248, up from 196. At 196 the far half of the meadow resolved into six or
+    // seven triangles the size of a car park, and one of them catching the sun
+    // is a flat slab of the brightest grass in the palette with no internal
+    // variation at all — which is most of what "acid patch" actually looks like
+    // once the hue is right. Measured A/B at the same palette: 196 put 21% of
+    // its green pixels in the 0.42-0.56 luma tier as one or two huge faces, 248
+    // puts 15% spread over many, and frame mean luma landed on the reference's
+    // 0.379 exactly instead of 0.005 over.
+    segments: 248,
     lodBias: 0.66,
     meshJitter: 0.36,
     treeDensity: 1.0,
@@ -263,7 +271,19 @@ export const BIOMES = {
       // 0.009 of mean saturation and cost 0.009 of mean luma and 2.4 points out
       // of luma bucket 5, which is the bucket we are shortest on. The chroma
       // has to come off the shaded half specifically, not off the whole field.
-      const t = clamp((big * 0.44 + mid * 0.34 + fine * 0.20) * 1.8 - 0.16, -1, 1);
+      let t = clamp((big * 0.44 + mid * 0.34 + fine * 0.20) * 1.8 - 0.19, -1, 1);
+      // ...and then PUSHED OFF ZERO. A sum of fbm octaves is a bell: most of the
+      // meadow lands near t = 0, i.e. on the bare ramp, and that is why the
+      // frame reads as one flat wash of a single green no matter how well the
+      // ramp itself is tuned. Measured on green pixels split into luma tiers,
+      // ours piled 52% into 0.28-0.42 where the reference puts 29%, and came up
+      // 8 points short in 0.42-0.56 and 9 short in 0.14-0.28 — a distribution
+      // problem, not a colour one. A sub-unit exponent on |t| is the cheapest
+      // fix: it leaves the two ends and the sign alone (so the ramp's reach is
+      // unchanged and the frame mean barely moves) and only evacuates the
+      // middle, turning the bell into the two-lobed sun/shade split the
+      // reference has.
+      t = Math.sign(t) * Math.pow(Math.abs(t), 0.68);
       // Asymmetric on purpose. THREE.Color.lerp mixes in LINEAR space, where a
       // 50% mix toward a dark green is nowhere near 50% of the way down in
       // perceived value — the bright end always wins. The dark lerp has to be
@@ -277,7 +297,7 @@ export const BIOMES = {
       // exponent keeps the mid-tones on the warm side of the path and only lets
       // the cool blue-green arrive in the genuinely deep hollows, which is what
       // the reference does.
-      if (t > 0) c.lerp(K.patchA, t * 0.82);
+      if (t > 0) c.lerp(K.patchA, t * 0.92);
       else c.lerp(K.patchB, Math.pow(-t, 1.22) * 1.0);
       // Hue and chroma ride WITH the value, they do not float free: a lit rise
       // is warmer AND yellower AND more saturated (grass drying in the sun),
