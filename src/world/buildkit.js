@@ -95,7 +95,18 @@ export function mergePlain(geos) {
   return out;
 }
 
-/** Merge with a flat colour per part -> one geometry, `color` attribute filled. */
+/**
+ * Merge with a flat colour per part -> one geometry, `color` attribute filled.
+ *
+ * A part may also carry `top`: a SECOND colour blended in by how far the face
+ * points at the sky. This is how the reference's boulders work and it cannot
+ * be faked with lighting alone — a Lambert term multiplies whatever albedo it
+ * is given, so a rock whose whole albedo is a mid grey can never produce a
+ * bright pixel however the key light is aimed. In target_01 the planed-off top
+ * of a meadow block is one of the three brightest things in the frame (with
+ * the gravel and the water), and it is bright because the STONE is nearly
+ * white up there and merely grey down the sides.
+ */
 export function mergeColored(parts) {
   let total = 0;
   const prep = [];
@@ -103,16 +114,30 @@ export function mergeColored(parts) {
     const g = p.geo.index ? p.geo.toNonIndexed() : p.geo;
     if (!g.attributes.normal) g.computeVertexNormals();
     total += g.attributes.position.count;
-    prep.push({ g, c: p.color });
+    prep.push({ g, c: p.color, top: p.top, t0: p.t0 ?? 0.30, t1: p.t1 ?? 0.86 });
   }
   const pos = new Float32Array(total * 3);
   const nrm = new Float32Array(total * 3);
   const col = new Float32Array(total * 3);
   let o = 0;
-  for (const { g, c } of prep) {
+  for (const { g, c, top, t0, t1 } of prep) {
     const n = g.attributes.position.count;
     pos.set(g.attributes.position.array, o * 3);
     nrm.set(g.attributes.normal.array, o * 3);
+    if (top) {
+      const na = g.attributes.normal.array;
+      const span = Math.max(1e-4, t1 - t0);
+      for (let i = 0; i < n; i++) {
+        let t = (na[i * 3 + 1] - t0) / span;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const k = t * t * (3 - 2 * t);
+        col[(o + i) * 3] = c.r + (top.r - c.r) * k;
+        col[(o + i) * 3 + 1] = c.g + (top.g - c.g) * k;
+        col[(o + i) * 3 + 2] = c.b + (top.b - c.b) * k;
+      }
+      o += n;
+      continue;
+    }
     for (let i = 0; i < n; i++) {
       col[(o + i) * 3] = c.r; col[(o + i) * 3 + 1] = c.g; col[(o + i) * 3 + 2] = c.b;
     }
@@ -166,6 +191,15 @@ export class GeoBuilder {
     geo.applyMatrix4(this.m);
     const c = color.isColor ? color : new THREE.Color(color);
     this.parts.push({ geo, color: c });
+    this.tris += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
+    return this;
+  }
+
+  /** `raw`, but sky-facing facets fade to `top`. See `mergeColored`. */
+  rawLit(geo, color, top, o = {}) {
+    geo.applyMatrix4(this.m);
+    const C2 = (v) => (v.isColor ? v : new THREE.Color(v));
+    this.parts.push({ geo, color: C2(color), top: C2(top), t0: o.t0, t1: o.t1 });
     this.tris += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
     return this;
   }
@@ -363,6 +397,15 @@ export function derivePalette(p, biomeId) {
     metal: off(rock, 0.0, -0.22, 0.04),
     metalDark: off(rockDark, 0, -0.15, -0.02),
     white,
+    /**
+     * THE FRAME'S HIGHLIGHT COLOUR — the tone every sunlit top plane blends
+     * toward. Not pure white: sampled off target_01, the brightest natural
+     * surfaces in it (boulder crowns, the gravel, sunlit grass) all sit around
+     * rgb(170,145,95) — strongly warm, because they are lit by a low afternoon
+     * sun through a warm sky. A neutral highlight at this camera height reads
+     * as snow, which is the exact mistake the first pass at this made.
+     */
+    sunlit: white.clone().lerp(accent1, 0.34),
     signRed: accent0,
     signYellow: accent1,
     tar: dark(off(rockDark, 0, -0.1, 0), 0.45),

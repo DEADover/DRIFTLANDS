@@ -99,9 +99,22 @@ function fir(rng, K, o = {}) {
   // Overall height is held where it was: with `tiers` now 6-9 and each skirt
   // advancing only ~0.46 of its own height, the per-tier height has to come
   // down by the same factor or a fir turns into a 30 m mast.
-  let r = rng.float(2.30, 3.05) * wide;
+  // ROUND 6 — THE SILHOUETTE, cropped at 2.2x side by side with target_01.
+  //
+  // Under OUR camera (steeper than the reference's) a conifer's height is
+  // foreshortened and its skirt is not, so the same solid that measures 1:2.5
+  // in metres renders about 1:1 on screen — an octagonal green umbrella, which
+  // is what our meadow was full of. The reference's conifers render about 1:3,
+  // a narrow spire with a row of points down each side and a visible trunk.
+  //
+  // The tree is therefore narrowed 23% and lengthened 11%. This is not the
+  // "cut the skirt" experiment that failed in round 5: that one cut the HEIGHT
+  // with it and did it while the stands were still fused, so it produced
+  // needles inside a mass. With the stands separated, a narrower tree shows
+  // its shape instead of its neighbour's.
+  let r = rng.float(1.78, 2.36) * wide;
   for (let i = 0; i < tiers; i++) {
-    const h = rng.float(2.35, 3.15) * tall * (1 - i * 0.04);
+    const h = rng.float(2.62, 3.48) * tall * (1 - i * 0.04);
     // Dark at the skirt, lighter at the tip. The reference's conifers all read
     // this way — a deep shadowed core with sunlit new growth on top — and it is
     // what stops a stand of firs from being one flat green mass.
@@ -342,18 +355,18 @@ function flowerPatch(rng, K, colIdx, o = {}) {
   // flowers you could cover with a doormat, with clear grass all round it.
   const R = rng.float(1.25, 2.30) * (o.spread ?? 1);
   const c = o.color ?? K.accents[colIdx % K.accents.length];
-  const n = rng.int(8, 14);
+  const n = rng.int(9, 15);
   for (let i = 0; i < n; i++) {
     // Even-area scatter (sqrt), not a dense core. The old 0.62 exponent piled
     // most of the blooms into the middle, which is what made a patch read as
     // one coloured object instead of as individual flowers in grass.
     const a = rng.float(0, Math.PI * 2);
     const d = Math.sqrt(rng.float(0.06, 1)) * R;
-    const s = rng.float(0.10, 0.17);
+    const s = rng.float(0.105, 0.155);
     const x = Math.cos(a) * d, z = Math.sin(a) * d;
     // A bloom is 3-5 px on screen; a 5-sided squat cone is indistinguishable
     // from an icosahedron there and a fraction of the cost.
-    b.cone(s, s * 1.5, 5, c, { x, z, y: 0.32, open: true });
+    b.cone(s, s * 0.95, 5, c, { x, z, y: 0.34, open: true });
     // A hair-thin green stem. Without it a white speck floats; with it the
     // flower is planted in the grass, which is the reference's read.
     b.cone(0.035, 0.32, 4, K.grass[0], { x, z, y: 0.16, open: true });
@@ -362,7 +375,7 @@ function flowerPatch(rng, K, colIdx, o = {}) {
   // patch costs more triangles than a whole fir.
   for (let i = 0; i < 2; i++) {
     const a = rng.float(0, Math.PI * 2), d = rng.float(0, R * 0.8);
-    b.cone(0.09, 0.60, 4, K.grass[1], { x: Math.cos(a) * d, z: Math.sin(a) * d, y: 0.30, open: true });
+    b.cone(0.09, 0.60, 4, K.grassLit.clone().lerp(K.grass[1], 0.35), { x: Math.cos(a) * d, z: Math.sin(a) * d, y: 0.30, open: true });
   }
   return { geo: b.build(), trunkR: 0, height: 0.7 };
 }
@@ -386,11 +399,21 @@ function tussock(rng, K) {
   // vertical at this camera height turns into shimmering white needles.
   const b = new GeoBuilder();
   const n = rng.int(4, 7);
+  // One or two blades per tuft carry the sunlit crown, the rest stay at or
+  // below the sward. A whole tussock in `grassLit` reads as a dead straw
+  // clump; one lit blade among four reads as grass with light on it, and 20 000
+  // of those are what put a sparkle through the reference's meadow.
+  const litA = rng.bool(0.62) ? rng.int(0, n - 1) : -1;
+  const litB = -1;
   for (let i = 0; i < n; i++) {
     const a = rng.float(0, Math.PI * 2), d = rng.float(0, 1.1);
     const h = rng.float(0.55, 1.05);
+    const lit = i === litA || i === litB;
+    const c = lit
+      ? K.grassLit.clone().lerp(K.grass[1], rng.float(0.10, 0.55))
+      : K.grass[i % K.grass.length];
     b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.3, 0.3));
-    b.cone(rng.float(0.5, 0.85), h, 5, K.grass[i % K.grass.length], { y: h / 2, sz: 0.7, open: true });
+    b.cone(rng.float(0.5, 0.85), h * (lit ? 1.15 : 1), 5, c, { y: h / 2, sz: 0.7, open: true });
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1.0 };
@@ -404,7 +427,8 @@ function screePatch(rng, K) {
     const s = rng.float(0.28, 0.72);
     b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28),
       rng.float(-0.3, 0.3), rng.float(-0.3, 0.3), s);
-    b.raw(rockGeom(rng, { jitter: 0.34 }), i % 3 === 0 ? K.scree : K.rockDark);
+    const sc = i % 3 === 0 ? K.scree : K.rockDark;
+    b.rawLit(rockGeom(rng, { jitter: 0.34 }), sc, sc.clone().lerp(K.sunlit, 0.22), { t0: 0.55, t1: 0.99 });
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1 };
@@ -431,16 +455,43 @@ function slab(rng, K, o = {}) {
   // 0.14 (a muddy mid-grey that sank into the meadow shadows). target_01's
   // meadow blocks are a pale WARM grey whose sunlit top is the brightest thing
   // in the grass without ever competing with the gravel.
-  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.0, 0.18)).lerp(K.plasterWarm, 0.20);
-  b.raw(slabGeom(rng, { jitter: 0.24 }), body);
+  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.0, 0.18)).lerp(K.plasterWarm, 0.34);
+  // ROUND 6 — WHERE THE FRAME'S HIGHLIGHTS COME FROM.
+  //
+  // Measured: target_01 puts 1.5% of its pixels above 0.70 luma with a tail
+  // running to 1.0; ours had 0.4% and NOTHING above 0.75. Masking both frames
+  // at L>0.70 showed where the reference's live — the gravel, the water, and
+  // the planed top faces of its meadow boulders, which come out near white.
+  // Ours had none on stone at all, because a rock whose entire albedo is a mid
+  // warm grey cannot make a bright pixel: Lambert only ever multiplies it down.
+  //
+  // So the stone is given a real two-tone albedo, sky-facing to side-facing,
+  // and the lift is large — the top plane is most of the way to the palette's
+  // white. That is not stylisation, it is what a planed granite face does in
+  // full sun, and it is the single cheapest highlight in the meadow because
+  // every group already has a car-sized anchor block in it.
+  // ...and the amount, which took one shoot to find. THREE.Color is LINEAR, so
+  // "lerp the stone 70% of the way to white" is not a 70% brightening, it is
+  // roughly a 4x one: the first attempt rendered rock tops at rgb(249,243,182),
+  // L 0.94, and the meadow filled with marshmallows. Sampled off target_01, a
+  // sunlit boulder top is rgb(167,141,94) — L 0.56, warm, and a good stop below
+  // the gravel. A ~1.5x lift lands there, which is a lerp of about 0.2.
+  //
+  // The highlight is also WARM, not white: the reference's stone tops carry
+  // R > G > B by a wide margin because they are lit by a low afternoon sun, and
+  // a neutral-white top plane reads as snow at this camera height.
+  const litTop = (c, k) => c.clone().lerp(K.sunlit, k);
+  b.rawLit(slabGeom(rng, { jitter: 0.24 }), body, litTop(body, rng.float(0.52, 0.68)),
+    { t0: 0.74, t1: 1.00 });
   const n = rng.int(1, 3);
   for (let i = 0; i < n; i++) {
     const s = rng.float(0.34, 0.62);
     const a = rng.float(0, Math.PI * 2), d = rng.float(0.85, 1.35);
     b.pushTilt(Math.cos(a) * d, -0.06, Math.sin(a) * d, rng.float(0, 6.28),
       rng.float(-0.16, 0.16), rng.float(-0.16, 0.16), s);
-    b.raw(slabGeom(rng, { jitter: 0.26 }),
-      K.rockDark.clone().lerp(K.rock, rng.float(0.35, 0.85)).lerp(K.plasterWarm, 0.10));
+    const sat = K.rockDark.clone().lerp(K.rock, rng.float(0.35, 0.85)).lerp(K.plasterWarm, 0.10);
+    b.rawLit(slabGeom(rng, { jitter: 0.26 }), sat, litTop(sat, rng.float(0.36, 0.50)),
+      { t0: 0.72, t1: 1.00 });
     b.pop();
   }
   if (o.snow) {
@@ -454,13 +505,17 @@ function slab(rng, K, o = {}) {
 
 function boulder(rng, K, o = {}) {
   const b = new GeoBuilder();
-  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.25, 0.70));
-  b.raw(rockGeom(rng, { jitter: 0.28 }), body);
+  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.25, 0.70)).lerp(K.plasterWarm, 0.22);
+  // Same two-tone albedo as `slab`, a little gentler: a rounded boulder has no
+  // single plane facing the sky, so its crown catches the light over a smaller
+  // area and a full slab-strength lift would read as a bald patch of snow.
+  b.rawLit(rockGeom(rng, { jitter: 0.28 }), body, body.clone().lerp(K.sunlit, rng.float(0.20, 0.30)),
+    { t0: 0.55, t1: 0.99 });
   if (rng.bool(0.5)) {
     const lump = rockGeom(rng, { jitter: 0.30 });
     lump.scale(0.55, 0.5, 0.55);
     lump.translate(rng.float(-0.9, 0.9), 0.1, rng.float(-0.9, 0.9));
-    b.raw(lump, K.rockDark);
+    b.rawLit(lump, K.rockDark, K.rockDark.clone().lerp(K.sunlit, 0.24), { t0: 0.55, t1: 0.99 });
   }
   if (o.snow) {
     const cap = rockGeom(rng, { jitter: 0.22 });
@@ -494,8 +549,12 @@ const MAKERS = {
   flowersC: (r, K) => flowerPatch(r, K, 2),
   // Alpine's signature: drifts of white, and a softer cream-yellow. Derived
   // from the palette's own accents, never a hard-coded hex.
+  // Pure palette white, not white-lerped-toward-yellow. Masking target_01 at
+  // L > 0.70 showed its meadow highlights are the flower drifts and the stone
+  // crowns; a bloom tinted 10% toward the yellow accent lands at 0.62 and
+  // contributes nothing to the top of the histogram.
   flowersWhite: (r, K) => flowerPatch(r, K, 0, {
-    color: K.accents[K.accents.length - 1].clone().lerp(K.accents[1], 0.10),
+    color: K.accents[K.accents.length - 1],
     spread: 1.15,
   }),
   flowersCream: (r, K) => flowerPatch(r, K, 0, {
@@ -558,7 +617,31 @@ const MIXES = {
     // because in target_01 most conifers are NOT in a stand: they are lone
     // trees with grass all round them, and that is the read the copse pass
     // can never produce on its own.
-    canopyTarget: 88000, coverTarget: 52000, pebbleTarget: 11000, heroes: 520, singles: 24000, moistScale: 90,
+    // ROUND 6. 88 000 / 24 000 actually landed 57 654 conifers on a 2.89 km²
+    // map — 20 000/km², one tree every 6.7 m averaged over the WHOLE map. At
+    // that density no arrangement can have gaps in it: the trees have nowhere
+    // to not be. Measured off target_01 with the road (11 m) as the ruler, its
+    // frame carries about one conifer per 85 m², i.e. ~12 000/km², and the
+    // difference between its meadow and ours is not chiefly the count — it is
+    // that ours are packed tightly enough to fuse into one silhouette while
+    // its stand of six still shows grass between every pair.
+    //
+    // So: total down to ~34 000 (12 000/km², the reference's own figure), the
+    // clump share cut hard in favour of `singles`, and a hard MINIMUM GAP
+    // between conifers (see `gapOK`) so no two of them can ever merge however
+    // the noise field piles up. The count that is removed is the count that
+    // was invisible anyway — the interior of a thicket.
+    // ...and the correction, shot the same round. 34 000 / 18 000 with a 6.2 m
+    // and 9.5 m gap landed 12 587 conifers and the hero frame came back a
+    // MOWN LAWN: %dark 18.2 against the reference's 32.5, saturation up to
+    // 0.800 because bare grass was most of the picture. The measurement that
+    // matters is not trees/km², it is how much of the FRAME is canopy, and at
+    // this camera height the reference is about a third dark.
+    //
+    // So the count goes back most of the way, and the separation is kept by
+    // the gap floor alone: ~42 000 conifers, none of them closer than 5.2 m to
+    // another, which is a stand you can see through rather than a thicket.
+    canopyTarget: 94000, coverTarget: 92000, pebbleTarget: 13000, heroes: 800, singles: 60000, moistScale: 90,
     // macro/meso are the WAVELENGTHS of the two noise scales that decide where
     // wood wants to be. At macro 0.0016 the pattern repeated every ~620 m —
     // wider than the whole visible frame — so any single shot landed entirely
@@ -596,7 +679,21 @@ const MIXES = {
     // largest group is maybe a dozen trees and you can see grass between most
     // of them. Halving the footprint and the membership at the same time as
     // doubling the map total turns one wall into six legible clumps.
-    clump: { tries: 62000, sep: 20, radius: [6, 21], maxMembers: 16, base: 0.94, kMax: 4.2 },
+    // ROUND 6 — the arithmetic that was missing every previous round.
+    //
+    // A copse's trees reach ~1.1 x `ra` from its centre (u is gauss(0,0.44)
+    // and the loop rejects at r2 > 1.25). With radius up to 21 that is a 23 m
+    // reach, and centres only `sep` = 20 m apart. Neighbouring copses were
+    // therefore GUARANTEED to overlap — the "clump, gap, clump" rhythm could
+    // not exist at those numbers whatever the noise field did, and the solid
+    // green wall in the r05 hero frame was four copses whose ellipses shared
+    // most of their area.
+    //
+    // The rule is sep > 2.2 x radiusMax. At radius [7,15] the reach is 16.5 m
+    // and sep 38 leaves ~5 m of clear meadow between the skirts of adjacent
+    // stands even when two land at the minimum separation. maxMembers 8 is
+    // read straight off target_01, whose largest legible group is eight trees.
+    clump: { tries: 170000, sep: 26, radius: [7, 15], maxMembers: 12, base: 0.90, kMax: 4.6, gap: 4.5 },
     canopy: [
       // Sizes calibrated against target_01: the hero conifers there stand about
       // 20 m and 7-8 m across the skirt, roughly five car lengths tall. Our
@@ -649,8 +746,8 @@ const MIXES = {
     ],
     heroSpecies: ['firOld', 'firSpire', 'fir'],
     cover: [
-      { id: 'bushDark', w: 1.7, alt: [1, 4, 150, 230], wet: [0, 0.08, 1.05, 1.2], flat: 0.60, size: [0.7, 1.15] },
-      { id: 'bushLight', w: 0.8, alt: [1, 4, 120, 180], wet: [0.05, 0.22, 1.05, 1.2], flat: 0.60, size: [0.7, 1.1] },
+      { id: 'bushDark', w: 1.9, alt: [1, 4, 150, 230], wet: [0, 0.08, 1.05, 1.2], flat: 0.60, size: [0.52, 0.86] },
+      { id: 'bushLight', w: 0.9, alt: [1, 4, 120, 180], wet: [0.05, 0.22, 1.05, 1.2], flat: 0.60, size: [0.52, 0.82] },
       // Flowers are an ACCENT, not a crop. At w 4.4 / 1.7 / 1.0 they were 45%
       // of all ground cover and the meadow came out as confetti. In target_01
       // you can count the drifts in a frame on two hands. The weight that used
@@ -662,10 +759,10 @@ const MIXES = {
       // dominant note by a wide margin, cream is the quiet second, and red is
       // the rare one you notice twice a frame. `flat` relaxed from 0.86 so
       // drifts also take the gentle rolls, not only the billiard-flat shelves.
-      { id: 'flowersWhite', w: 4.4, alt: [1, 4, 120, 180], wet: [0, 0.12, 1.05, 1.2], flat: 0.80, size: [0.85, 1.35] },
+      { id: 'flowersWhite', w: 4.6, alt: [1, 4, 120, 180], wet: [0, 0.12, 1.05, 1.2], flat: 0.78, size: [0.9, 1.35] },
       { id: 'flowersCream', w: 1.05, alt: [2, 5, 110, 160], wet: [0.05, 0.2, 1.05, 1.2], flat: 0.82, size: [0.8, 1.25] },
-      { id: 'flowersRed', w: 0.72, alt: [2, 5, 95, 140], wet: [0.1, 0.3, 1.05, 1.2], flat: 0.84, size: [0.8, 1.2] },
-      { id: 'tussock', w: 6.8, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.60, size: [0.9, 1.9] },
+      { id: 'flowersRed', w: 1.15, alt: [2, 5, 95, 140], wet: [0.1, 0.3, 1.05, 1.2], flat: 0.82, size: [0.85, 1.3] },
+      { id: 'tussock', w: 9.2, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.58, size: [1.0, 2.2] },
       { id: 'screePatch', w: 1.2, alt: [120, 190, 300, 430], wet: [0, 0, 0.6, 0.9], flat: 0.0, flatMax: 0.88, size: [0.7, 1.3] },
     ],
     shore: { id: 'reeds', size: [0.8, 1.5] },
@@ -875,10 +972,37 @@ export class PropScatter {
     };
     const alp = this.biome.id === 'alpine';
 
+    // ---- VARIANT VALUE NORMALISATION ------------------------------------
+    // The four palette foliage entries are not four hues at one value, they
+    // are four hues at four VALUES: 0x1e3b28 carries about 60% of the light
+    // 0x35673d does. Every tier is a multiple of its variant's own colour, so
+    // variant 2 came out a stop and a half darker than variant 3 all the way
+    // up its ramp — and masking the hero frame at L < 0.10 showed exactly that:
+    // the crushed pixels are not spread over the wood, they belong to the
+    // handful of trees that drew the dark variant, whose whole shadow flank
+    // falls off the bottom of the scale.
+    //
+    // A wood should hold three or four GREENS at one exposure, not three or
+    // four exposures. Each variant is pulled 72% of the way to the set's mean
+    // luminance, which keeps every hue the palette declared and throws away
+    // only the value spread that was never wanted.
+    const lumOf = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const levelled = (c) => {
+      if (!alp) return c;
+      let m = 0;
+      for (const f of fol) m += lumOf(f);
+      m /= fol.length;
+      const l = lumOf(c);
+      if (l < 1e-5) return c;
+      return c.clone().multiplyScalar(1 + (m / l - 1) * 0.72);
+    };
+    const aL = levelled(a);
+    const bL = levelled(b2);
+
     const leaf = alp ? [
-      tier(a, 0.68, 0.50, 0.30),
-      tier(a, 1.00, 0.44, 0.26),
-      tier(b2, 0.56, 0.54, 0.34),
+      tier(aL, 1.28, 0.28, 0.98),
+      tier(aL, 1.50, 0.24, 0.94),
+      tier(bL, 1.14, 0.30, 1.00),
     ] : [
       shade(a, j + dir * 0.035, 0.03),
       shade(a, j + dir * 0.105, 0.06),
@@ -907,11 +1031,32 @@ export class PropScatter {
     // mean fell to 0.341 against a 0.379 target. Everything is a third brighter
     // here, which keeps the ladder and the warm lift but lands the mass of the
     // canopy in luma buckets 1-3 where the reference keeps it.
+    // ---- ROUND 6: THE BLUE SHADOW ---------------------------------------
+    //
+    // Masking our hero frame at L < 0.10 showed the crushed darks are not
+    // spread through the picture at all: they are ENTIRELY the sun-facing-away
+    // flanks of conifers, 5.9% of the frame against the reference's 0.9%. And
+    // the dominant-colour table says what they are made of:
+    //
+    //     ours    #00172e   5.4% of frame   (R<23, G 23-46, B 46-69)
+    //     target  #172e17   9.4% of frame   (R 23-46, G 46-69, B 23-46)
+    //
+    // Ours is BLUE — blue is its largest channel and red is near zero. The
+    // reference's is green, with red and blue level. Same shape, same job in
+    // the composition, opposite hue. Our ambient in shadow is strongly blue
+    // and it was swamping an albedo whose own blue was 40% of its green, so
+    // the shadow side of every fir went to sky colour and then to black.
+    //
+    // Luma is 0.2126R + 0.7152G + 0.0722B, so this is also most of the
+    // brightness gap and it is nearly free to fix: moving a unit of blue into
+    // green multiplies its contribution by ten. Red comes up with it (`warm`),
+    // which RAISES luma and LOWERS saturation — and we are 0.012 over on
+    // saturation, so that is the direction to be wrong in.
     const leafRamp = (alp ? [
-      tier(a, 0.62, 0.58, 0.22),
-      tier(a, 0.84, 0.52, 0.20),
-      tier(b2, 1.06, 0.46, 0.18),
-      tier(b2, 1.34, 0.40, 0.16),
+      tier(aL, 1.34, 0.42, 1.00),
+      tier(aL, 1.48, 0.38, 0.98),
+      tier(bL, 1.60, 0.32, 0.92),
+      tier(bL, 1.80, 0.27, 0.86),
     ] : [
       shade(a, j + dir * 0.005, 0.045),
       shade(a, j + dir * 0.045, 0.02),
@@ -941,6 +1086,23 @@ export class PropScatter {
         new THREE.Color(p.ground[2]).lerp(new THREE.Color(p.ground[1]), 0.55),
         new THREE.Color(p.ground[2]).lerp(new THREE.Color(p.ground[3]), 0.50),
       ],
+      // SUNLIT CROWN. Every colour a tussock had was at or below the meadow's
+      // own value, which is why the meadow could hold 20 000 grass tufts and
+      // still contribute nothing to the top of the histogram: there was no
+      // material in it brighter than the ground it stood on. In target_01 the
+      // crown of a tuft catching the key light is a pale yellow-green a clear
+      // stop ABOVE the sward — the same note as the brightest terrain polygon,
+      // put on an object that faces the sun instead of lying flat.
+      // Built from the top rung of the ground ramp, warmed toward the palette's
+      // own yellow accent; nothing invented.
+      // ...and the correction. `ground[4]` warmed 22% toward the yellow accent
+      // rendered as BRIGHT STRAW: cropping the meadow at 2.2x showed hundreds
+      // of little yellow spikes where the reference has dark green scrub. A
+      // sunlit blade is one STEP above the sward, not a different plant. Built
+      // off ground[3] (the sward's own top rung) lifted a third of the way to
+      // ground[4], with no accent in it at all.
+      grassLit: new THREE.Color(p.ground[3])
+        .lerp(new THREE.Color(p.ground[p.ground.length - 2]), 0.34),
       reed: shade(leaf[0], -0.02, 0.05),
       reedTip: shade(new THREE.Color(p.ground[3]), -0.02, 0.04),
       // Was -0.04 / -0.06. On a linear-space green already sitting near L=0.13
@@ -1067,6 +1229,50 @@ export class PropScatter {
       return a * (0.35 + 0.65 * w);
     };
 
+    /**
+     * CONIFER SPACING GRID — the mechanism that makes the meadow breathe.
+     *
+     * Every previous round tried to buy separation with the noise field, and
+     * the field cannot deliver it: it decides how MANY trees a patch wants,
+     * not how close two of them may stand. So a "thin" patch of a dense map is
+     * still a patch where trees touch, and touching conifers do not read as
+     * two trees — they read as one dark blob with a serrated edge, which is
+     * exactly the mass that filled the right of the r05 hero frame.
+     *
+     * This is the hard floor instead: no conifer may be placed within `minD`
+     * metres of another conifer, full stop. A fir's skirt is ~4.5-6 m across,
+     * so a 6.2 m floor inside a stand leaves a sliver of grass showing between
+     * every pair, and the 9 m floor the singles pass uses leaves a whole tree
+     * width. Uniform grid, ~25 lookups per candidate, so it is affordable at
+     * 150 000 tries.
+     */
+    const GCELL = 10;
+    const gGrid = new Map();
+    const gKey = (ix, iz) => (Math.imul(ix, 73856093) ^ Math.imul(iz, 19349663)) | 0;
+    const gapOK = (x, z, minD) => {
+      if (!(minD > 0)) return true;
+      const ix = Math.floor(x / GCELL), iz = Math.floor(z / GCELL);
+      const rr = minD * minD;
+      const span = Math.ceil(minD / GCELL);
+      for (let a = -span; a <= span; a++) {
+        for (let c = -span; c <= span; c++) {
+          const arr = gGrid.get(gKey(ix + a, iz + c));
+          if (!arr) continue;
+          for (let i = 0; i < arr.length; i += 2) {
+            const dx = arr[i] - x, dz = arr[i + 1] - z;
+            if (dx * dx + dz * dz < rr) return false;
+          }
+        }
+      }
+      return true;
+    };
+    const gapAdd = (x, z) => {
+      const k = gKey(Math.floor(x / GCELL), Math.floor(z / GCELL));
+      let a = gGrid.get(k);
+      if (!a) gGrid.set(k, (a = []));
+      a.push(x, z);
+    };
+
     // Keep the player's spawn pocket clear of anything solid.
     const SPAWN_CLEAR = 22;
     const nearSpawn = (x, z) => x * x + z * z < SPAWN_CLEAR * SPAWN_CLEAR;
@@ -1122,7 +1328,7 @@ export class PropScatter {
      * Cost: eight isBlocked lookups per candidate, and only for the minority of
      * trees that pass the height gate.
      */
-    const SHOULDER = 4.5;
+    const SHOULDER = 7.0;
     const onShoulder = (x, z) => {
       for (let i = 0; i < 8; i++) {
         const a = (i / 8) * Math.PI * 2;
@@ -1130,10 +1336,10 @@ export class PropScatter {
       }
       return false;
     };
-    const solidTree = (entry, x, z, s, minH = 11) => {
+    const solidTree = (entry, x, z, s, minH = 13.5) => {
       if (entry.trunkR < 0.55 || entry.height * s < minH) return false;
       if (onShoulder(x, z)) return false;
-      this.colliders.push({ x, z, r: entry.trunkR * s * 0.42 });
+      this.colliders.push({ x, z, r: entry.trunkR * s * 0.34 });
       return true;
     };
 
@@ -1236,6 +1442,7 @@ export class PropScatter {
           if (rng.float(0, 1) > f * (1 - 0.45 * r2)) continue;
           if (isBlocked(x, z)) continue;
           if (nearSpawn(x, z)) continue;
+          if (!gapOK(x, z, opt.gap ?? 0)) continue;
 
           const sz = spec.size;
           // Skewed toward small: many young trees, a few full-grown ones. Not
@@ -1254,6 +1461,7 @@ export class PropScatter {
             tx: rng.gauss(0, 0.018), tz: rng.gauss(0, 0.018),
           });
           solidTree(lib.get(`${spec.id}#${v}`), x, z, s);
+          if (opt.gap) gapAdd(x, z);
           placed++;
         }
       }
@@ -1272,7 +1480,7 @@ export class PropScatter {
       density: forestDensity, contrast: F.contrast ?? 1, base: CL.base,
       tries: CL.tries ?? 14000, sep: CL.sep ?? 26,
       radius: CL.radius ?? [12, 84], spacing: F.spacing,
-      maxMembers: CL.maxMembers ?? 190, kMax: CL.kMax,
+      maxMembers: CL.maxMembers ?? 190, kMax: CL.kMax, gap: CL.gap ?? 0,
     });
     // Ground cover gets a HIGH probability floor. The canopy pass wants a
     // "copse, gap, copse" rhythm; ground cover does not — in the reference the
@@ -1287,8 +1495,8 @@ export class PropScatter {
     // 26-member drifts on a 10 m spacing put something in every gap without
     // making any one patch read as a planted bed.
     placeClusters(mix.cover, mix.coverTarget, {
-      density: coverDensity, contrast: 1.0, base: 0.86,
-      tries: 42000, sep: 10, radius: [4, 15], spacing: 3.6, maxMembers: 26,
+      density: coverDensity, contrast: 1.0, base: 0.90,
+      tries: 60000, sep: 8, radius: [4, 14], spacing: 3.2, maxMembers: 30,
     });
 
     // ---- ROAD VERGE DRESSING --------------------------------------------
@@ -1309,6 +1517,15 @@ export class PropScatter {
         if (nearSpawn(p.x, p.z)) continue;
         let t = rng.float(0, 1), id = VERGE.mix[VERGE.mix.length - 1].id;
         for (const m of VERGE.mix) { t -= m.w; if (t <= 0) { id = m.id; break; } }
+        // Verge conifers join the spacing grid too. Without it the roadside
+        // saplings pile into the same 13 m band a thousand at a time and the
+        // fence line grows a continuous green hedge — which is the thing the
+        // reference most obviously does not have: you can see the meadow
+        // THROUGH its verge planting.
+        if (/^fir/.test(id)) {
+          if (!gapOK(p.x, p.z, 5.2)) continue;
+          gapAdd(p.x, p.z);
+        }
         const v = rng.int(0, VARIANTS - 1);
         // Roadside stone is the exception to the verge's uniform size range.
         // In target_01 the blocks sitting a metre off the gravel are car-sized
@@ -1329,8 +1546,9 @@ export class PropScatter {
 
     // ---- HERO TREES ------------------------------------------------------
     // Isolated giants, deliberately placed where the forest is THIN.
+    const HERO_GAP = 13;
     let heroes = 0;
-    for (let i = 0; i < 12000 && heroes < mix.heroes; i++) {
+    for (let i = 0; i < 40000 && heroes < mix.heroes; i++) {
       const x = rng.float(-half, half), z = rng.float(-half, half);
       // "Open" is now judged against the flattened field: with `base` doing most
       // of the work the density term rarely drops below 0.4, and a 0.42 gate
@@ -1340,6 +1558,10 @@ export class PropScatter {
       const e = envAt(x, z);
       if (!e || e.ny < 0.82) continue;
       if (isBlocked(x, z) || nearSpawn(x, z)) continue;
+      // A hero needs its own patch of sky. 15 m of clearance is two full
+      // skirts, which is what makes target_01's big trees read as landmarks
+      // rather than as the tallest member of whatever stand they fell into.
+      if (!gapOK(x, z, HERO_GAP)) continue;
       const id = rng.pick(mix.heroSpecies);
       const spec = mix.canopy.find((s) => s.id === id) ?? mix.canopy[0];
       if (fitness(spec, e) <= 0.15) continue;
@@ -1349,11 +1571,16 @@ export class PropScatter {
       // Heroes shrank with everyone else. Now that a normal fir tops out at
       // ~1.3, a 1.5 hero was twice the height of its neighbours and read as a
       // mistake rather than as a landmark. Half again as tall is enough.
-      const s = rng.float(1.16, 1.40);
+      // ROUND 6: heroes get their size back, because they now have room for
+      // it. target_01 has a handful of conifers half again as tall as their
+      // neighbours standing ALONE in grass — that contrast is what gives the
+      // frame its scale, and at 1.16-1.40 inside a thicket it was invisible.
+      const s = rng.float(1.34, 1.72);
       emit(id, v, { x, y: e.h - 0.15, z, s, r: rng.float(0, Math.PI * 2), tx: 0, tz: 0 });
       // A hero IS the landmark of its patch of meadow, so it stays solid at a
       // lower height gate and a fatter radius than an ordinary tree.
       solidTree(lib.get(`${id}#${v}`), x, z, s * 1.3, 9);
+      gapAdd(x, z);
       heroes++;
     }
 
@@ -1364,6 +1591,7 @@ export class PropScatter {
     // cluster pass can never make them (a copse of one is just a small copse),
     // and the hero pass only makes giants, so they get their own pass. It
     // deliberately prefers the OPEN ground the cluster pass skipped.
+    const SINGLE_GAP = 5.5;
     const singles = Math.round((mix.singles ?? 0) * D);
     let lone = 0;
     for (let i = 0; i < singles * 26 && lone < singles; i++) {
@@ -1372,6 +1600,10 @@ export class PropScatter {
       const e = envAt(x, z);
       if (!e || e.ny < 0.66) continue;
       if (isBlocked(x, z) || nearSpawn(x, z)) continue;
+      // A LONE tree, so the gap it keeps is a generous one — 9.5 m is a whole
+      // tree width of grass on every side, which is what the reference's
+      // between-the-stands conifers actually have.
+      if (!gapOK(x, z, SINGLE_GAP)) continue;
       const spec = pickSpecies(mix.canopy, e, rng);
       if (!spec) continue;
       const sz = spec.size;
@@ -1384,6 +1616,7 @@ export class PropScatter {
         tx: rng.gauss(0, 0.014), tz: rng.gauss(0, 0.014),
       });
       solidTree(lib.get(`${spec.id}#${v}`), x, z, s);
+      gapAdd(x, z);
       lone++;
     }
 
@@ -1445,7 +1678,17 @@ export class PropScatter {
         tx: rng.gauss(0, 0.05), tz: rng.gauss(0, 0.05),
         sy: flat ? rng.float(0.86, 1.18) : rng.float(0.62, 1.00),
       });
-      if (s > 2.4) this.colliders.push({ x, z, r: s * 0.42 });
+      // SHOULDER GRACE FOR STONE, and the reason it exists. Round 6 made the
+      // anchor blocks car-sized-or-bigger, because that is what target_01 has
+      // sitting a metre off its gravel and it is the frame's clearest scale
+      // cue. Shot with `--times`, the drift preset then went from 84 km/h at
+      // t13 to THREE: the car ran wide at 130, met a 4 m block three metres off
+      // the verge and stopped dead. A rock you cannot see coming, in the band
+      // where the game wants you to be, is not a hazard — it is a wall.
+      //
+      // So roadside stone is drawn and not solid, exactly as roadside trees
+      // are, and only genuinely large blocks well off-piste stop the car.
+      if (s > 2.7 && !onShoulder(x, z)) this.colliders.push({ x, z, r: s * 0.36 });
       rocks++;
       return true;
     };
@@ -1484,7 +1727,7 @@ export class PropScatter {
       // One anchor block, then a train of smaller ones around it. The anchor is
       // deliberately car-sized or bigger: a boulder that is not clearly larger
       // than the car gives the frame no sense of scale at all.
-      const big = lerp(1.7, 3.8, Math.pow(rng.float(0, 1), 1.5)) * (1 + rocky * 0.3);
+      const big = lerp(1.9, 4.4, Math.pow(rng.float(0, 1), 1.5)) * (1 + rocky * 0.3);
       if (!dropRock(cx, cz, big, rockId)) continue;
       grouped++;
       // The train runs DOWNHILL from the anchor where the ground has a slope to
