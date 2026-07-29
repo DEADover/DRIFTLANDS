@@ -262,7 +262,9 @@ export const GRADES = {
     // sunlit grass fell from 26 to 18 against the reference's 23. A saturation
     // multiply moves the WEAK channel, so on a green it is a blue knob wearing
     // a different name, which is the same trap the per-channel contrast was.
-    saturation: 1.075,
+    saturation: 1.52, // LEAD round 5: terrain-art muted the albedo and this grade
+    // muted it again; the two compounded to a frame mean of 0.592 against the
+    // reference's 0.756. Swept 1.30/1.45/1.60 -> 0.676/0.729/0.781 and interpolated.
     // Shadow eats red: measured R/G in target_01's shadowed grass is 0.53-0.74
     // against 0.79 in the sun. A tint that only cools cannot do that; this one
     // takes red out as well.
