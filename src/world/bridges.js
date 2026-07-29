@@ -49,10 +49,10 @@ const CLEARANCE = 3.2;   // deck underside above the waterline, metres
 // and thrown into the lake, and the causeway the deck is supposed to hide stuck
 // out either side. The deck is now wider than the road it carries, which is
 // what lets a car following the centreline cross without touching anything.
-const DECK_HW = 10.0;
+const DECK_HW = 8.6;
 const PLANK = 1.15;      // plank pitch along the deck
 const POST_GAP = 3.6;    // railing post pitch
-const PYLON_GAP = 9.5;   // pier pitch
+const PYLON_GAP = 11.0;  // pier pitch
 const MIN_SPAN = 10;     // shorter than this and it is a culvert, not a bridge
 const MAX_SPAN = 400;
 const ABUTMENT = 26;     // how far onto each bank the deck may reach
@@ -93,6 +93,38 @@ class Kit {
       this.pos.push(p[0], p[1], p[2]);
       this.nor.push(nx, ny, nz);
       this.col.push(col.r, col.g, col.b);
+    }
+  }
+
+  /**
+   * A square prism between two world points — a splayed trestle leg.
+   *
+   * box() can only make an upright, so every pile was vertical and tucked under
+   * the deck edge, which from a camera looking 52 degrees down is a pile you
+   * cannot see. A leg that leans outward as it goes down stands clear of the
+   * planks in plan view, which is the whole reason a trestle reads as standing
+   * IN the water rather than as a plank floating on it.
+   */
+  leg(a, b, w, color) {
+    let ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const L = Math.hypot(ux, uy, uz) || 1;
+    ux /= L; uy /= L; uz /= L;
+    // any two vectors perpendicular to the axis
+    let px = -uz, py = 0, pz = ux;
+    const pl = Math.hypot(px, pz) || 1;
+    px /= pl; pz /= pl;
+    const qx = uy * pz - uz * py, qy = uz * px - ux * pz, qz = ux * py - uy * px;
+    const h = w * 0.5;
+    const C = [[px, py, pz], [qx, qy, qz], [-px, -py, -pz], [-qx, -qy, -qz]];
+    for (let i = 0; i < 4; i++) {
+      const c0 = C[i], c1 = C[(i + 1) % 4];
+      this.quad(
+        [a[0] + c0[0] * h, a[1] + c0[1] * h, a[2] + c0[2] * h],
+        [a[0] + c1[0] * h, a[1] + c1[1] * h, a[2] + c1[2] * h],
+        [b[0] + c1[0] * h, b[1] + c1[1] * h, b[2] + c1[2] * h],
+        [b[0] + c0[0] * h, b[1] + c0[1] * h, b[2] + c0[2] * h],
+        color,
+      );
     }
   }
 
@@ -448,7 +480,14 @@ function buildPlannedDecks({ plan, P, terrain, group, decks, colliders }) {
     // of a house. Following the road, smoothed, keeps the crossing a crossing —
     // and the piles still lengthen into the water on their own.
     if (idx.length >= 6) {
-      buildDeck({ idx, P, terrain, deckY: null, floor: c.level + 1.8, group, decks, colliders });
+      // THE DECK STANDS CLEAR OF THE WATER.
+      //
+      // At 1.8 m the planks sat almost on the surface, the fascia was in the
+      // water and there was no room for a trestle to exist, let alone be seen.
+      // The reference's bridge is a deck on legs; three and a half metres is
+      // what it takes for the legs to be a visible part of the object rather
+      // than something under it.
+      buildDeck({ idx, P, terrain, deckY: null, floor: c.level + 3.6, waterline: c.level, group, decks, colliders });
     }
   }
 }
@@ -494,24 +533,51 @@ function buildFoundDecks({ P, terrain, level, group, decks, colliders }) {
   }
 }
 
-function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, group, decks, colliders }) {
+function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null, group, decks, colliders }) {
   const kit = new Kit();
   const hw = DECK_HW;
   const THICK = 0.5;
 
-  // Resample the station list at the plank pitch so the deck reads as timber
-  // rather than as a ribbon.
+  // PLANKS ARE 1.1 m, NOT 4.
+  //
+  // The old resampler could only ever SKIP route stations, never subdivide
+  // them — and roads.sample() quantises to an internal array whose spacing on
+  // alpine is about four metres. So "resample at the plank pitch" quietly
+  // produced four-metre boards: from a hundred and forty metres up the deck
+  // read as a row of brown chevrons, a ramp rather than timber. Walk the
+  // polyline and interpolate instead, so the pitch is the pitch.
   const pts = [];
-  let acc = PLANK;
-  let total = 0;
-  for (let k = 0; k < idx.length; k++) {
-    const p = P[idx[k]];
-    acc += p.ds;
-    if (acc >= PLANK || k === 0 || k === idx.length - 1) {
-      pts.push({ x: p.x, z: p.z, tx: p.tx, tz: p.tz, nx: p.nx, nz: p.nz, yT: p.yT, s: total });
-      acc = 0;
+  {
+    const stations = idx.map((i) => P[i]);
+    const seg = [];
+    let total = 0;
+    for (let k = 0; k < stations.length; k++) {
+      seg.push(total);
+      if (k < stations.length - 1) {
+        total += Math.hypot(
+          stations[k + 1].x - stations[k].x,
+          stations[k + 1].z - stations[k].z,
+        );
+      }
     }
-    total += p.ds;
+    if (total < 1) return;
+    const at = (s) => {
+      let lo = 0, hi = seg.length - 1;
+      while (lo < hi - 1) { const m = (lo + hi) >> 1; if (seg[m] <= s) lo = m; else hi = m; }
+      const a = stations[lo], b = stations[Math.min(lo + 1, stations.length - 1)];
+      const span = (seg[lo + 1] ?? total) - seg[lo];
+      const t = span > 1e-6 ? Math.min(1, Math.max(0, (s - seg[lo]) / span)) : 0;
+      const lerp = (u, v) => u + (v - u) * t;
+      const nx = lerp(a.nx, b.nx), nz = lerp(a.nz, b.nz);
+      const il = 1 / (Math.hypot(nx, nz) || 1);
+      return {
+        x: lerp(a.x, b.x), z: lerp(a.z, b.z),
+        tx: -nz * il, tz: nx * il, nx: nx * il, nz: nz * il,
+        yT: terrain.heightAt(lerp(a.x, b.x), lerp(a.z, b.z)), s,
+      };
+    };
+    const steps = Math.max(4, Math.round(total / PLANK));
+    for (let k = 0; k <= steps; k++) pts.push(at((k / steps) * total));
   }
   if (pts.length < 3) return;
   const span = pts[pts.length - 1].s || 1;
@@ -586,7 +652,7 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, group, decks, co
     // solid turns the approach into a gate the car has to thread.
     for (const s of [1, -1]) {
       const px = p.x + p.nx * hw * s, pz = p.z + p.nz * hw * s;
-      kit.box(0.30, 1.35, 0.30, px, p.y + 0.55, pz, yaw, TIMBER.post);
+      kit.box(0.38, 1.55, 0.38, px, p.y + 0.62, pz, yaw, TIMBER.post);
       // NO COLLIDER ON THE RAILING.
       //
       // game.js pushes the car out of a collider at (r + 1.4) m, so a post at
@@ -609,8 +675,14 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, group, decks, co
       const nx = (p.nx + q.nx) / 2, nz = (p.nz + q.nz) / 2;
       const rx = mx + nx * hw * s, rz = mz + nz * hw * s;
       const my = (p.y + q.y) / 2;
-      kit.box(len, 0.20, 0.14, rx, my + 1.02, rz, yaw, TIMBER.rail);
-      kit.box(len, 0.16, 0.12, rx, my + 0.55, rz, yaw, TIMBER.rail);
+      kit.box(len, 0.22, 0.16, rx, my + 1.12, rz, yaw, TIMBER.rail);
+      kit.box(len, 0.18, 0.13, rx, my + 0.62, rz, yaw, TIMBER.rail);
+      // A kerb board sitting ON the deck just inboard of the posts. From a
+      // camera looking 52 degrees down the railing is nearly edge-on and the
+      // deck's own outline is the only thing separating timber from meadow;
+      // the kerb gives that outline a shadow and a second tone.
+      const kx = mx + nx * (hw - 0.55) * s, kz = mz + nz * (hw - 0.55) * s;
+      kit.box(len, 0.34, 0.55, kx, my + 0.17, kz, yaw, TIMBER.deckDark);
     }
   }
 
@@ -620,10 +692,20 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, group, decks, co
     const p = pts[k];
     sincePy += Math.hypot(p.x - pts[k - 1].x, p.z - pts[k - 1].z);
     if (sincePy < PYLON_GAP) continue;
-    const drop = p.y - THICK - p.yT;
-    if (drop < 1.4) continue;                 // too near the abutment to bother
-    sincePy = 0;
+    // MEASURE THE DROP WHERE THE LEGS ACTUALLY STAND.
+    //
+    // Testing the ground under the CENTRELINE tested the causeway — the one
+    // strip the carve deliberately leaves alone — so `drop` came out at a few
+    // centimetres and every single pier on every bridge was skipped. The legs
+    // stand out at the splay, over dug ground, and that is what has to be
+    // deep enough to be worth a trestle.
     const yaw = Math.atan2(-p.tz, p.tx);
+    const outer = Math.min(
+      terrain.heightAt(p.x + p.nx * (hw + 2.7), p.z + p.nz * (hw + 2.7)),
+      terrain.heightAt(p.x - p.nx * (hw + 2.7), p.z - p.nz * (hw + 2.7)),
+    );
+    if (p.y - THICK - outer < 1.6) continue;  // too near the abutment to bother
+    sincePy = 0;
     // Piles sit just PROUD of the deck edge. Tucked inboard they are invisible
     // from a camera looking 58 degrees down — and a bridge whose supports you
     // cannot see is a plank floating on nothing. Out there they are also over
@@ -631,19 +713,38 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, group, decks, co
     // bed under its own position, not on the centreline: that is what makes the
     // outer legs longer than the inner ones and the trestle read as standing IN
     // the lake.
+    // THE TRESTLE HAS TO SPLAY ABOVE THE WATERLINE.
+    //
+    // Legs that lean out and reach the bed put all their outboard travel where
+    // nobody can see it: the water is 90% opaque past the shelf, so the only
+    // part of a pier that exists on screen is whatever stands between the
+    // planks and the surface. The splay therefore finishes AT the waterline —
+    // outer legs kick out to nearly three metres past the deck edge and are
+    // tied by a beam just above the water — and only then does a plain pile
+    // continue down to the bed, where it costs eight triangles and is never
+    // seen. Measured before this: not one pier was visible in any crossing
+    // frame (shots/i11/crop_deck.png).
+    const wl = waterline != null ? waterline : p.yT;
+    const splay = hw + 2.7;
+    const braceY = Math.min(p.y - THICK - 0.35, wl + 0.55);
     for (const s of [1, -1]) {
-      for (const off of [(hw + 0.34) * s, hw * 0.45 * s]) {
-        const px = p.x + p.nx * off, pz = p.z + p.nz * off;
-        const foot = terrain.heightAt(px, pz) - 1.1;
-        const h = p.y - THICK - foot;
-        if (h < 1.0) continue;
-        const w = Math.abs(off) > hw ? 0.78 : 0.52;
-        kit.box(w, h, w, px, foot + h / 2, pz, yaw, TIMBER.pile);
+      const topOff = (hw - 0.5) * s, footOff = splay * s;
+      const tx = p.x + p.nx * topOff, tz = p.z + p.nz * topOff;
+      const fx = p.x + p.nx * footOff, fz = p.z + p.nz * footOff;
+      kit.leg([tx, p.y - THICK + 0.1, tz], [fx, braceY - 0.2, fz], 0.95, TIMBER.pile);
+      // and on down to the bed, plumb
+      const bed = terrain.heightAt(fx, fz) - 1.0;
+      if (braceY - bed > 0.8) {
+        kit.box(0.85, braceY - bed, 0.85, fx, (braceY + bed) / 2, fz, yaw, TIMBER.pile);
       }
+      // Inner leg: upright, carries the load, mostly hidden — cheap and right.
+      const ix = p.x + p.nx * hw * 0.40 * s, iz = p.z + p.nz * hw * 0.40 * s;
+      const ifoot = terrain.heightAt(ix, iz) - 1.1;
+      const ih = p.y - THICK - ifoot;
+      if (ih > 1.0) kit.box(0.55, ih, 0.55, ix, ifoot + ih / 2, iz, yaw, TIMBER.pile);
     }
-    // cross beam tying the trestle together, hung below the deck so it reads
-    // as a separate member from above.
-    kit.box(0.44, 0.46, (hw + 0.5) * 2.05, p.x, p.y - THICK - 0.30, p.z, yaw, TIMBER.beam);
+    // Cross beam tying the trestle together, at the waterline where it reads.
+    kit.box(0.50, 0.44, splay * 2.05, p.x, braceY, p.z, yaw, TIMBER.beam);
   }
 
   const m = kit.mesh('bridge');

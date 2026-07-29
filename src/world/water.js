@@ -102,7 +102,7 @@ export const LAKE_COLORS = {
     deep: 0x0a4cae,
     mid: 0x1275d6,
     shallow: 0x39a8e4,
-    shore: 0x74d0ee,
+    shore: 0x5fc0e6,
     foam: 0xf2fbff,
   },
 };
@@ -153,9 +153,28 @@ export function lakeColors(biome, palette) {
 // two water files is edited.
 // ===========================================================================
 
+// THE CAMERA IS WORLD-FIXED, AND THAT DECIDES WHERE THE LAKES GO.
+//
+// ChaseCamera keeps yaw at pi/4 and never rotates with the car (followYaw = 0),
+// so the frame is always the same trapezoid of ground on the -X/-Z side of the
+// focus point: about 70 m across at the car, 150 m deep, and NOTHING else. A
+// tarn a hundred metres to the north-east of the road is a tarn that exists,
+// costs its triangles, and is never once on screen.
+//
+// Measured on lake_bridge with the basins offset to alternating sides: open
+// water was inside the frame for 34% of the lap and there was a 1.3 km stretch
+// with none at all. Alternating sides is exactly the wrong rule — it throws
+// half of them behind the lens on purpose. So the side is chosen by which way
+// the camera looks, and the basin is pushed a further sixty metres down-view so
+// it lands in the middle of the frame rather than under the car.
+const VIEW_YAW = Math.PI * 0.25;
+const VIEW_X = -Math.cos(VIEW_YAW);
+const VIEW_Z = -Math.sin(VIEW_YAW);
+
 const CARVE = {
   CELL: 5,            // distance-field resolution, metres
-  STRIDE: 280,        // route metres between tarns
+  STRIDE: 155,        // route metres between tarns
+  VIEW_PUSH: 58,      // metres down-view to slide a scenic basin
   // The guard band is also the BANK. Ramping from untouched ground to eight
   // metres of cut over sixteen metres put a 1:1.4 wall of green right at the
   // verge — from this camera a cliff, and the shore-distance estimate the foam
@@ -166,8 +185,34 @@ const CARVE = {
   // the shore sat twenty-five metres off the verge. Water is a fair hazard, but
   // it should be something you reach by getting it wrong, not by taking a
   // normal line.
-  ROAD_IN: 33,        // no carve within this of the centreline...
-  ROAD_OUT: 88,       // ...full depth beyond this
+  // MEASURED, not guessed. With the shore 55 m off the centreline the
+  // autopilot left the road at 146 km/h on hero_alpine and ploughed 76 m out
+  // into eight metres of water; every frame from t=13 to the end of the tape
+  // was blue. A rally car running wide out of a fast corner uses eighty metres,
+  // so that is where the water starts. It costs nothing in the picture: the
+  // frame reaches a hundred and fifty metres down-view, and it is which
+  // DIRECTION the basin sits in, not how far, that decides whether it is seen.
+  // A LONG GENTLE RAMP, AND A SHORT HARD APRON.
+  //
+  // These two bands do different jobs and used to be one. The DIG ramp decides
+  // where the bed drops away; stretched over seventy metres it puts a genuine
+  // shallow shelf against the bank, so a car that runs wide meets a foot of
+  // water and drives out of it, which is a rally hazard rather than a drowning.
+  // The APRON is the hard guarantee: inside it the ground is filled clear of the
+  // waterline whatever the meadow was doing, so the run-off itself is never
+  // flooded. Measured before the apron existed: the autopilot left hero_alpine
+  // at 146 km/h, ploughed 76 m out into eight metres of water, and every frame
+  // to the end of the tape was blue.
+  // TRIED AND REVERTED: 30/108 with a 60 m apron. It does put more blue in
+  // frame — lake_bridge went from three frames in six to four — but at
+  // hero_alpine t=12 the car ran wide out of the fast left and ended up sitting
+  // in open water surrounded by boulders (shots/i18/hero_alpine_t12.png). A dry
+  // frame is a worse picture; a car swimming is a worse GAME, and this is a
+  // playable demo. The shore stays where the run-off ends.
+  ROAD_IN: 40,        // no carve within this of the centreline...
+  ROAD_OUT: 116,      // ...full depth beyond this
+  APRON_IN: 26,       // ground held clear of the water out to here...
+  APRON_OUT: 76,      // ...tapering to nothing here
   // AT A CROSSING THE WATER GOES UNDER THE ROAD, not up to it.
   //
   // Leaving nine metres of dry causeway either side of the centreline meant the
@@ -178,12 +223,28 @@ const CARVE = {
   // spanning the gap on a knife of ground, and the deck, which is wider than
   // the road and its verge together, covers it completely. What you see is
   // timber over open water with the trestles standing in it.
-  NECK_IN: 6.5,
-  NECK_OUT: 13.0,
-  SPUR_IN: 5,
-  SPUR_OUT: 22,
+  // These have to be INSIDE the deck's half width (8.6 m), or the crossing is
+  // not a crossing. At 6.5/13 the ground stayed dry to thirteen metres, the
+  // deck spanned eight and a half of them, and what the player met was a wide
+  // brown slab lying on a grass shoulder with the lake starting six metres
+  // beyond the railing — visible in shots/i9/crop_deck.png. Cut to inside the
+  // planks and the water runs under the timber, which is the whole picture.
+  NECK_IN: 4.0,
+  NECK_OUT: 7.6,
+  // Spurs need the same courtesy as the main route. At 5/22 a branch road ran
+  // straight into a tarn and stopped at the waterline like a slipway — visible
+  // at the bottom of shots/i18/hero_alpine_t12.png.
+  SPUR_IN: 9,
+  SPUR_OUT: 36,
   FREEBOARD: 3.0,     // road surface above the tarn it runs beside
   NECK_FREEBOARD: 5.5,
+  // How far the run-off beside the carriageway is held above the waterline.
+  // Water is a fair hazard; it should be something you reach by getting it
+  // badly wrong, not by taking a normal line through a fast corner.
+  CAUSEWAY: 1.6,
+  // A crossing is different: the strip of ground between the lobes is meant to
+  // vanish under the planks, so it is held only just clear of the water.
+  NECK_CAUSEWAY: 0.5,
   DEPTH: 8.5,         // bed below the surface at the middle
 };
 
@@ -285,6 +346,7 @@ export function planLakes(ctx, P) {
   };
 
   const rng = new Rng(((seed * 2654435761) ^ 0x7a4e) >>> 0);
+  const stats = { scenicTried: 0, scenicOk: 0, neckTried: 0, neckOk: 0, clashDropped: 0 };
   const lakes = [];
   const crossings = [];
   let ord = 0;
@@ -307,14 +369,42 @@ export function planLakes(ctx, P) {
   // the deck is a straight, dead-flat object, so siting it on a crest or in a
   // bend is what puts the car's line off the planks.
   const crossingCost = (station, reach) => {
-    let lo = Infinity, hi = -Infinity, bend = 0;
-    const a = P[(station - reach + n * 4) % n], b = P[(station + reach) % n];
+    let lo = Infinity, hi = -Infinity;
+    // TOTAL turning, not the angle between the endpoints. An S through the
+    // crossing has its two ends parallel and scored zero by the endpoint test,
+    // which is how a deck came to be laid round a hairpin: the planks followed
+    // the road, the road turned ninety degrees over the span, and what the
+    // player met was a banana of timber he slid off the outside of.
+    let bend = 0;
     for (let k = -reach; k <= reach; k++) {
       const p = P[(station + k + n * 4) % n];
       lo = Math.min(lo, p.yT); hi = Math.max(hi, p.yT);
+      if (k > -reach) {
+        const q = P[(station + k - 1 + n * 4) % n];
+        bend += Math.abs(Math.atan2(p.tx * q.tz - p.tz * q.tx, p.tx * q.tx + p.tz * q.tz));
+      }
     }
-    bend = Math.acos(Math.max(-1, Math.min(1, a.tx * b.tx + a.tz * b.tz)));
-    return (hi - lo) + bend * 55;
+    return (hi - lo) + bend * 150;
+  };
+
+  /**
+   * Lowest carriageway within R metres of (cx, cz), anywhere on the loop.
+   *
+   * A basin laid out in the camera's frame has no "its own stretch of road" —
+   * the loop may come past it twice, or slice a corner off it — so the only
+   * safe reading is the lowest tarmac the basin can actually reach. Sampling
+   * every fourth station is plenty at this radius.
+   */
+  const roadLowNear = (cx, cz, R) => {
+    let lo = Infinity;
+    const R2 = R * R;
+    for (let i = 0; i < n; i += 4) {
+      const p = P[i];
+      const dx = p.x - cx, dz = p.z - cz;
+      if (dx * dx + dz * dz > R2) continue;
+      if (p.yT < lo) lo = p.yT;
+    }
+    return lo;
   };
 
   /** Lowest and highest ground the road reaches over ±reach samples. */
@@ -330,9 +420,9 @@ export function planLakes(ctx, P) {
   };
 
   /** Elliptical basin in the route frame: long across the road, short along it. */
-  const mk = (p, side, Ra, Rc, o, level, neck, station) => ({
-    x: p.x + p.nx * o * side,
-    z: p.z + p.nz * o * side,
+  const mk = (p, side, Ra, Rc, o, level, neck, station, push = 0) => ({
+    x: p.x + p.nx * o * side + VIEW_X * push,
+    z: p.z + p.nz * o * side + VIEW_Z * push,
     tx: p.tx, tz: p.tz, nx: p.nx, nz: p.nz,
     Ra, Rc, o, level, floor: level - CARVE.DEPTH, neck, station,
   });
@@ -355,6 +445,15 @@ export function planLakes(ctx, P) {
       const d = (P[i].x - sp.x) ** 2 + (P[i].z - sp.z) ** 2;
       if (d < bd) { bd = d; bi = i; }
     }
+    // TRIED AND REJECTED: phasing this off the distance the car has covered at
+    // each preset's settle time (201 m on lake_bridge, 285 on hero_alpine, 318
+    // on wildlife — tools/dist.mjs). It does not work, and the reason is worth
+    // recording. The camera is world-fixed: what is AHEAD on the road is only
+    // in frame when the road happens to be heading toward -X/-Z. Sliding the
+    // chain to put a crossing thirty metres in front of the car put it thirty
+    // metres BEHIND the lens on lake_bridge and the frame came back emptier
+    // than before. Three hundred metres is kept because it is the measured best
+    // over the ladder of settle times, not because it suits one shutter.
     s0 = cum[bi] + 300;
   }
 
@@ -370,14 +469,22 @@ export function planLakes(ctx, P) {
       // Slide the crossing along the route to the flattest, straightest spot
       // within half a stride. This is the same fix as making the deck wide: a
       // car following the centreline has to arrive square to the bridge.
+      // Search half a stride either way, not sixty metres: on a loop with two
+      // hairpins a narrow window has no straight in it at all, and the deck
+      // gets built in whichever bend was least bad.
       let station = nominal, best = Infinity;
-      for (let k = -70; k <= 70; k += 5) {
+      for (let k = -150; k <= 150; k += 4) {
         const c = (nominal + k + n * 4) % n;
-        const cost = crossingCost(c, 60);
+        const cost = crossingCost(c, 90);
         if (cost < best) { best = cost; station = c; }
       }
       const p = P[station];
-      const Ra = 34 + rng.float() * 12;         // short along the road: a neck
+      // HOW LONG THE CROSSING IS. At 34-46 m the wet run came out around forty
+      // metres and the deck, once its abutments were added, was a stub you were
+      // over before you noticed it. The reference's bridge is a landmark that
+      // occupies a good part of the frame; a hundred metres of span is what
+      // that takes at this camera height.
+      const Ra = 56 + rng.float() * 18;         // half the crossing's length
       // The waterline has to clear the lowest road the lobes touch, but no
       // lower: a level dragged down by a dip eighty metres away turns a neck
       // into a gorge, and the deck fascia into a ten-metre timber wall.
@@ -388,6 +495,7 @@ export function planLakes(ctx, P) {
       // A neck needs water on BOTH sides or it is not a crossing, just a bay,
       // so it is the WORSE of the two banks that has to be acceptable. Shrink
       // the lobes until both fit rather than giving up on the crossing.
+      stats.neckTried++;
       let made = null;
       for (const Rc of [162, 138, 116, 96, 78]) {
         const a = mk(p, 1, Ra, Rc, Rc * 0.50, level, true, station);
@@ -397,53 +505,70 @@ export function planLakes(ctx, P) {
           break;
         }
       }
-      if (made) { lakes.push(...made); crossings.push({ station, level, Ra }); }
+      if (made) { stats.neckOk++; lakes.push(...made); crossings.push({ station, level, Ra }); }
       continue;
     }
 
-    // A tarn beside the drive. Centred at 0.72 of its own half width, so the
-    // basin reaches ACROSS the centreline and it is the road guard, not the
-    // ellipse, that decides where the shore lands: offsetting the whole ellipse
-    // clear of the road put the waterline eighty metres out, past the frame.
-    let best = null, bestCost = Infinity;
-    for (const ds of [0, -60, 60]) {
+    // A TARN IN THE FRAME, NOT MERELY BESIDE THE ROAD.
+    //
+    // The previous rule offset the basin along the road's own normal, to
+    // alternating sides. On a world-fixed camera that is a coin toss: half of
+    // them land behind the lens, and when the road happens to run parallel to
+    // the view direction the normal points straight out of frame and NONE of it
+    // is seen. So the basin is laid out in the CAMERA's frame instead — centred
+    // down-view of the road, its long axis across the picture — and it is the
+    // road guard, not the ellipse, that keeps the carriageway dry.
+    stats.scenicTried++;
+    const cand = [];
+    // across-view axis, i.e. the screen-horizontal direction on the ground
+    const CX = -VIEW_Z, CZ = VIEW_X;
+    for (const ds of [0, -70, 70]) {
       const st = (nominal + ds + n * 4) % n;
       const p = P[st];
-      for (const side of [(ord & 1) ? 1 : -1, (ord & 1) ? -1 : 1]) {
-        for (const Rc of [150, 126, 104]) {
-          // A tarn's frontage may not be longer than the stretch of road it can
-          // stay level with. Take the frontage the ellipse wants, and shorten
-          // it until the carriageway along it rises and falls by less than a
-          // dozen metres — otherwise the far end of the lake ends up twenty
-          // metres below the road and the bank between them is a quarry face.
-          let Ra = 175 + Rc * 0.6;
-          let lo = 0;
-          for (let t = 0; t < 6; t++) {
-            const [l, h] = roadBand(st, Ra * 0.85);
-            lo = l;
-            if (h - l < 12 || Ra < 100) break;
-            Ra *= 0.78;
-          }
+      for (const D of [150, 122, 96]) {                 // metres down-view                 // metres down-view
+        for (const Rc of [168, 140, 114]) {           // half depth along view
+          const Ra = Rc * 1.5;                        // half width across view
+          const cx = p.x + VIEW_X * D, cz = p.z + VIEW_Z * D;
+          // The waterline has to clear the LOWEST carriageway the basin can
+          // reach, or the far end of the lake ends up over the road.
+          const lo = roadLowNear(cx, cz, Math.max(Ra, Rc) * 1.45);
+          if (!Number.isFinite(lo)) continue;
           const level = lo - CARVE.FREEBOARD;
-          const L = mk(p, side, Ra, Rc, Rc * 0.72, level, false, st);
+          const L = {
+            x: cx, z: cz,
+            tx: CX, tz: CZ, nx: VIEW_X, nz: VIEW_Z,
+            Ra, Rc, o: D, level, floor: level - CARVE.DEPTH,
+            neck: false, station: st,
+          };
           const cost = basinCost(terrain, L, level);
-          // Bigger is better when it costs the same, so bias by basin size.
-          const score = cost - Rc * 0.045 - Ra * 0.02;
-          if (score < bestCost) { bestCost = score; best = L; }
+          // Bigger and nearer the road is better when the digging costs the
+          // same: a tarn you drive past beats a tarn on the horizon.
+          const score = cost - Rc * 0.05 + D * 0.012;
+          cand.push({ L, score });
         }
       }
     }
-    if (best && bestCost < 20) lakes.push(best);
+    // TWO CANDIDATES, NOT ONE.
+    //
+    // The best site for a station is very often the same hollow the previous
+    // station already took, and the overlap pass then throws the newcomer away
+    // — fourteen of forty-four basins on lake_bridge died that way, and they
+    // died in clusters, which is what left a kilometre of the loop with nothing
+    // wet in shot. Offering the runner-up as well, provided it is a genuinely
+    // different hollow, costs nothing when the first one fits and fills the gap
+    // when it does not.
+    cand.sort((a, b) => a.score - b.score);
+    const picked = [];
+    for (const c of cand) {
+      if (c.score >= 34) break;
+      if (picked.some((q) => Math.hypot(q.L.x - c.L.x, q.L.z - c.L.z) < 190)) continue;
+      picked.push(c);
+      if (picked.length === 2) break;
+    }
+    for (const c of picked) { stats.scenicOk++; lakes.push(c.L); }
   }
   if (!lakes.length) return null;
 
-  for (const L of lakes) {
-    L.Rmax = Math.max(L.Ra, L.Rc) * 1.30;
-    L.R2out = L.Rmax * L.Rmax;
-    // axis-aligned half extents, for patch bounding boxes
-    L.hx = Math.abs(L.tx) * L.Ra + Math.abs(L.nx) * L.Rc;
-    L.hz = Math.abs(L.tz) * L.Ra + Math.abs(L.nz) * L.Rc;
-  }
 
   // ONE BODY OF WATER HAS ONE SURFACE — AND A CROSSING OUTRANKS A VIEW.
   //
@@ -460,24 +585,62 @@ export function planLakes(ctx, P) {
   // down to a neighbour ten metres lower turns the neck into a gorge and the
   // deck fascia into a timber wall the height of a house. So the crossing keeps
   // its level and the merely scenic tarn is dropped.
-  const overlap = (A, B) => Math.hypot(A.x - B.x, A.z - B.z) < (A.Rmax + B.Rmax) * 0.82;
-  const kept = [];
-  for (const L of lakes) {
-    let reject = false;
+  //
+  // SHRINK BEFORE YOU DROP. The stations are two hundred metres apart and the
+  // basins are three hundred metres across, so on a route with real relief
+  // almost every neighbouring pair conflicts — and a straight drop threw away
+  // more than half of them, which is how tightening the spacing came out with
+  // LESS water on screen than before. A tarn two thirds the size still fills
+  // the frame; no tarn at all is a kilometre of dry driving.
+  const setRadii = (L) => {
+    L.Rmax = Math.max(L.Ra, L.Rc) * 1.30;
+    L.R2out = L.Rmax * L.Rmax;
+    L.hx = Math.abs(L.tx) * L.Ra + Math.abs(L.nx) * L.Rc;
+    L.hz = Math.abs(L.tz) * L.Ra + Math.abs(L.nz) * L.Rc;
+  };
+  for (const L of lakes) setRadii(L);
+  // WHAT COUNTS AS TOUCHING.
+  //
+  // Rmax is 1.3x the LONGER semi-axis, so at 0.82 two basins were declared in
+  // conflict five hundred metres apart — further than either of them holds any
+  // water. Twenty-six of sixty-four candidates on lake_bridge were thrown away
+  // by that test, in clusters, which is what left kilometre-long stretches of
+  // the loop with nothing wet in shot. Water only reaches about 85% of the
+  // ellipse, so this is the distance at which the WET parts can actually meet.
+  const overlap = (A, B) => Math.hypot(A.x - B.x, A.z - B.z) < (A.Rmax + B.Rmax) * 0.58;
+  /** Does L clash with anything already kept? Returns 'ok' | 'shrink'. */
+  const clash = (L, kept) => {
     for (const K of kept) {
       if (K.dead || !overlap(L, K)) continue;
-      if (Math.abs(L.level - K.level) <= 3.5) {
+      // Merging pulls both to the LOWER surface, which only ever gives the road
+      // beside them more freeboard, so it is safe to be generous — and a pair of
+      // merged basins reads as one big irregular lake instead of two discs. Only
+      // a crossing is fussy: dragging its lobes down turns the neck into a gorge
+      // and the deck fascia into a timber wall.
+      const tol = (L.neck || K.neck) ? 3.5 : 7.0;
+      if (Math.abs(L.level - K.level) <= tol) {
         const lo = Math.min(L.level, K.level);
         L.level = lo; K.level = lo;
       } else if (K.neck) {
-        reject = true; break;
+        return 'shrink';
       } else if (L.neck) {
         K.dead = true;
       } else {
-        reject = true; break;
+        return 'shrink';
       }
     }
-    if (!reject) kept.push(L);
+    return 'ok';
+  };
+  const kept = [];
+  for (const L of lakes) {
+    let ok = false;
+    for (let t = 0; t < 4; t++) {
+      if (clash(L, kept) === 'ok') { ok = true; break; }
+      if (L.neck || L.Rc < 55) break;      // a neck may not be shrunk here: the
+      L.Ra *= 0.74; L.Rc *= 0.74;          // deck is already sized to its lobes
+      setRadii(L);
+    }
+    if (ok) kept.push(L); else stats.clashDropped++;
   }
   const live = kept.filter((L) => !L.dead);
   lakes.length = 0;
@@ -503,6 +666,22 @@ export function planLakes(ctx, P) {
   const raw = terrain.heightAt.bind(terrain);
   const carved = (x, z) => {
     let h = raw(x, z);
+    // THE CAUSEWAY IS BUILT, NOT MERELY SPARED.
+    //
+    // The guard band says "do not DIG here". That is not the same as "this is
+    // dry": where the meadow beside the road happens to sit below the waterline
+    // already, sparing it just leaves it flooded, and the first thing that
+    // happens is the car runs wide out of a fast corner into ten metres of
+    // water and never comes out. Measured on hero_alpine before this: the car
+    // left the road at t=12 and every frame from t=13 to the end of the tape
+    // was a hundred per cent blue.
+    //
+    // So inside the guard the ground is FILLED to a metre and a half of
+    // freeboard, tapering to nothing by the time the guard opens. The level was
+    // chosen three metres under the lowest carriageway the basin can reach, so
+    // this fill is always below the road surface and never buries it.
+    let fillTo = -Infinity, fillK = 0;
+    let neckTo = -Infinity, neckK = 0, underNeck = false;
     for (let i = 0; i < lakes.length; i++) {
       const L = lakes[i];
       const dx = x - L.x, dz = z - L.z;
@@ -511,7 +690,12 @@ export function planLakes(ctx, P) {
       const ua = (dx * L.tx + dz * L.tz) / L.Ra;
       const uc = (dx * L.nx + dz * L.nz) / L.Rc;
       const u = Math.hypot(ua, uc);
-      const dig = sstep(0.98, 0.36, u);
+      // A WIDE FLOOR, NOT A CONE. Ramping the cut from nothing at the rim to
+      // full depth only at a third of the radius meant the water reached about
+      // 80% of the ellipse and was under a metre over most of that, so a basin
+      // three hundred metres across held a puddle sixty metres wide. The bowl
+      // now has a real floor and the ramp is the bank.
+      const dig = sstep(1.02, 0.62, u);
       // A ring that guarantees the shoreline CLOSES inside the disc. The water
       // lattice is clipped to the disc, so if the natural ground outside it is
       // below the waterline the lake ends in a wall of blue. This only ever
@@ -522,8 +706,34 @@ export function planLakes(ctx, P) {
       // cannot resolve, and everything placed analytically on top of it — the
       // shore boulders especially — ends up hanging in the air beside it.
       const berm = sstep(0.58, 0.88, u) * (1 - sstep(0.98, 1.38, u));
-      if (dig <= 0 && berm <= 0) continue;
       const g = guardOf(L, x, z);
+      // The causeway fill. Runs wherever the basin reaches, INCLUDING the
+      // stretch the guard protects from digging — that is the whole point.
+      if (u < 1.25) {
+        // A CROSSING HAS ITS OWN, MUCH NARROWER APRON. Running the scenic
+        // fifty-metre apron through a neck raises the ground either side of the
+        // causeway clear of the water, which is precisely the condition
+        // bridges.js tests for when it decides there is anything to bridge —
+        // and every deck in the world silently stopped being built.
+        const ain = L.neck ? CARVE.NECK_IN : CARVE.APRON_IN;
+        const aout = L.neck ? CARVE.NECK_OUT : CARVE.APRON_OUT;
+        // The apron follows the spurs too, or a branch road walks into the lake.
+        const k = Math.max(
+          1 - sstep(ain, aout, dRoute(x, z)),
+          L.neck ? 0 : 1 - sstep(CARVE.SPUR_IN, CARVE.SPUR_OUT, dSpur(x, z)),
+        ) * (1 - sstep(0.98, 1.25, u));
+        if (L.neck) {
+          if (u < 1.12) underNeck = true;
+          const need = L.level + CARVE.NECK_CAUSEWAY;
+          if (need > neckTo) neckTo = need;
+          if (k > neckK) neckK = k;
+        } else {
+          const need = L.level + CARVE.CAUSEWAY;
+          if (need > fillTo) fillTo = need;
+          if (k > fillK) fillK = k;
+        }
+      }
+      if (dig <= 0 && berm <= 0) continue;
       if (g <= 0) continue;
       if (dig > 0) {
         const k = dig * g;
@@ -540,11 +750,26 @@ export function planLakes(ctx, P) {
         if (h < need) h += (need - h) * berm * g;
       }
     }
+    // A CROSSING OVERRULES ITS NEIGHBOURS' APRONS.
+    //
+    // The apron is a fifty-metre band of filled ground either side of the road,
+    // and the thing bridges.js tests for before it lays a deck is open water
+    // thirteen metres off the centreline. A scenic tarn whose apron happens to
+    // reach across a neck therefore quietly fills in the very water the bridge
+    // is meant to span — measured: three of five planned crossings on
+    // lake_bridge came back +1.6 m dry at exactly the apron's height, and no
+    // deck was built at any of them. Inside a neck, only the neck's own narrow
+    // apron counts.
+    if (underNeck) {
+      if (neckK > 0 && h < neckTo) h += (neckTo - h) * neckK;
+    } else if (fillK > 0 && h < fillTo) {
+      h += (fillTo - h) * fillK;
+    }
     return h;
   };
 
   return {
-    lakes, crossings, raw, heightAt: carved, dRoute, dSpur,
+    lakes, crossings, raw, stats, heightAt: carved, dRoute, dSpur,
     lakeAt: (x, z) => nearestLake(lakes, x, z),
   };
 }
@@ -665,7 +890,7 @@ export function carveLakes(ctx, plan) {
       // and the difference shows up as a wide pale beach of wetted gravel with
       // no water on it — which is what the whole left third of the hero frame
       // had become.
-      if (plan.dRoute(mx, mz) < (L.neck ? 10.3 : 18.0)) continue;
+      if (plan.dRoute(mx, mz) < (L.neck ? 6.4 : 18.0)) continue;
       // gravel right at the waterline, darker silt as it drops away
       const k = Math.min(1, sstep(1.2, 2.6, d) * 0.85);
       c.setRGB(col[t], col[t + 1], col[t + 2]);
@@ -677,6 +902,26 @@ export function carveLakes(ctx, plan) {
 
   mesh.geometry.computeVertexNormals();
   mesh.geometry.computeBoundingSphere();
+}
+
+/**
+ * Which basin owns this square metre — the one whose normalised elliptical
+ * radius is smallest. Used to split the lattice between touching basins so no
+ * two patches overlap; `nearestLake` below answers a different question (am I
+ * inside any basin at all) and both are needed.
+ */
+function nearestByRadius(lakes, x, z) {
+  let best = null, bu = Infinity;
+  for (let i = 0; i < lakes.length; i++) {
+    const L = lakes[i];
+    const dx = x - L.x, dz = z - L.z;
+    if (dx * dx + dz * dz > L.R2out * 2.2) continue;
+    const ua = (dx * L.tx + dz * L.tz) / L.Ra;
+    const uc = (dx * L.nx + dz * L.nz) / L.Rc;
+    const u = Math.hypot(ua, uc);
+    if (u < bu) { bu = u; best = L; }
+  }
+  return best;
 }
 
 function nearestLake(lakes, x, z) {
@@ -740,11 +985,24 @@ const FRAG = /* glsl */ `
 
   void main() {
     float d = max(vDepth, 0.0);
-    // Horizontal metres to the waterline. This, not depth, is what sets the
-    // width of the shelf and the foam: on a bed sloping at 1:15 a 70 cm depth
-    // band is ten metres wide on screen, which is why keying the foam off
-    // depth alone painted the whole lake white.
-    float s = max(vShore, 0.0);
+    // SIGNED horizontal metres to the waterline: positive out in the water,
+    // negative up the bank. This, not depth, is what sets the width of the
+    // shelf and the foam — on a bed sloping at 1:15 a 70 cm depth band is ten
+    // metres wide on screen, which is why keying either off depth alone painted
+    // the whole lake white.
+    float sg = vShore;
+    // THE WATERLINE IS DRAWN, NOT SAMPLED.
+    //
+    // Both the depth field and the terrain mesh are grids — 4 m and 8.7 m — so
+    // the line where they cross is a staircase, and it is a staircase in the
+    // most conspicuous colour on screen because the foam sits on it. Perturbing
+    // the shore distance by a couple of metres of noise costs one texture-free
+    // fetch and turns every one of those steps into a bay or a spit. Two
+    // octaves: the coarse one makes the inlets, the fine one chews the lip.
+    sg += (noise(vWorld * 0.011) - 0.5) * 9.0
+        + (noise(vWorld * 0.042) - 0.5) * 3.4
+        + (noise(vWorld * 0.155) - 0.5) * 1.3;
+    float s = max(sg, 0.0);
 
     // --- shelf -> shallow -> mid -> deep ------------------------------------
     // Alpine tarns are 2-6 m deep, so a ramp authored for a nine-metre lake
@@ -752,8 +1010,8 @@ const FRAG = /* glsl */ `
     // cyan. The shelf is a couple of metres wide and then it is straight into
     // cobalt, which is what the reference does.
     vec3 col = uShore;
-    col = mix(col, uShallow, smoothstep(0.2, 2.2, s));
-    col = mix(col, uMid,     smoothstep(2.0, 7.5, s));
+    col = mix(col, uShallow, smoothstep(0.3, 3.0, s));
+    col = mix(col, uMid,     smoothstep(2.5, 9.0, s));
     col = mix(col, uDeep,    smoothstep(1.6, 4.8, d));
 
     // Broad ripple bands. Posterised, because everything else in this world is
@@ -772,21 +1030,43 @@ const FRAG = /* glsl */ `
     // tell that the water is a decal rather than a body of water.
     float chew = noise(vWorld * 0.11 + vec2(uTime * 0.05, uTime * 0.035));
     float chew2 = noise(vWorld * 0.38 - vec2(0.0, uTime * 0.14));
-    float edge = 0.12 + chew * 0.40 + chew2 * 0.24;
-    float lip  = 1.0 - smoothstep(edge * 0.15, edge, s);
-    float wash = (1.0 - smoothstep(edge, edge + 1.1, s)) * (0.04 + 0.12 * chew2);
-    float gate = smoothstep(0.22, 0.62, chew * 0.75 + chew2 * 0.45);
+    float edge = 0.30 + chew * 0.80 + chew2 * 0.35;
+    // Dies off on BOTH sides of the waterline. Before it was keyed on an
+    // unsigned distance, so every vertex the lattice carried past the shore
+    // read as "zero metres from the water" and got the full lip — which on a
+    // shelving bank is a twenty-metre snowfield, not a wave.
+    float lip  = (1.0 - smoothstep(0.0, edge, s)) * smoothstep(-1.1, -0.1, sg);
+    float wash = (1.0 - smoothstep(edge, edge + 1.3, s)) * (0.03 + 0.11 * chew2)
+               * step(0.0, sg);
+    // ABSENT along stretches of shore. An unbroken white piping all the way
+    // round the lake is the single loudest tell that the water is a decal; the
+    // reference only really foams where the water meets rock.
+    float gate = smoothstep(0.40, 0.88, chew * 0.75 + chew2 * 0.45);
     float foam = clamp(lip + wash, 0.0, 1.0) * gate;
-    col = mix(col, uFoam, foam * 0.82);
+    col = mix(col, uFoam, foam * 0.66);
 
     // --- sun glitter --------------------------------------------------------
-    float glint = pow(max(0.0, noise(p * 7.0 + uTime * 0.22)), 16.0);
-    col += uSun * glint * 1.1 * smoothstep(0.6, 3.0, d);
+    // Sparse and restrained. At 1.1x this fed the bloom pass two soft white
+    // blobs the size of a car in every crossing frame, which read as smudges on
+    // the lens rather than as sun on water.
+    float glint = pow(max(0.0, noise(p * 7.0 + uTime * 0.22)), 26.0);
+    col += uSun * glint * 0.45 * smoothstep(0.6, 3.0, d);
 
     // Near-opaque past the shelf; glassy right at the edge so the bed and any
     // rock standing in the shallows read through.
-    float alpha = mix(0.86, 0.97, smoothstep(0.4, 2.6, d));
+    float alpha = mix(0.80, 0.97, smoothstep(0.4, 2.6, d));
     alpha = max(alpha, foam * 0.95);
+    // THE LATTICE CLIPS ITSELF.
+    //
+    // It carries a ring of dry vertices past the waterline on purpose, so the
+    // shoreline is cut by the opaque terrain rather than by a mesh boundary.
+    // But the terrain is rendered at 8-9 m facets and the depth field is
+    // analytic, so on any gentle bank the mesh sits up to a metre below what
+    // the depth field thinks, and the surface pokes out over dry ground. Fading
+    // the ring out over the last metre and a half costs nothing where the
+    // terrain does its job and saves the picture where it does not.
+    alpha *= smoothstep(-1.5, 0.05, sg);
+    if (alpha < 0.02) discard;
 
     // Match the scene's exponential fog so the lake recedes correctly.
     float dist = length(vPos - cameraPosition);
@@ -910,7 +1190,19 @@ export class Water {
       // is 10 m half width). Blue immediately either side of the timber is the
       // whole difference between a bridge and a brown slab: hold the water back
       // fifteen metres and the eye reads a ramp lying on grass.
-      const keep = L.neck ? 10.3 : 18.0;
+      const keep = L.neck ? 6.4 : 18.0;
+      // ONE CELL, ONE PATCH.
+      //
+      // Every basin used to emit its own lattice clipped to its own ellipse, so
+      // where two touched, patch A's ring of dry vertices lay across patch B's
+      // open water — and since the shader draws foam wherever the shore
+      // distance is near zero, the seam came out as a dead straight white
+      // streak across the lake, twice as loud as any real shoreline. The cells
+      // are therefore split between the basins by nearest normalised radius, so
+      // no two patches ever cover the same ground, and the DEPTH field is left
+      // unclipped so the distance transform still measures to the real
+      // waterline rather than to a patch boundary.
+      const own = new Uint8Array(M * M);
       let wet = 0;
       for (let j = 0; j < M; j++) {
         const z = z0 + j * cell;
@@ -921,7 +1213,7 @@ export class Water {
           const ua = (dx * L.tx + dz * L.tz) / L.Ra;
           const uc = (dx * L.nx + dz * L.nz) / L.Rc;
           const u = Math.hypot(ua, uc);
-          if (u > 1) d = Math.min(d, -3 - (u - 1) * L.Rc);       // clip to the basin
+          if (u > 1.30) d = Math.min(d, -3 - (u - 1.30) * L.Rc);
           // Never over the road — but RAMPED, not cut. A hard clip put the
           // waterline exactly on a 4 m lattice edge and the shore came out as a
           // sawtooth of white foam running parallel to the carriageway; the
@@ -929,7 +1221,10 @@ export class Water {
           const dr = plan.dRoute(x, z);
           if (dr < keep) d = Math.min(d, (dr - keep) * 0.55);
           depth[j * M + i] = d;
-          if (d > 0) wet++;
+          if (u <= 1.18 && nearestByRadius(plan.lakes, x, z) === L) {
+            own[j * M + i] = 1;
+            if (d > 0) wet++;
+          }
         }
       }
       if (wet < 6) continue;
@@ -945,10 +1240,28 @@ export class Water {
       // So it is a real distance transform now — seeded on the dry cells, run
       // over the patch — with the gradient estimate kept only for the first
       // cell, where it is both accurate and finer than the 4 m grid.
+      // SIGNED, both ways. Positive inside the water, NEGATIVE out on the bank.
+      //
+      // Only seeding the wet side was the single worst thing in the frame. The
+      // lattice deliberately carries a 2.5 m ring of dry vertices past the
+      // waterline so the terrain does the clipping, and the terrain mesh has
+      // 8-9 m facets that cut the corner off every bank shoulder — so on a
+      // gentle shelf twenty metres of that ring showed through, all of it with
+      // shore distance pinned at zero, and the shader painted every pixel of it
+      // pure foam. The lake came out ringed by a forty-metre snowfield.
+      // With the distance signed, that band is simply OUTSIDE the water: the
+      // shader fades it out instead of lighting it up, and the lattice clips
+      // itself rather than trusting a mesh that is a metre out.
       const E = M - 1;
-      const dist = new Float32Array(M * M);
-      for (let k = 0; k < dist.length; k++) dist[k] = depth[k] > 0 ? 1e5 : 0;
-      chamfer(dist, M, cell);
+      const dW = new Float32Array(M * M);
+      const dD = new Float32Array(M * M);
+      for (let k = 0; k < dW.length; k++) {
+        const wetk = depth[k] > 0;
+        dW[k] = wetk ? 1e5 : 0;
+        dD[k] = wetk ? 0 : 1e5;
+      }
+      chamfer(dW, M, cell);
+      chamfer(dD, M, cell);
       const shore = new Float32Array(M * M);
       for (let j = 0; j < M; j++) {
         for (let i = 0; i < M; i++) {
@@ -958,13 +1271,19 @@ export class Water {
           const dz = (depth[k + (j < E ? M : 0)] - depth[k - (j > 0 ? M : 0)]) / (cell * ((j > 0 && j < E) ? 2 : 1));
           const g = Math.hypot(dx, dz);
           const fine = g > 1e-4 ? d / g : d * 40;
-          shore[k] = d <= 0 ? fine : (dist[k] >= cell ? dist[k] : Math.min(fine, cell));
+          // The chamfer is quantised to the 4 m cell, far too coarse for a
+          // half-metre foam lip; the depth/slope estimate is continuous and is
+          // accurate precisely in the first cell, where it matters. Use it
+          // there and the transform beyond.
+          shore[k] = d > 0
+            ? (dW[k] >= cell ? dW[k] : Math.min(fine, cell))
+            : (dD[k] >= cell ? -dD[k] : Math.max(fine, -cell));
         }
       }
 
       const F = {
         depth, shore, VN: M, N: E, cell, x0, z0, level: L.level,
-        keepOut: (x, z) => plan.dRoute(x, z) < 15,
+        keepOut: (x, z) => plan.dRoute(x, z) < (L.neck ? 13 : 15),
       };
       this._scatterRocksInto(acc, T, F);
       this._scatterPads(pads, F);
@@ -977,8 +1296,10 @@ export class Water {
       };
       for (let j = 0; j < E; j++) {
         for (let i = 0; i < E; i++) {
-          const a = depth[j * M + i], b = depth[j * M + i + 1];
-          const c = depth[(j + 1) * M + i], e = depth[(j + 1) * M + i + 1];
+          const k = j * M + i;
+          if (!(own[k] | own[k + 1] | own[k + M] | own[k + M + 1])) continue;
+          const a = depth[k], b = depth[k + 1];
+          const c = depth[k + M], e = depth[k + M + 1];
           if (a < KEEP && b < KEEP && c < KEEP && e < KEEP) continue;
           push(i, j); push(i, j + 1); push(i + 1, j);
           push(i + 1, j); push(i, j + 1); push(i + 1, j + 1);
@@ -1115,7 +1436,10 @@ export class Water {
       for (let i = 2; i < N - 1; i++) {
         const d = depth[j * VN + i];
         if (d < 0.45 || d > 2.1) continue;
-        if (rng.float() > 0.030) continue;
+        // Rafts, never a sprinkle — and only in the corner of a bay, so a wide
+        // shelf does not come out carpeted in leaves.
+        if (F.shore && F.shore[j * VN + i] > 15) continue;
+        if (rng.float() > 0.009) continue;
         const cx = x0 + i * cell, cz = z0 + j * cell;
         const count = 4 + rng.int(0, 7);
         for (let k = 0; k < count; k++) {
@@ -1127,7 +1451,7 @@ export class Water {
           if (ii < 0 || jj < 0 || ii >= VN || jj >= VN) continue;
           const dd = depth[jj * VN + ii];
           if (dd < 0.30 || dd > 2.6) continue;
-          const R = 0.85 + rng.float() * 0.85;
+          const R = 0.70 + rng.float() * 0.60;
           const rot = rng.float() * Math.PI * 2;
           c.set(green[rng.int(0, 3)]);
           // A pentagon with one notch: a circle at this size is five pixels of
@@ -1172,8 +1496,13 @@ export class Water {
     for (let v = 0; v < 5; v++) {
       const g = new THREE.IcosahedronGeometry(1, 0).toNonIndexed();
       const a = g.attributes.position.array;
-      // Squash and dent it: perfect icosahedra read as dice, not granite.
-      const sy = 0.42 + rng.float() * 0.42;
+      // Squash and dent it: perfect icosahedra read as dice, not granite. But
+      // NOT flat — squashing to 0.42 and then letting place() scale y by
+      // another 0.7 gave boulders three tenths as tall as they were wide, and
+      // at this camera angle a stone that flat is a scrap of paper lying on the
+      // grass, not a rock. The whole world has a problem with those this round;
+      // the lake is not going to add to it.
+      const sy = 0.62 + rng.float() * 0.38;
       for (let i = 0; i < a.length; i += 3) {
         a[i] *= 0.8 + rng.float() * 0.5;
         a[i + 1] *= sy;
@@ -1217,7 +1546,7 @@ export class Water {
       const yaw = rng.float() * Math.PI * 2;
       const m = new THREE.Matrix4()
         .makeRotationY(yaw)
-        .premultiply(new THREE.Matrix4().makeScale(r, r * (0.7 + rng.float() * 0.6), r))
+        .premultiply(new THREE.Matrix4().makeScale(r, r * (0.85 + rng.float() * 0.5), r))
         .setPosition(x, y, z);
       const nm = new THREE.Matrix3().setFromMatrix4(m).invert().transpose();
       const p = g.attributes.position.array;
@@ -1245,14 +1574,26 @@ export class Water {
         // nobody will ever see — and its foam collar would be a white ring
         // floating on empty blue. Keep the population in the readable band.
         if (d < -0.5 || d > 3.6) continue;
-        const emergent = d < 2.0;
-        if (rng.float() > (emergent ? 0.055 : 0.030)) continue;
+        // AND KEEP IT AT THE SHORE. These rates were tuned when the bed fell
+        // away over twenty metres; the bank is now a seventy-metre shelf, so
+        // the same probability per cell covered an acre of shallows and the
+        // lake came back looking like a scree slope with water in it
+        // (shots/ladder_hero/hero_alpine_t12.png). Rocks belong where the water
+        // meets something, not spread evenly over the shelf.
+        const sh = shore[j * VN + i];
+        if (sh > 20) continue;
+        const near = 1 - sh / 20;
+        // Emergent rocks only in genuinely shallow water. Deeper than that the
+        // surface is 97% opaque, so all you see is the cap and the boulder
+        // reads as a stone floating in mid-lake rather than standing in it.
+        const emergent = d < 1.6;
+        if (rng.float() > (emergent ? 0.018 : 0.007) * (0.3 + near * near)) continue;
         const x = x0 + i * cell + (rng.float() - 0.5) * cell;
         const z = z0 + j * cell + (rng.float() - 0.5) * cell;
         // Not under the bridge deck, and not on the knife of ground the road
         // crosses a neck on: a boulder there is a boulder inside the timber.
         if (F.keepOut && F.keepOut(x, z)) continue;
-        const r = emergent ? 1.0 + rng.float() * 2.1 : 1.2 + rng.float() * 1.8;
+        const r = emergent ? 1.0 + rng.float() * 1.9 : 1.0 + rng.float() * 1.3;
         // Centre height above the bed. Emergent rocks break the surface;
         // submerged ones stay a comfortable margin under it.
         const rise = emergent ? r * 0.50 : Math.min(r * 0.38, Math.max(0.2, d - 0.9));
@@ -1290,7 +1631,11 @@ export class Water {
         for (let i = i0; i <= i1; i++) {
           const k = j * VN + i;
           const dx = (x0 + i * cell) - st.x, dz = (z0 + j * cell) - st.z;
-          const e = Math.hypot(dx, dz) - st.r;
+          // Never below zero: the shore attribute is signed now, and a negative
+          // value means "outside the water", which the shader fades to nothing.
+          // Stamping the rock's own footprint negative would punch a hole in the
+          // lake around every boulder.
+          const e = Math.max(0.05, Math.hypot(dx, dz) - st.r);
           if (e < shore[k]) shore[k] = e;
         }
       }
