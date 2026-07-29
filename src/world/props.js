@@ -173,7 +173,19 @@ function fir(rng, K, o = {}) {
      * bottom HALF, not the bottom eighth: a linear ramp put the midpoint colour
      * at mid-height and the skirt never got dark.
      */
-    const body = K.leafShade.clone().lerp(K.leafRamp[NR - 2], 0.10 + 0.90 * t * t);
+    // The body climbs to the SECOND rung, not the third. A high albedo brightens
+    // a tree's shadow side as well as its lit side — the ramp cannot know where
+    // the sun is, because instances are randomly yawed — so pushing the lit
+    // anchor up cost the frame its mid-dark population: luma bucket 1 fell from
+    // 14.9% to 10.6% against the reference's 15.0%. Taking the body ladder a rung
+    // down puts it back without touching the highlight.
+    const body = K.leafShade.clone()
+      // Floor at 0.42, not 0.20. Masking the frame at L < 0.10 showed 3.4% of it
+      // (against the reference's 1.0%) is the anti-sun flank of the LOWEST tiers,
+      // whose body was effectively `leafShade` itself — and a shade albedo lit by
+      // ambient alone falls off the bottom of the scale. The gradient still runs
+      // dark-to-light; it just no longer starts at the shadow anchor.
+      .lerp(K.leafRamp[Math.max(0, NR - 3)], 0.42 + 0.58 * t * t);
     const litc = K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.25 + 0.75 * t);
     b.push(0, y, 0, rng.float(0, Math.PI * 2));
     b.rawLit(
@@ -211,7 +223,7 @@ function fir(rng, K, o = {}) {
        * whole 0.0-0.3 population — 24% of the area — to the shadow rung, which is
        * where the reference's missing #172e17 lives.
        */
-      { t0: 0.35, t1: 1.00, low: K.leafShade, l0: 0.0 },
+      { t0: 0.46, t1: 1.00, low: K.leafShade, l0: 0.04 },
     );
     b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.
@@ -224,9 +236,13 @@ function fir(rng, K, o = {}) {
   // here — its crown facets would go steep and dark — so this stays a star cone
   // in the lit rung, which is what the reference's tip is.
   b.push(0, y - step[tiers - 1] * 0.55, 0, rng.float(0, Math.PI * 2));
+  // ...and it must NOT take the full lit rung. A leader is a cone, so all of its
+  // facets sit in one narrow normal.y band; handed `leafSun` at t1 0.62 every
+  // tree in the frame grew a pale paper dart on top of a dark body, which is a
+  // worse read than the blunt stack it replaced.
   b.rawLit(firTier(rad[tiers - 1] * 0.86, leaderH, 6, leaderH * 0.20, 0.60, rng),
-    K.leafRamp[NR - 2], K.leafSun,
-    { t0: 0.22, t1: 0.62, low: K.leafRamp[0], l0: -0.10 });
+    K.leafRamp[NR - 2], K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.45),
+    { t0: 0.30, t1: 0.90, low: K.leafRamp[0], l0: -0.10 });
   b.pop();
   return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y - step[tiers - 1] * 0.55 + leaderH };
 }
@@ -1570,7 +1586,7 @@ export class PropScatter {
     const leafSun = (() => {
       const c = levelled(fol[(vi + 1) % n]).clone();
       if (!alp) return shade(c, 0.16, -0.06);
-      c.multiplyScalar(2.75 * (1 + j * 1.6));
+      c.multiplyScalar(2.45 * (1 + j * 1.6));
       c.r = c.g * 0.80;
       c.b = c.g * 0.16;
       return c;
@@ -1587,9 +1603,35 @@ export class PropScatter {
     const leafShade = (() => {
       const c = levelled(fol[vi % n]).clone();
       if (!alp) return shade(c, -0.05, 0.04);
-      c.multiplyScalar(0.50);
-      c.r = c.g * 0.44;
-      c.b = c.g * 0.36;
+      // 0.50 crushed: shot, it put 2.1% of the frame in the BOTTOM luma bucket
+      // against the reference's 0.9% and printed #171717 as a dominant colour.
+      // The reference's own darkest in-tree decile is rgb(9,36,21) — luma 0.12,
+      // i.e. the TOP of bucket 1, which is where 15% of its pixels live and only
+      // 10.6% of ours did. Lighter shade colour, wider shade window (t0), so the
+      // deep facets land in bucket 1 instead of falling out of the bottom.
+      /**
+       * ...and it is a BLUE-green, which is what the client's note actually says
+       * ("a SHADED side (dark blue-green)") and what masking both frames at
+       * L < 0.10 confirms. Those pixels are entirely the shadow flanks of the
+       * conifers, and they measure
+       *
+       *     ours    3.43% of frame   rgb(12,23,12)   B/G 0.52
+       *     target  0.99% of frame   rgb( 9,27,21)   B/G 0.78
+       *
+       * — ours a third darker in green with almost no blue in it, which is why
+       * they fall out of the bottom of the histogram instead of sitting in luma
+       * bucket 1 where the reference keeps them. The ambient multiplies B/G by
+       * about 1.37 and R/G by 1.13 on the way to the screen (measured on the same
+       * two masks), so the albedo is pre-divided by those: 0.57 blue and 0.30 red
+       * against green lands on the reference's numbers.
+       *
+       * This is NOT the round-6 "blue shadow" failure, which had red near zero and
+       * blue AHEAD of green — a spruce lit by nothing but sky. Here red and blue
+       * are both a fraction of green and green is the largest channel.
+       */
+      c.multiplyScalar(0.75);
+      c.r = c.g * 0.30;
+      c.b = c.g * 0.57;
       return c;
     })();
 
