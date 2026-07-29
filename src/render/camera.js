@@ -55,11 +55,17 @@ export class ChaseCamera {
     this.yaw = Math.PI * 0.25;    // world-fixed heading (art of rally does NOT spin with the car)
     this.followYaw = 0.0;         // 0 = fully world-fixed, 1 = fully car-relative
     this.lookAhead = 0.62;        // seconds of velocity to lead the car by
-    this.leadSmooth = 2.2;        // how lazily the lead itself responds
-    this.stiffness = 3.4;         // spring omega for the focus point (low = poster-like)
+    this.leadSmooth = 1.5;        // how lazily the lead itself responds
+    this.stiffness = 2.3;         // spring omega for the focus point (low = poster-like)
     this.driftPush = 0.40;        // slide the frame toward the drift direction
-    this.driftSmooth = 2.6;
-    this.speedWiden = 0.14;       // extra distance at speed
+    this.driftSmooth = 1.8;
+    // The client asked for a calmer camera that breathes back further as speed
+    // builds. 0.14 was barely perceptible; 0.42 is a real pull-back that also
+    // gives you more warning of what is coming. It is applied through a
+    // SMOOTHED speed (see _speedEase) so a stab of throttle or a collision
+    // cannot yank the frame.
+    this.speedWiden = 0.42;
+    this.speedEase = 0.9;         // how slowly the zoom itself reacts, 1/s
 
     this._pos = new THREE.Vector3();
     this._focus = new THREE.Vector3();
@@ -123,7 +129,13 @@ export class ChaseCamera {
     this._focus.addScaledVector(this._focusVel, step);
 
     // Speed widens the frame slightly — reads as acceleration.
-    const distance = this.distance * (1 + Math.min(speed / 60, 1) * this.speedWiden) * (opts.zoom ?? 1);
+    // Ease the speed that drives the zoom, not the zoom itself: distance then
+    // moves on a signal that has no steps in it, whatever the physics does.
+    const sN = Math.min(speed / 42, 1);
+    this._speedEase = this._speedEase === undefined
+      ? sN
+      : this._speedEase + (sN - this._speedEase) * (1 - Math.exp(-this.speedEase * dt));
+    const distance = this.distance * (1 + this._speedEase * this.speedWiden) * (opts.zoom ?? 1);
 
     // FOV punch, driven by the feel layer.
     const fov = this.baseFov + (opts.fovBoost ?? 0);

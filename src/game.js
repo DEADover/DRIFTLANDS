@@ -293,7 +293,12 @@ export class Game {
     // exactly the twitching you see while driving. The mean moves smoothly, and
     // the per-wheel seating in car.js still keeps every wheel on the ground.
     // A little of the max is mixed back in so a crest still lifts the car.
-    const target = sum / 4 + (max - sum / 4) * 0.35;
+    let target = sum / 4 + (max - sum / 4) * 0.35;
+
+    // While airborne the SIMULATION owns the height, not the terrain. Without
+    // this the body snapped back to the ground the instant it left a crest and
+    // there was no jump at all.
+    if (this._carY !== undefined && !v.onGround) target = this._carY;
 
     // Low-pass only — NO rate limit.
     //
@@ -355,6 +360,7 @@ export class Game {
       }
     }
 
+    this._stepVertical(dt);
     this._stepBarriers(dt);
 
     const lim = this.biome.size / 2 - 40;
@@ -375,6 +381,79 @@ export class Game {
     this._wasDrifting = v.isDrifting;
 
     this.simTime += dt;
+  }
+
+  /**
+   * VERTICAL DYNAMICS AND SLOPE.
+   *
+   * The car used to have NO vertical state at all: it was pinned to whatever
+   * height the ground query returned. That is the root of most of what looks
+   * wrong when you drive — the body and wheels appear to live independently
+   * because nothing is actually resting on anything, there is no airtime over a
+   * crest, no landing, and, worst of all, gradient costs nothing. That last one
+   * is why the car could sit in a lake and calmly drive up a bank onto a road
+   * several metres above it: there was no gravity to climb against.
+   *
+   * So: a real height, a real vertical velocity, and gravity resolved along the
+   * ground plane so slopes have to be earned.
+   */
+  _stepVertical(dt) {
+    const v = this.vehicle;
+    const g = this.groundAt(v.position.x, v.position.z);
+    const ground = g.height;
+
+    if (this._carY === undefined) { this._carY = ground; this._carVY = 0; }
+
+    // Ballistic while airborne. 22 m/s^2 rather than 9.81: arcade jumps should
+    // come down quickly or the car hangs like a balloon at this camera height.
+    this._carVY -= 22 * dt;
+    this._carY += this._carVY * dt;
+
+    if (this._carY <= ground) {
+      const impact = -this._carVY;
+      this._carY = ground;
+      this._carVY = 0;
+      if (v.onGround === false && impact > 5) {
+        this.feel.event('land', { speed: impact });
+        this.audio.event('land', { speed: impact });
+        this.camera.addShake(Math.min(0.6, impact * 0.02));
+      }
+      v.onGround = true;
+    } else {
+      v.onGround = false;
+    }
+
+    if (!v.onGround) return;   // no traction in the air, so no slope force
+
+    // Gravity along the ground plane. For a unit normal n the downhill
+    // direction in xz is (n.x, n.z) and its length is sin(slope), so this one
+    // expression gives both the direction and the g*sin(theta) magnitude.
+    const n = g.normal;
+    const slope = Math.hypot(n.x, n.z);
+    if (slope > 0.02) {
+      const G = 9.81;
+      v.velocity.x += n.x * G * dt;
+      v.velocity.z += n.z * G * dt;
+
+      // Beyond about 32 degrees the tyres cannot hold at all: bleed speed hard
+      // so a steep bank is a wall, not a ramp. This is what stops the car
+      // climbing out of a lake basin onto a road that sits well above it.
+      if (slope > 0.53) {
+        const over = Math.min(1, (slope - 0.53) / 0.30);
+        v.velocity.multiplyScalar(1 - over * 3.2 * dt);
+      }
+    }
+
+    // In water: heavy drag, so wading is slow and deliberate rather than a
+    // shortcut across the map.
+    const wl = this.biome?.waterLevel;
+    if (wl !== undefined && ground < wl - 0.35) {
+      v.velocity.multiplyScalar(1 - Math.min(0.9, 2.4 * dt));
+      v.yawRate *= 1 - Math.min(0.9, 2.0 * dt);
+      this.inWater = true;
+    } else {
+      this.inWater = false;
+    }
   }
 
   /**
