@@ -161,7 +161,99 @@
 // green (B = 26,35,34,35,48,71, ending at B/G 0.46 on the brightest swatch),
 // which is why our sunlit grass was simultaneously too pale AND too weak in
 // chroma while the shade went teal. Blue is now flat at 26-46 across the ramp.
-const ALPINE_RAMP = [0x1c2c12, 0x384615, 0x71731b, 0x989a27, 0xb6ba2d, 0xa2a730];
+//
+// ROUND 12 — THE ACID SWARD, AND IT IS RAMP INDEX 3 AND 4.
+//
+// measure.mjs bins at 12 levels/channel, so a bin level L covers
+// L*23.18 +/- 11.59. Read that way the two frames say something very precise:
+//
+//   ours    #172e17 8.6%  #747400 8.6%  #5d5d00 6.5%  #8b8b00 6.3%
+//   target  #172e17 9.4%  #2e4617 7.1%  #8b8b17 4.3%  #465d17 4.0%
+//
+//   levels  ours   (1,2,1) (5,5,0) (4,4,0) (6,6,0)
+//           target (1,2,1) (2,3,1) (6,6,1) (3,4,1)
+//
+// Two separate defects, not one:
+//
+//  a) BLUE LEVEL 0 vs LEVEL 1. Our #8b8b00 and the target's #8b8b17 have the
+//     IDENTICAL red and green levels. The only difference between the target's
+//     brightest grass bin and our acid bin is 12-35 of blue against our 0-12.
+//     That is 21% of our frame sitting one bin below the target in one channel,
+//     and it is also the whole of the frame-mean blue deficit (33 vs 44).
+//  b) OUR MIDS ARE TOO WARM. The target's mid greens are (2,3,1) and (3,4,1) —
+//     green a full level ahead of red, R/G 0.66-0.75 — and it has 11.1% of the
+//     frame in them. We have essentially none: ours are (4,4,0) and (5,5,0),
+//     R equal to G. Frame mean red 99 against the target's 91 is the same fact.
+//
+// ALPINE_STOPS is [-26,-6,12,38,78,150] and alpine's height() starts at 28 and
+// climbs, so the drivable meadow sits between stops 38 and 78 — indices 3 and
+// 4 — and NOT index 2 as round 7 assumed. Those two swatches were (152,154,39)
+// and (182,186,45): R/G 0.99 and B/G 0.25. R equal to G at B/G 0.25 IS
+// #747400. Round 7's warm rotation is what put them there, and it overshot.
+//
+// The grade's `saturation: 1.68` is an affine mix toward luma, so it reaches
+// zero blue whenever b < 0.405 * luma. Solving it backwards for the target's
+// own #8b8b17 (out 0.545/0.545/0.09) needs an arriving b/g of 0.48, so albedo
+// B/G in the sunlit sward has to be ~0.39-0.42, not 0.25 — the grade eats
+// roughly half of it and everything under half of that lands in bin level 0.
+//
+// ...AND A UNIFORM COOL OF THE WHOLE MEADOW IS THE WRONG INSTRUMENT. Measured
+// per LUMA DECILE on the grass population only (G strictly the max channel),
+// which is the statistic that isolates the acid — r11 against the reference:
+//
+//     decile   ours (r11)      reference     grass sat ours / ref
+//      0.1     25, 48, 21     25, 50, 23        0.56 / 0.54
+//      0.2     51, 73, 22     50, 71, 21        0.70 / 0.70
+//      0.3     79, 99, 17     82,100, 16        0.83 / 0.84
+//      0.4    114,123,  8    112,126, 12        0.94 / 0.91
+//      0.5    144,151,  6    138,149, 14        0.96 / 0.91
+//      0.6    172,177,  5    161,172, 26        0.97 / 0.85
+//      0.7    193,195,  6    187,194, 86        0.97 / 0.56
+//
+// The bottom four deciles were ALREADY on the reference to within a value or
+// two, and frame-wide the grass measured R/G 0.819 against its 0.820 and
+// B/G 0.170 against its 0.173. The meadow's hue was not the defect.
+//
+// The defect is the TOP THREE DECILES, and it is one number: the reference's
+// grass saturation peaks at 0.91 near decile 0.45 and then FALLS AWAY, to 0.85
+// and then to 0.56, as blue climbs 12 -> 26 -> 86. Ours climbs to 0.97 and stays
+// there with blue pinned at 5. A sunlit highlight in the reference is a pale,
+// half-desaturated yellow-green; ours is neon. And ours puts 2.3% of the frame
+// in decile 0.6 against the reference's 0.5% — five times too much of the
+// worst-behaved value in the picture.
+//
+// So: keep the reference's own R/G (0.89-0.94 through its sunlit deciles, which
+// is very nearly R = G — the acid was never an excess of red), take a MODERATE
+// amount of blue rather than the large amount the first pass added (that cost
+// 0.062 of frame saturation and bought two bins), and bring the TOP of the ramp
+// down in value so the decile-0.6 mass lands in 0.5 where the reference keeps
+// it. The chroma roll-off at the lit end lives in biomes.js — see the essay at
+// the t > 0 offsetHSL, which used to push chroma UP with value.
+//
+//   index      0     1     2     3     4     5
+//   R/G was  0.64  0.80  0.98  0.99  0.98  0.97
+//   R/G now  0.55  0.74  0.86  0.93  0.93  0.93
+//   B/G was  0.41  0.30  0.23  0.25  0.24  0.29
+//   B/G now  0.52  0.36  0.27  0.31  0.33  0.36
+//
+// Green falls only at indices 4 and 5, and only far enough to move the highlight
+// mass down one decile; the frame mean luma is already on the reference.
+// Index 3 up 5% in value (cycle 8): normalised against each frame's own grass,
+// decile 0.4 is the reference's mode at 24.3% and ours sat at 23.4% while decile
+// 0.3 held 26.4% against its 20.3%. Index 3 is the swatch decile 0.4 is made of,
+// and raising it is the mean-neutral half of the pair with patchB below.
+// Cycle 10, the last trim. Grass measured R/G 0.795 against the reference's
+// 0.820 and B/G 0.205 against its 0.173 — 3% too green and 18% too blue, all of
+// it in deciles 0.2-0.4 (its 0.3 grass is 82,100,16 and ours was 76,101,21). So
+// indices 1-3 take +4 of red and -4 of blue. Index 0 is untouched: decile 0.1
+// already lands on the reference at (26,49,23) against its (25,50,23), and it is
+// the single largest bin in either frame.
+// ...and the blue goes back at indices 2 and 3 only. The -4 there dropped the
+// modal blue of the sunlit sward under 12, which is measure.mjs's level-0
+// boundary, and printed #747400 and #5d5d00 again — the exact two bins the brief
+// names. Red is what fixes R/G; the blue cut was collateral and only index 1
+// needed it.
+const ALPINE_RAMP = [0x182c17, 0x384617, 0x646e1e, 0x9aa132, 0xa6b23a, 0x96a33a];
 const AUTUMN_RAMP = [0x3b4c28, 0x5a682e, 0x83803a, 0xac974a, 0xccb466, 0xe6d59a];
 const DESERT_RAMP = [0xe8d5a4, 0xdcb476, 0xcf8546, 0xbc5730, 0xa33c27, 0xc9713c];
 const COAST_RAMP = [0x104a46, 0x0f6f4c, 0x1e924c, 0x54a548, 0x9c9a56, 0xcfc084];
@@ -201,16 +293,89 @@ export const PALETTES = {
       // noise stack, so the meadow has to be able to reach L 0.60 on a sunlit
       // rise and L 0.19 in a hollow without either end being a different
       // material. Keep them one hue family apart, not one value apart.
-      lowland: 0x152718,     // damp draws and tarn shores — bluest green here
-      patchA: 0xa2bb4e,      // sun-bleached alp grass. R stays a hair UNDER G:
-                             // the reference's sunlit bins run R/G 0.80-0.92 and
-                             // the moment red leads, grass reads as mustard.
-      patchB: 0x1c2516,      // shaded heath / bilberry: hue 125, S 0.53, L 0.13
-      scree: 0xa9a596,       // pale limestone — cliff faces ONLY, never meadow
+      lowland: 0x172e1c,     // damp draws and tarn shores — bluest green here
+      patchA: 0x8f9c48,      // sun-bleached alp grass, and the swatch the top
+                             // three luma deciles are made of. R/G 0.91 (the
+                             // reference's own sunlit grass runs 0.89-0.94), and
+                             // B/G 0.46 — by far the bluest swatch in the ramp,
+                             // because this is the ONE place the reference
+                             // desaturates: solve the grade's saturation 1.68
+                             // backwards from its decile-0.6 grass (161,172,26)
+                             // and the arriving colour needs B/G 0.48.
+                             //
+                             // AND ITS VALUE IS THE ACID TAIL. This swatch
+                             // arrives at unity gain, so its own luma (0.673)
+                             // IS the top of the meadow: 4% of the frame landed
+                             // brighter than luma 0.6 against the reference's
+                             // 0.5%, and the reference's grass stops dead at
+                             // 0.6. Scaled to luma 0.60 so the lit lobe tops out
+                             // in decile 0.5, where the reference keeps its own
+                             // brightest sward (138,149,14). Swept 0.673 / 0.60 /
+                             // 0.575 in luma -> grass brighter than 0.6 lands at
+                             // 3.7% / 2.8% / 1.3% of the frame against the
+                             // reference's 0.5%, and frame luma bucket 6 at
+                             // 7.0 / 6.1 / 5.3 against its 5.0. One notch further
+                             // to luma 0.545 for the last of it: this population
+                             // is the yellow film over the lit half of the frame
+                             // and it is the last thing in the meadow that still
+                             // reads as acid rather than as sun.
+      // ...and its VALUE is set by luma bucket 0, which held 1.7% of the frame
+      // against the reference's 0.9% at (12,25,12) vs its (9,28,21). The
+      // reference's floor is not darker than ours, it is GREENER and there is
+      // half as much of it. Lifting it from (26,44,26) to (30,49,32) moved bucket
+      // 0 by 0.0 points, so the near-black is not this swatch at all — it is the
+      // AO tint stacked with the grade's lift, exactly as the essay under
+      // `ambientIntensity` says, and both live outside this file.
+      //
+      // So it goes the other way instead, to (22,40,26), because the GRASS
+      // distribution wants it. Normalised against each frame's own grass, the
+      // reference puts 17.1% of its grass in luma decile 0.1 and 20.3% in decile
+      // 0.3; ours had 13.2% and 26.4%. It is short of genuinely deep shade and
+      // long on mid-dark, which is the shade lobe of the meadow field not
+      // reaching far enough down. Deepening this swatch is what extends it.
+      patchB: 0x16281a,      // shaded heath / bilberry. Was (28,37,22), G/R only
+                             // 1.32 — a near-neutral dark, which is why our
+                             // luma bucket 0 held 1.7% against the reference's
+                             // 0.9%. The reference's darkest bin is (23,46,23):
+                             // RED EQUALS BLUE and green is double both. A deep
+                             // GREEN, not a dark grey-green.
+      scree: 0x9f9d90,       // pale limestone — cliff faces ONLY, never meadow
       cliff: 0x6a6055,       // warm grey rock (ref boulders read #605753)
       soil: 0x8a6236,
       sand: 0xd7c48a,
       summit: 0xf2f7ff,      // unreachable: alpine tops out ~170 m now
+      // ROUND 12: THE ACID IS A TAIL, AND THE FACET GAIN IS WHAT GROWS IT.
+      //
+      // Grass pixels per luma decile, as a share of each frame's own grass so
+      // the different grass coverage (63.6% ours, 49.8% the reference's) cannot
+      // hide inside the numbers:
+      //
+      //     decile   0.1   0.2   0.3   0.4   0.5   0.6
+      //     ours    13.2  22.8  25.3  20.9  11.5   5.8
+      //     target  17.1  22.5  20.3  24.3  14.9   1.0
+      //
+      // The reference's grass PEAKS at decile 0.4 and then stops dead: 1% of it
+      // is brighter than luma 0.6 and none of it is brighter than 0.7. Ours
+      // peaks a decile lower and then carries 5.8% out past 0.6 — 4% of the
+      // whole frame in grass brighter than anything the reference allows, and
+      // that tail is precisely the highlighter-green patches. Our colours now
+      // match the reference decile for decile (its 0.6 grass is 161,172,26 and
+      // ours is 166,177,28); we simply have seven times too many of them.
+      //
+      // AND IT IS NOT THIS KNOB — TESTED AND REVERTED. 0.60 -> 0.44 with grain
+      // 0.34 -> 0.27 moved the decile-0.6 grass share by 0.0 points and the
+      // frame mean luma by 0.000. The reason is in terrain.js: the push is
+      // `asp = nx*sx + nz*sz`, the HORIZONTAL part of the face normal, and a 6 m
+      // facet on a meadow that rolls +/-20 m over 190 m tilts about six degrees,
+      // so |asp| never exceeds ~0.11 out there. The gain is a cliff-and-bank
+      // instrument; on the flat it does almost nothing and cannot be the tail.
+      //
+      // Solving the grade's saturation backwards from our own decile-0.6 grass
+      // (167,177,29) gives an arriving colour of (166,172,84) — which is patchA,
+      // to within a value, at unity gain. The bright tail is not a facet, not
+      // the light and not the grade: it is patchA's own VALUE, reached wherever
+      // the lit lobe of the meadow field saturates. So patchA comes down and the
+      // lobe shape changes; these two stay where they were.
       facetContrast: 0.60,   // both are linear GAINS now, not lightness offsets
       grain: 0.34,
       bands: 0,
@@ -239,10 +404,48 @@ export const PALETTES = {
     // set, matching the reference's own firs (#1a331a is S 0.49, #0d261a is
     // 0.66), with the darkest variant lifted back to L 0.20 so its underside
     // stops falling into the black hole the AO and the grade lift make of it.
-    foliage: [0x25432c, 0x2e5335, 0x1e3625, 0x355f39],
+    // ROUND 12: THE FIRS ARE HALF THE ACID PROBLEM, and the only way to see it
+    // is to histogram BLUE inside the mid-luma green band rather than to look at
+    // means. Grass-and-foliage pixels at luma 0.25-0.55, blue in bins of 12,
+    // with the mean colour of each bin:
+    //
+    //     blue    ours                  reference
+    //     0-12     94,110,  6  42.7%    109,123,  5  38.3%
+    //     12-24    92,109, 16  26.7%     91,108, 17  45.6%   <- the reference's mode
+    //     24-36    73,101, 30  10.0%     85,104, 27  13.9%
+    //     36-48    53, 98, 41  15.3%    102,114, 40   1.3%   <- ours, and nothing else has it
+    //
+    // The reference's distribution is tight: 84% of it in blue 0-24, with the
+    // mode at 12-24. Ours has a SECOND MODE at 36-48 holding 15.3% of the band,
+    // and its mean colour is (53,98,41) — R/G 0.54, a dark blue-green. That is
+    // not grass at any value; it is a lit fir face. These four swatches ran
+    // B/G 0.60-0.69, i.e. blue well AHEAD of red, which is a spruce, and 15% of
+    // the frame arriving at B/G 0.42 is where the missing frame saturation went
+    // (0.699 against the reference's 0.756) and why the reference's own dominant
+    // bin only holds 27% of our band against 46% of its.
+    //
+    // The bin the reference's mode sits in, (91,108,17), and the bin ours sits in
+    // are otherwise the SAME COLOUR to within a value — so this is purely blue.
+    // B/G comes to 0.40, which puts the lit faces at a rendered 0.26 (the
+    // reference's own 24-36 bin) instead of 0.42. Hue lands at 118-124: still
+    // the deep, faintly cool green the essay above asks for, and still nowhere
+    // near the hue 150 that reads as teal — but with red and blue now within a
+    // few values of each other, which is what the reference's darkest bin
+    // (23,46,23) actually is.
+    foliage: [0x25431b, 0x2e5321, 0x1e3616, 0x355f26],
     trunk: 0x6b4a30,
-    rock: 0x7d7268,
-    rockShadow: 0x4e463f,
+    // MEASURED: inside luma deciles 0.3-0.5 we put 8.9% of the frame in pixels
+    // of saturation under 0.55 — mean colours (113,108,95) and (135,119,78),
+    // i.e. pale pinkish stone — against the reference's 2.7%. Most of that gap
+    // is boulder and cobble COUNT, which lives in props.js, but the colour makes
+    // it worse than it needs to be: with the grade running a 1.05 red gain a
+    // warm neutral prints mauve, which is exactly how our boulders read.
+    // ...but -9 of red overshot and printed the boulders COOL grey against the
+    // reference's warm tan-grey (its boulders read ~#8a7f72, R-B = 24). The
+    // mauve was never the warmth, it was the warmth at too high a value: -3 of
+    // red and -4 of value keeps the tan and drops the pink.
+    rock: 0x7a7164,
+    rockShadow: 0x474540,
     water: 0x1179bd,
     waterDeep: 0x0a4f8c,
     waterFoam: 0xeaf7ff,

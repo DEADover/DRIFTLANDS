@@ -222,6 +222,30 @@ export const BIOMES = {
       // cluster the other way: that is what turns flat shading into visible
       // planes catching the light. At 2.2 m the planes differed by three degrees
       // and the whole meadow resolved into one wash.
+      // ROUND 12 — THE TOOTH HAS DRIFTED AWAY FROM ITS OWN DOCUMENTATION, AND
+      // FIXING IT HERE COSTS MORE THAN IT BUYS. The essay above says "a band at
+      // 44 m / 4.2 m", which tilts a cluster of 5 m facets a coherent 10-12
+      // degrees. What is actually here is 70 m / 2.6 m: a 7% grade, so 4 degrees,
+      // and 4 degrees is under the threshold where flat shading separates two
+      // triangles at all. Measured in the lake_bridge and wildlife presets, that
+      // is why the meadow beside a close camera comes back as ONE FLAT SLAB of
+      // the brightest green in the ramp — which is what an acid patch actually
+      // looks like once the hue is right, exactly as the note at `segments` says,
+      // and it is the largest remaining defect in this biome's read.
+      //
+      // BOTH WAYS OF FIXING IT WERE TRIED AND BOTH WERE REVERTED, because every
+      // term in height() moves the car:
+      //
+      //   57 m / 4.2 m   hero luma bucket 4 fell 22.6% -> 17.5% (reference 22.0)
+      //   49 m / 2.6 m   hero mean luma fell 0.372 -> 0.319 and the frame filled
+      //                  with lake (#0046a2 at 7.4% of it)
+      //
+      // Neither is a colour regression: the shot presets drive the car for a
+      // fixed time, so a metre of height anywhere on the route changes where the
+      // car ends up and therefore what the camera frames. A 2 m change to the
+      // tooth relocated the hero shot to a different part of the map. The tooth
+      // needs to be raised, but it has to be done together with whoever owns the
+      // shot presets and the camera, not blind from here, so it stays as it is.
       const k = (1 - rim * 0.5) * (0.25 + dry * 0.75);
       h += fbm(x * 0.0142, z * 0.0142, { octaves: 2, seed: s + 91 }) * 2.6 * k;
       h += fbm(x * 0.030, z * 0.030, { octaves: 1, seed: s + 93 }) * 0.8 * k;
@@ -271,7 +295,22 @@ export const BIOMES = {
       // 0.009 of mean saturation and cost 0.009 of mean luma and 2.4 points out
       // of luma bucket 5, which is the bucket we are shortest on. The chroma
       // has to come off the shaded half specifically, not off the whole field.
-      let t = clamp((big * 0.44 + mid * 0.34 + fine * 0.20) * 1.8 - 0.19, -1, 1);
+      // THE BIAS IS A MASS-DISTRIBUTION KNOB, and -0.19 was costing us the two
+      // luma buckets the reference is fattest in. Measured this round:
+      //
+      //   bucket    0.2    0.3    0.4    0.5
+      //   ours     18.7   22.7   19.9   15.2
+      //   target   16.7   21.5   22.0   17.5
+      //
+      // Two points too much in 0.2 and 0.3, four points too little in 0.4 and
+      // 0.5 — and the same fact read a second way: inside deciles 0.3-0.5 the
+      // reference puts 46.6% of the FRAME in pixels of saturation above 0.75
+      // (that is its meadow) where we put 31.4%. Both gaps are one move: the lit
+      // lobe of this field has to reach further up the ramp. It also buys back
+      // most of the 0.015 of mean luma the acid fix cost, without touching a
+      // single colour — which is the right way round, because the colours now
+      // match the reference decile by decile and the DISTRIBUTION does not.
+      let t = clamp((big * 0.44 + mid * 0.34 + fine * 0.20) * 1.8 - 0.075, -1, 1);
       // ...and then PUSHED OFF ZERO. A sum of fbm octaves is a bell: most of the
       // meadow lands near t = 0, i.e. on the bare ramp, and that is why the
       // frame reads as one flat wash of a single green no matter how well the
@@ -283,6 +322,19 @@ export const BIOMES = {
       // unchanged and the frame mean barely moves) and only evacuates the
       // middle, turning the bell into the two-lobed sun/shade split the
       // reference has.
+      // ROUND 12: 0.68 EVACUATES THE MIDDLE TOO HARD. Grass per decile as a
+      // share of each frame's own grass — ours 13/23/25/21/12/6 against the
+      // reference's 17/23/20/24/15/1 — is not a bell against two lobes, it is
+      // ONE mode in the wrong place plus a tail the reference does not have. The
+      // reference's grass peaks at decile 0.4 and stops at 0.6; ours peaks at 0.3
+      // and runs out to 0.7.
+      // ...BUT UNITY IS WORSE, MEASURED: taking it to 1.0 put decile 0.3 at
+      // 18.4% of the frame against the reference's 10.1% and thinned decile 0.5
+      // from 7.3% to 5.9% against its 7.4%. The exponent is not what places the
+      // mode — with patchA's value now capped, the upper lobe can no longer run
+      // away, and evacuating the middle is what fills decile 0.4-0.5 rather than
+      // piling everything on the bare ramp at 0.3. It stays where it was; the
+      // mode is placed with the bias term above instead.
       t = Math.sign(t) * Math.pow(Math.abs(t), 0.68);
       // Asymmetric on purpose. THREE.Color.lerp mixes in LINEAR space, where a
       // 50% mix toward a dark green is nowhere near 50% of the way down in
@@ -310,7 +362,26 @@ export const BIOMES = {
       // FALLS with value far faster than it rises. A symmetric +/-0.035 left our
       // shaded grass at S 0.80 where the reference has 0.55, which is most of
       // the 0.02 we are still over on frame mean saturation.
-      if (t > 0) c.offsetHSL(t * -0.022, t * 0.028, 0);
+      //
+      // ROUND 12: "the lightest greens run 90-100% saturation" IS THE BUG, and
+      // it came from measuring a crop of lit grass instead of the population.
+      // Per luma decile on the reference's grass, saturation peaks at 0.91 near
+      // decile 0.45 and then falls to 0.85 and 0.56 as blue climbs 12 -> 26 -> 86.
+      // It is an INVERTED-U in value, not a rising line. Ours ran 0.94 / 0.96 /
+      // 0.97 / 0.97 across the same range with blue pinned at 5-8, and that
+      // plateau at the top is exactly the acid: #747400 and #5d5d00, 15% of the
+      // frame, both with a hard zero in blue.
+      //
+      // So chroma now falls at BOTH ends and only the middle of the lit lobe
+      // keeps full saturation. The roll-off is quadratic in t so it bites only
+      // on the genuinely bright half of the lobe — a linear term would take
+      // chroma out of decile 0.4, which already matches the reference.
+      //
+      // The warm hue rotation also comes down hard, from -0.022 to -0.006. At
+      // -0.022 (about 8 degrees) the lit lobe crossed the line where RED LEADS
+      // GREEN, which is what put R exactly equal to G in both acid bins; the
+      // reference's brightest grass still keeps green ahead at R/G 0.94.
+      if (t > 0) c.offsetHSL(t * -0.006, t * 0.020 - t * t * 0.14, 0);
       else c.offsetHSL(-t * 0.030, t * 0.065, 0);
 
       // Damp, darker grass in the hollows and along the tarn shores.
