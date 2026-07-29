@@ -17,6 +17,13 @@ import { mergeGeometries } from '../world/props.js';
  */
 
 const BODY_LEN = 4.15;
+// Works rally livery, from the client's car reference: white shell, red and
+// blue spine stripes, gold wheel centres, amber indicators.
+const LIVERY_RED = 0xe4302c;
+const LIVERY_BLUE = 0x1c56b8;
+const WHEEL_GOLD = 0xc8912f;
+const AMBER = 0xff7a1a;
+
 const BODY_W = 1.80;
 const ARCH_W = 2.14;      // arches stick out past the body — widens the plan view
 
@@ -61,7 +68,7 @@ function wedge(len, hFront, hBack, wFront, wBack, x, y, z) {
   return g;
 }
 
-export function buildCarMesh({ body = 0xef4d4d, accent = 0xffffff } = {}) {
+export function buildCarMesh({ body = 0xf2f3f5, accent = 0xffffff } = {}) {
   const root = new THREE.Group();
   root.name = 'car';
 
@@ -141,7 +148,7 @@ export function buildCarMesh({ body = 0xef4d4d, accent = 0xffffff } = {}) {
     box(0.40, 0.08, ARCH_W - 0.06, -2.18, 1.42, 0),
     box(0.11, 0.30, 0.11, -2.12, 1.26, 0.62),
     box(0.11, 0.30, 0.11, -2.12, 1.26, -0.62),
-  ]), darkBody));
+  ]), trimMat));
   root.add(new THREE.Mesh(mergeGeometries([
     box(0.44, 0.11, 0.07, -2.18, 1.47, (ARCH_W - 0.06) / 2),
     box(0.44, 0.11, 0.07, -2.18, 1.47, -(ARCH_W - 0.06) / 2),
@@ -157,7 +164,7 @@ export function buildCarMesh({ body = 0xef4d4d, accent = 0xffffff } = {}) {
 
   root.add(new THREE.Mesh(mergeGeometries([
     box(0.40, 0.10, 0.50, 1.46, 1.14, 0),                     // bonnet scoop
-  ]), darkBody));
+  ]), trimMat));
 
   // Four rally light pods, wide and flat so their TOP faces read from above.
   const pods = [];
@@ -169,6 +176,11 @@ export function buildCarMesh({ body = 0xef4d4d, accent = 0xffffff } = {}) {
     box(0.12, 0.18, 0.42, 2.64, 0.82, -0.55),
   ]), lightMat));
 
+  root.add(new THREE.Mesh(mergeGeometries([
+    box(0.10, 0.13, 0.20, 2.62, 0.68, 0.86),
+    box(0.10, 0.13, 0.20, 2.62, 0.68, -0.86),
+  ]), new THREE.MeshBasicMaterial({ color: AMBER })));
+
   // Tail lights sit on the very back edge, tall enough to catch the camera
   // even at 61 degrees — they are the only thing that says "braking".
   const tails = new THREE.Mesh(mergeGeometries([
@@ -177,14 +189,31 @@ export function buildCarMesh({ body = 0xef4d4d, accent = 0xffffff } = {}) {
   ]), tailMat);
   root.add(tails);
 
-  // Livery: a bonnet/deck spine plus two roof bars. Pure readability at range.
-  root.add(new THREE.Mesh(mergeGeometries([
-    box(1.24, 0.03, 0.17, 1.34, 1.135, 0.34),                 // bonnet stripes
-    box(1.24, 0.03, 0.17, 1.34, 1.135, -0.34),
-    box(0.56, 0.03, 0.26, -1.92, 1.205, 0),                   // boot spine
-    box(1.14, 0.03, 0.22, -0.62, 1.675, 0.42),                // roof bars
-    box(1.14, 0.03, 0.22, -0.62, 1.675, -0.42),
-  ]), new THREE.MeshBasicMaterial({ color: accent })));
+  // ------------------------------------------------------------------ livery
+  //
+  // Works Group-B scheme from the client reference: a RED and a BLUE stripe
+  // running side by side straight down the car's spine — bonnet, roof, boot —
+  // plus a red-over-blue flash along each flank. On a white shell this is the
+  // single most recognisable thing about the car, and at this camera height the
+  // spine stripes are most of what identifies it as the player.
+  const SPINE_W = 0.20;      // width of one stripe
+  const SPINE_Z = 0.115;     // half-gap: the two stripes sit shoulder to shoulder
+
+  const spine = (col, zSign) => new THREE.Mesh(mergeGeometries([
+    box(1.26, 0.03, SPINE_W, 1.33, 1.135, zSign * SPINE_Z),   // bonnet
+    box(1.30, 0.03, SPINE_W, -0.60, 1.675, zSign * SPINE_Z),  // roof
+    box(0.60, 0.03, SPINE_W, -1.92, 1.205, zSign * SPINE_Z),  // boot deck
+  ]), new THREE.MeshBasicMaterial({ color: col }));
+  root.add(spine(LIVERY_RED, 1));
+  root.add(spine(LIVERY_BLUE, -1));
+
+  // Flank flash: red band over a blue band, at door height, both sides.
+  const flank = (col, y) => new THREE.Mesh(mergeGeometries([
+    box(2.55, 0.075, 0.03, -0.15, y, BODY_W / 2 + 0.005),
+    box(2.55, 0.075, 0.03, -0.15, y, -BODY_W / 2 - 0.005),
+  ]), new THREE.MeshBasicMaterial({ color: col }));
+  root.add(flank(LIVERY_RED, 0.95));
+  root.add(flank(LIVERY_BLUE, 0.87));
 
   // ----------------------------------------------------------------- wheels
   // Chunky gravel tyres. 12 sides so the rim reads faceted, not smooth.
@@ -197,7 +226,7 @@ export function buildCarMesh({ body = 0xef4d4d, accent = 0xffffff } = {}) {
     box(0.10, 0.46, 0.46, 0, 0, 0),
   ]);
   const tyreMat = new THREE.MeshLambertMaterial({ color: 0x14161a, flatShading: true });
-  const rimMat = new THREE.MeshLambertMaterial({ color: 0xe8c34a, flatShading: true });
+  const rimMat = new THREE.MeshLambertMaterial({ color: WHEEL_GOLD, flatShading: true });
 
   const wheels = [];
   const hubs = [];

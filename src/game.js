@@ -40,7 +40,7 @@ export class Game {
     this.lights = new LightRig(this.scene);
 
     this.vehicle = new Vehicle();
-    this.carView = new CarView({ body: 0xef4d4d });
+    this.carView = new CarView({ body: 0xf2f3f5 });
     this.scene.add(this.carView.root);
 
     this.skid = new SkidMarks();
