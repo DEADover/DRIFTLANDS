@@ -91,6 +91,7 @@ if (shotId) {
     game.skid.clear();
     game.particles.clear();
     game.driftScore = 0;
+    game.camera.calmShake?.();   // a crash must not follow you through a respawn
   };
 
   window.addEventListener('keydown', (e) => {

@@ -583,7 +583,21 @@ export class Game {
     });
     this.audio.update(scaled, { vehicle: v, surface: this.surface });
 
-    const focus = new THREE.Vector3(v.position.x, g.height, v.position.z);
+    // Focus on the CAR, not on the ground under it.
+    //
+    // This used to track g.height, the terrain height at the car's position.
+    // The moment the car dropped into a basin or a lake bed the focus fell with
+    // the terrain, dragging the camera down until it was looking along the
+    // road almost horizontally from a couple of metres up — the frame filled
+    // with one blurred slab of road and the car was nowhere in it.
+    //
+    // The car's own height is smoothed and bounded; the terrain under it is
+    // neither. Also clamp how far the focus may sit below the drivable surface
+    // so a deep hole cannot swing the camera even if the car is in one.
+    const carY = this._carY ?? g.height;
+    const surfY = this.roads.heightAt?.(v.position.x, v.position.z) ?? g.height;
+    const focusY = Math.max(carY, surfY - 6);
+    const focus = new THREE.Vector3(v.position.x, focusY, v.position.z);
     this.camera.update(scaled, {
       position: focus, velocity: v.velocity, heading: v.heading, lateralSlip: v.lateralSlip,
     }, { zoom: this.cameraZoom, fovBoost: this.feel.fovBoost ?? 0 });

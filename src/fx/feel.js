@@ -183,7 +183,9 @@ export function createFeel(ctx = {}) {
       const smooth = kind === 'road' || kind === 'bridge';
       const rough = smooth ? 0.12 : 1 - clamp(state.surface?.grip ?? 0.85, 0, 1) * 0.35;
       const want = TUNE.rumbleTrauma * rough * Math.pow(speedRatio, 1.35);
-      if (want > 0.001 && camera?.addShake) camera.addShake(want * 1.8 * rdt);
+      // Halved: this term is CONTINUOUS, so it sets the resting trauma level, and
+      // at 1.8 the frame never stopped buzzing (measured peak 0.873).
+      if (want > 0.001 && camera?.addShake) camera.addShake(want * 0.85 * rdt);
       this.shakeTrauma = camera?.shakeAmount ?? 0;
     },
 
