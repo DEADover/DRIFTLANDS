@@ -113,10 +113,16 @@ export function lakeLevel(biome) {
 // little blue out of the deep end, lands the median on the target's.
 export const LAKE_COLORS = {
   alpine: {
-    deep: 0x0e88bc,
-    mid: 0x24a2da,
-    shallow: 0x66c8e8,
-    shore: 0x6fcbe8,
+    // Re-measured against target_01. Ours was a vivid cobalt that pushed the
+    // frame's mean blue to 74 against the reference's 44 — the lake covers a
+    // third of the hero frame, so its brightness dominates that statistic and
+    // it was also what made the water read as one flat fill. The reference's
+    // water is deeper, greener and darker, with a wider deep-to-shallow spread
+    // so the surface has somewhere to vary.
+    deep: 0x0a5f92,
+    mid: 0x1580b4,
+    shallow: 0x46a8cc,
+    shore: 0x6ec6dc,
     // A shade off white. The bloom pass squares whatever the brightest pixel
     // in the frame is, and at 0xf2fbff the foam line was it — a 1.2 m lip came
     // back as a glowing three-metre band of haze along every near shore.

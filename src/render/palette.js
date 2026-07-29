@@ -161,7 +161,7 @@
 // green (B = 26,35,34,35,48,71, ending at B/G 0.46 on the brightest swatch),
 // which is why our sunlit grass was simultaneously too pale AND too weak in
 // chroma while the shade went teal. Blue is now flat at 26-46 across the ramp.
-const ALPINE_RAMP = [0x172816, 0x2e3f1a, 0x5d6821, 0x7e8b2f, 0x96a837, 0x86963b];
+const ALPINE_RAMP = [0x1c2c12, 0x384615, 0x71731b, 0x989a27, 0xb6ba2d, 0xa2a730];
 const AUTUMN_RAMP = [0x3b4c28, 0x5a682e, 0x83803a, 0xac974a, 0xccb466, 0xe6d59a];
 const DESERT_RAMP = [0xe8d5a4, 0xdcb476, 0xcf8546, 0xbc5730, 0xa33c27, 0xc9713c];
 const COAST_RAMP = [0x104a46, 0x0f6f4c, 0x1e924c, 0x54a548, 0x9c9a56, 0xcfc084];

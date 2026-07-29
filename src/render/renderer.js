@@ -221,7 +221,12 @@ const PI = Math.PI;
  *
  * Exported so sky.js can put the sun disc where the shadows say it is.
  */
-export const SHADOW_ELEVATION = [0.98, 1.12];
+// Sun elevation band, radians. Was [0.98, 1.12] = 56-64 degrees, which casts a
+// shadow only 0.67x the caster's height — ART_DIRECTION section 5 asks for
+// 1-1.5x, and the client's note was simply "too few shadows". At 38-45 degrees
+// the same tree lays down a shadow 1.0-1.3x its height, which is what gives the
+// reference's meadow its structure.
+export const SHADOW_ELEVATION = [0.66, 0.79];
 export function sunElevationFor(p) {
   return THREE.MathUtils.clamp(p?.sunElevation ?? 0.7, SHADOW_ELEVATION[0], SHADOW_ELEVATION[1]);
 }

@@ -54,9 +54,21 @@ export class ChaseCamera {
     this.height = 0;              // extra vertical offset beyond pitch
     this.yaw = Math.PI * 0.25;    // world-fixed heading (art of rally does NOT spin with the car)
     this.followYaw = 0.0;         // 0 = fully world-fixed, 1 = fully car-relative
-    this.lookAhead = 0.62;        // seconds of velocity to lead the car by
+    // Seconds of velocity to lead the car by. This is what decides how much of
+    // the frame is ROAD AHEAD versus road already driven. At 0.62 s the lead is
+    // only ~19 m at speed, against an ~88 m frame, so the car sat near the
+    // middle and most of the picture was the past. It now grows with speed:
+    // the faster you go, the further the frame slides ahead and the more of the
+    // coming corner you can read.
+    this.lookAhead = 0.75;        // at a standstill / low speed
+    this.lookAheadFast = 4.20;    // fully applied at `leadFullSpeed`
+    this.leadFullSpeed = 34;      // m/s at which the fast lead is reached
     this.leadSmooth = 1.5;        // how lazily the lead itself responds
-    this.stiffness = 2.3;         // spring omega for the focus point (low = poster-like)
+    // Back to 3.4 deliberately. A softer focus spring lags the target more the
+    // faster you go — about 24 m at speed — which silently ate most of the
+    // increased look-ahead. Smoothness now comes from leadSmooth, driftSmooth
+    // and the eased speed signal instead, none of which fight the lead.
+    this.stiffness = 3.4;         // spring omega for the focus point (low = poster-like)
     this.driftPush = 0.40;        // slide the frame toward the drift direction
     this.driftSmooth = 1.8;
     // The client asked for a calmer camera that breathes back further as speed
@@ -98,7 +110,9 @@ export class ChaseCamera {
 
     // Lead the car by where it is going — but let the lead itself ease in, so
     // stabs of throttle or a spin do not jolt the frame.
-    this._tmp.set(car.velocity.x * this.lookAhead, 0, car.velocity.z * this.lookAhead);
+    const leadN = Math.min(speed / this.leadFullSpeed, 1);
+    const lead = this.lookAhead + (this.lookAheadFast - this.lookAhead) * (leadN * leadN);
+    this._tmp.set(car.velocity.x * lead, 0, car.velocity.z * lead);
     this._lead.lerp(this._tmp, 1 - Math.exp(-this.leadSmooth * step));
 
     // Push the frame sideways when sliding so the drift has room to breathe.
