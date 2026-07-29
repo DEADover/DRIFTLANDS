@@ -273,52 +273,74 @@ export class Game {
    * means the car may ride a few centimetres proud on a crest — which is
    * invisible at this camera height — instead of clipping through, which is not.
    */
-  carGroundAt(v, dt = 1 / 60) {
+  /**
+   * CAR POSE FROM THE FOUR CONTACT PATCHES — the single source of truth.
+   *
+   * The old scheme had two competing ones: the body took its tilt from the
+   * terrain NORMAL sampled under the car's centre, and then every wheel was
+   * dragged back onto the ground individually afterwards. On any climb or
+   * descent those two disagree — the normal at a point is not the plane through
+   * four patches several metres apart — so the correction pass was permanently
+   * fighting the chassis transform, and wheels sank or floated depending on
+   * which won. Patching it per-location could never work.
+   *
+   * Now the contact patches decide everything. Sample the surface under each
+   * wheel, fit a plane, and take the ride height, pitch and roll from it. The
+   * wheels then sit on the ground BY CONSTRUCTION, at fixed local positions,
+   * with no correction pass at all.
+   *
+   * @returns {{y:number, pitch:number, roll:number, onBridge:boolean, contact:number[]}}
+   */
+  carPose(v, dt = 1 / 60) {
+    const A = 1.35;   // half wheelbase, must match car.js wheel placement
+    const B = 0.92;   // half track
     const f = v.forward.clone(), r = v.right.clone();
-    let sum = 0, max = -Infinity;
+
+    // Order: FL, FR, RL, RR
+    const off = [[A, B], [A, -B], [-A, B], [-A, -B]];
+    const h = [0, 0, 0, 0];
     let onBridge = false;
-    for (const [fwd, side] of [[1.35, 0.92], [1.35, -0.92], [-1.35, 0.92], [-1.35, -0.92]]) {
-      const x = v.position.x + f.x * fwd + r.x * side;
-      const z = v.position.z + f.z * fwd + r.z * side;
+    for (let i = 0; i < 4; i++) {
+      const x = v.position.x + f.x * off[i][0] + r.x * off[i][1];
+      const z = v.position.z + f.z * off[i][0] + r.z * off[i][1];
       const g = this.groundAt(x, z);
-      sum += g.height;
-      if (g.height > max) max = g.height;
+      h[i] = g.height;
       onBridge = onBridge || g.onBridge;
     }
 
-    // Take the MEAN of the four contact patches, not the max.
-    //
-    // Using the max made the body's height jump the instant a different corner
-    // became the highest — a discontinuous function of position, which is
-    // exactly the twitching you see while driving. The mean moves smoothly, and
-    // the per-wheel seating in car.js still keeps every wheel on the ground.
-    // A little of the max is mixed back in so a crest still lifts the car.
-    let target = sum / 4 + (max - sum / 4) * 0.35;
+    // Plane through the patches, expressed in the car's own frame.
+    const front = (h[0] + h[1]) * 0.5, rear = (h[2] + h[3]) * 0.5;
+    const left = (h[0] + h[2]) * 0.5, right = (h[1] + h[3]) * 0.5;
+    const yPlane = (front + rear) * 0.5;
+    const pitchT = Math.atan2(front - rear, 2 * A);   // nose up on a climb
+    const rollT = Math.atan2(left - right, 2 * B);
 
-    // While airborne the SIMULATION owns the height, not the terrain. Without
-    // this the body snapped back to the ground the instant it left a crest and
-    // there was no jump at all.
-    if (this._carY !== undefined && !v.onGround) target = this._carY;
-
-    // Low-pass only — NO rate limit.
-    //
-    // A 3.5 m/s clamp seemed safe until it was measured: at 31 m/s on a 15%
-    // gradient the ground rises 4.7 m/s, so the clamp could never keep up, the
-    // lag accumulated, and once it passed the 3 m "teleport" guard the body
-    // snapped three metres in one frame. The guard meant to stop popping was
-    // itself the biggest pop in the game (measured max step 3004 mm).
-    //
-    // A fast exponential filter is enough: per-frame mesh noise is a few mm and
-    // dies here, while a real gradient is tracked without lag.
-    const prev = this._bodyH;
-    if (prev === undefined || Math.abs(target - prev) > 8) {
-      this._bodyH = target;                       // respawn / teleport only
+    // Low-pass the pose, not the wheels. One filter, one place, so there is
+    // nothing left to fight. Rates are high enough to track a real gradient at
+    // speed and low enough to swallow facet-to-facet steps in the mesh.
+    if (this._pose === undefined) {
+      this._pose = { y: yPlane, pitch: pitchT, roll: rollT };
     } else {
-      this._bodyH = prev + (target - prev) * (1 - Math.exp(-55 * Math.max(dt, 1e-5)));
+      const kY = 1 - Math.exp(-55 * Math.max(dt, 1e-5));
+      const kA = 1 - Math.exp(-16 * Math.max(dt, 1e-5));
+      if (Math.abs(yPlane - this._pose.y) > 8) this._pose.y = yPlane;   // respawn
+      else this._pose.y += (yPlane - this._pose.y) * kY;
+      this._pose.pitch += (pitchT - this._pose.pitch) * kA;
+      this._pose.roll += (rollT - this._pose.roll) * kA;
     }
 
-    const centre = this.groundAt(v.position.x, v.position.z);
-    return { height: this._bodyH, normal: centre.normal, onBridge };
+    // Airborne: the ballistic height owns Y, and the body levels out.
+    const y = v.onGround === false && this._carY !== undefined
+      ? this._carY
+      : this._pose.y;
+
+    return { y, pitch: this._pose.pitch, roll: this._pose.roll, onBridge, contact: h };
+  }
+
+  /** Ground under the car, for the physics step. */
+  carGroundAt(v, dt = 1 / 60) {
+    const p = this.carPose(v, dt);
+    return { height: p.y, normal: UP.clone(), onBridge: p.onBridge, pose: p };
   }
 
   surfaceAt(x, z) {

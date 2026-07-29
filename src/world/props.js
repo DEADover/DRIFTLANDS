@@ -893,6 +893,14 @@ const MAKERS = {
   blockStoneSnow: (r, K) => blockStone(r, K, { snow: true }),
 };
 
+/**
+ * Exported for the tree/prop sheet tooling only. Judging a conifer from a
+ * whole-frame screenshot means judging a 60 px object, which is how three rounds
+ * of tuning went into proportions that were never the problem; the sheet renders
+ * one species 400 px tall on a flat lawn under the game's own light rig.
+ */
+export { MAKERS };
+
 // ---------------------------------------------------------------------------
 // BIOME MIXES
 //   alt  : [a,b,c,d] metres above the water line — the species' altitude band

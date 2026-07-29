@@ -323,6 +323,7 @@ export class CarView {
     const ride = v.updateVertical ? v.updateVertical(dt, ground.height) : 0;
 
     this.root.position.set(v.position.x, ground.height, v.position.z);
+    const pose = ground.pose;
     this.root.rotation.y = v.heading;
 
     // ---- weight transfer ---------------------------------------------------
@@ -333,16 +334,17 @@ export class CarView {
     this._roll += (targetRoll - this._roll) * k(11);
     this._pitch += (targetPitch - this._pitch) * k(9);
 
-    // Conform to the ground normal so the car hugs hills.
-    const n = ground.normal;
-    const slopeX = Math.atan2(n.x, n.y);
-    const slopeZ = Math.atan2(n.z, n.y);
-    const c = Math.cos(-v.heading), s = Math.sin(-v.heading);
-    const localPitch = slopeX * c - slopeZ * s;
-    const localRoll = slopeX * s + slopeZ * c;
-
-    this.chassis.rotation.z = this._pitch - localPitch;
-    this.chassis.rotation.x = this._roll + localRoll;
+    // Orientation comes from the CONTACT-PATCH PLANE (see Game.carPose), not
+    // from a terrain normal sampled under the car's centre. Those two disagree
+    // on every gradient, and the disagreement is what used to bury or float the
+    // wheels: the body tilted by one amount while the wheels needed another.
+    //
+    // Dynamic squat and roll are added ON TOP as small offsets, so weight
+    // transfer still reads without ever breaking contact.
+    const gp = pose?.pitch ?? 0;
+    const gr = pose?.roll ?? 0;
+    this.chassis.rotation.z = this._pitch - gp;
+    this.chassis.rotation.x = this._roll + gr;
 
     // Body rides on the springs: dive, squat and terrain bounce.
     this._bodyY += (ride - this._bodyY) * k(20);
@@ -371,39 +373,11 @@ export class CarView {
       this.hubs[i].rotation.z = -this.wheelSpin;
     }
 
-    // ---- plant each wheel on its own patch of ground -----------------------
-    //
-    // The line above only undoes the chassis's vertical TRANSLATION. The wheels
-    // are children of the chassis, so they also inherit its roll and pitch
-    // ROTATION, which swings the outer wheels down through the terrain on any
-    // camber or under any body roll — that is the sinking you can see.
-    //
-    // Rather than trying to invert the tilt analytically, measure it: put the
-    // wheel where the transform actually left it, ask the world how high the
-    // ground is at that exact point, and correct the difference. Costs four
-    // height samples a frame.
-    if (sampleHeight) {
-      this.root.updateMatrixWorld(true);
-      for (let i = 0; i < 4; i++) {
-        const w = this.wheels[i];
-        w.getWorldPosition(_wp);
-        const want = sampleHeight(_wp.x, _wp.z) + WHEEL_R;
-        // The travel has to be generous in BOTH directions. An earlier version
-        // allowed only 0.12 m of drop, which made wheels hang up to 0.87 m in
-        // the air whenever the ground fell away — off a camber, over a road
-        // cut, on the inside of a bank. Track the surface up and down; the
-        // range below is wide enough to cover the worst facet a wheel can
-        // straddle without ever letting one float or bury.
-        const raw = clamp(want - _wp.y, -0.75, 0.75);
-
-        // ...but LOW-PASS it. The height query is a continuous function sampled
-        // against a coarse faceted mesh, so consecutive frames disagree by a few
-        // centimetres and the correction alone made every wheel buzz. The spring
-        // is what a real wheel has; this is that spring.
-        this._seat[i] += (raw - this._seat[i]) * (1 - Math.exp(-26 * Math.max(dt, 1e-5)));
-        w.position.y += this._seat[i];
-      }
-    }
+    // NOTE: there is deliberately NO per-wheel ground correction here any more.
+    // The chassis is oriented to the plane through the four contact patches, so
+    // each wheel is on the surface by construction. The old correction pass
+    // sampled the ground under each wheel and dragged it back every frame,
+    // which fought this transform and was the source of the sinking.
 
     // ---- lights ------------------------------------------------------------
     const braking = !!v._braking || (v.speed > 4 && (v.pitchAccel ?? 0) < -5);
