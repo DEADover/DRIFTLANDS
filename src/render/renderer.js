@@ -145,7 +145,28 @@ function shadowFloor(p) {
   // full budget, the ambient supplying it is the palette's sky hue (see `tint`
   // below, deliberately barely desaturated), and the frame's darkest luma
   // bucket lands at 0.9% — exactly the reference's 0.9%.
-  return THREE.MathUtils.clamp(0.145 + 0.305 * share, 0.20, 0.42);
+  //
+  // ROUND 6: THAT LAST SENTENCE WAS A PREDICTION, AND IT WAS WRONG BY 7x.
+  //
+  // Shipped, the darkest bucket measured 6.6-7.6% of the frame against the
+  // reference's 0.9% — the single largest error in the luma histogram, and the
+  // reason the conifer stands read as black holes rather than as dark green
+  // trees. The round-5 solve was correct that the SEPARATION between sunlit and
+  // shadowed grass has to come from the light, and it is: open shade lands where
+  // the reference's does. What it did not account for is that shadow is not the
+  // only thing multiplying those pixels. A conifer interior takes the floor AND
+  // the wide cavity AO (strength 0.88 at intensity 4.2, tint ~0.55) on top, so
+  // 0.215 of budget becomes 0.12 of budget, and 0.12 of a dark needle albedo is
+  // a hole. The reference's own deepest bin, #172e17, is not a hole — it is a
+  // legible dark GREEN with red in it.
+  //
+  // MEASURED per luma decile (tools/hl.mjs), moving 0.215 -> 0.262:
+  //   bucket 0   7.6% -> see the commit; the reference wants 0.9%
+  //   bucket 1   9.8% -> the reference wants 15.0%
+  // i.e. the mass is meant to arrive one bucket up, not to disappear. Raising
+  // the floor is the only term that moves the whole shadow family together
+  // without touching the sunlit grass that already matches to within 2/255.
+  return THREE.MathUtils.clamp(0.215 + 0.305 * share, 0.20, 0.42);
 }
 
 const _c = new THREE.Color();
@@ -255,7 +276,22 @@ export class LightRig {
     // lit face barely 0.14 above it). A shadowless light pointed at exactly
     // those faces at 1.7x was the reason. 1.05 still keeps them off zero, which
     // is all this light was ever supposed to do.
-    this.fill.intensity = PI * fillTerm * 1.05;
+    //
+    // ROUND 6: "off zero" turned out to be the whole argument, and 1.05 does not
+    // achieve it. Read the round-5 note above carefully — at 1.7 the frame put
+    // 1.1% of its pixels below luma 0.1 against the reference's 0.9%, which is
+    // RIGHT, and 9.0% in the 0.1-0.2 bucket against 15.0%, which is short. The
+    // fix for "not enough mass at 0.15" is not "push the mass to 0.05": cutting
+    // this to 1.05 at the same time as the shadow floor went 0.293 -> 0.215 sent
+    // the bottom bucket to 6.6%, seven times the reference, and turned every
+    // conifer stand into a silhouette with no colour in it.
+    //
+    // This light is the only term in the rig that reaches an anti-sun face — the
+    // sun cannot by definition, the hemisphere lights it from above, and the AO
+    // only ever subtracts. So it is also the only term that can move bucket 0
+    // into bucket 1 without lifting the sunlit meadow, which already matches the
+    // reference to within 2/255. Back up, with the deeper floor kept.
+    this.fill.intensity = PI * fillTerm * 1.85;
     this.fill.position.set(
       -Math.cos(p.sunAzimuth) * 100,
       52,

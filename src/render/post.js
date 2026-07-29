@@ -360,6 +360,7 @@ const COMPOSITE_FRAG = /* glsl */ `
 
   uniform vec3  uLift;
   uniform float uLiftFall;
+  uniform vec3  uLiftToe;      // per channel: 0 = plain ramp; else the luma the fill fades out below
   uniform vec3  uGamma;
   uniform vec3  uGain;
   uniform float uContrast;
@@ -567,8 +568,52 @@ const COMPOSITE_FRAG = /* glsl */ `
     // not — under 1/255 in every case. Not worth a per-biome branch that the
     // next person would have to keep alive; uLiftFall defaults to 1.0 and
     // uLoKnee to 0.0, which leaves their curve shape exactly as authored.
-    float liftW = pow(max(1.0 - dot(max(col, 0.0), LUMA), 0.0), uLiftFall);
-    col += uLift * liftW;
+    // ...AND IT HAS A TOE, BECAUSE A CAVITY CANNOT SEE THE SKY.
+    //
+    // This lift models sky fill: the blue that arrives on a surface the sun
+    // cannot reach. A plain (1-luma)^f ramp says the darker a pixel is the more
+    // sky it receives, which is true of OPEN shade and exactly false of a closed
+    // one — the inside of a conifer stand is dark precisely because nothing,
+    // sun or sky, gets in there. So the ramp has to turn around at the bottom.
+    //
+    // MEASURED (tools/hl.mjs, mean colour of each luma decile). Rendering the
+    // frame with the lift disabled entirely:
+    //
+    //                 with lift        without        target
+    //   bucket 0    rgb(5,19,40)   rgb(9,18,13)   rgb(9,28,21)
+    //   bucket 1    rgb(17,43,47)  rgb(21,44,25)  rgb(23,45,25)
+    //   bucket 4    rgb(116,121,28) rgb(118,121,22) rgb(118,123,31)
+    //
+    // Bucket 1 without the lift is the reference to within two values per
+    // channel, and bucket 4 needs the lift to reach the reference's blue. Both
+    // things are true at once, so the amplitude is right and the PROFILE is
+    // wrong: at luma 0.08 the ramp delivers 90% of a blue lift to a pixel whose
+    // green is 18, which is how a dark green becomes a navy blue, and the
+    // saturation multiply downstream then finishes the red off (0.0275 -> 0.003).
+    //
+    // uLiftToe is the luma at which the fill is fully visible; below it the fill
+    // fades out to nothing at 0.02. Defaults to 0 = off, so the four unshipped
+    // biomes keep the plain ramp they were authored against.
+    //
+    // IT IS PER CHANNEL, BECAUSE THE THREE CHANNELS ARE THREE DIFFERENT LIGHTS.
+    //
+    // The blue in this lift is SKY, and a cavity cannot see the sky, so blue
+    // needs the toe. The green is BOUNCE off the grass and off the tree's own
+    // needles — it comes from the surfaces immediately around the pixel, which
+    // inside a conifer stand are more green surfaces. Bounce does not switch off
+    // in a cavity; it is the only light left in one.
+    //
+    // MEASURED (tools/hl.mjs). Our deepest bucket is rgb(8,19,20) against the
+    // reference's rgb(9,28,21): red and blue are within a value, and the whole
+    // deficit is 9/255 of GREEN. That is the shape this fixes and it is why a
+    // scalar toe could not — with blue at 0.105 and green at 0.048, any weight
+    // that delivers enough green delivers twice as much blue and the pixel goes
+    // navy, which is what round 5 shipped.
+    float lIn2 = dot(max(col, 0.0), LUMA);
+    float liftW = pow(max(1.0 - lIn2, 0.0), uLiftFall);
+    vec3 toeW = mix(vec3(1.0), smoothstep(vec3(0.02), max(uLiftToe, 0.021), vec3(lIn2)),
+                    step(vec3(0.0001), uLiftToe));
+    col += uLift * liftW * toeW;
 
     float l = dot(max(col, 0.0), LUMA);
     col = mix(vec3(l), col, uSaturation);
@@ -827,6 +872,7 @@ export function createPostFX(ctx) {
     uExposure: exposureU, uShoulder: shoulderU, uWhite: whiteU,
     uLift: { value: new THREE.Vector3(0, 0, 0) },
     uLiftFall: { value: 1.0 },
+    uLiftToe: { value: new THREE.Vector3(0, 0, 0) },
     uGamma: { value: new THREE.Vector3(1, 1, 1) },
     uGain: { value: new THREE.Vector3(1, 1, 1) },
     uContrast: { value: 1 },
@@ -911,6 +957,7 @@ export function createPostFX(ctx) {
       u.uWhite.value = g.white;
       u.uLift.value.fromArray(g.lift);
       u.uLiftFall.value = g.liftFalloff ?? 1.0;
+      u.uLiftToe.value.fromArray(g.liftToe ?? [0, 0, 0]);
       u.uGamma.value.fromArray(g.gamma);
       u.uGain.value.fromArray(g.gain);
       u.uContrast.value = g.contrast;
