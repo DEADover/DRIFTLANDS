@@ -85,8 +85,25 @@ function fir(rng, K, o = {}) {
   // Triangle budget: 4 per rim vertex pair, i.e. 2*seg per tier. A `fir` at
   // seg 12 and 8 tiers is ~210 triangles against the old 80. Across ~37 000
   // conifers that is about +4.6 M, spent on the subject of the frame.
-  const tiers = o.tiers ?? rng.int(8, 9);
-  const seg = o.seg ?? 14;
+  const tiers = o.tiers ?? rng.int(9, 11);
+  /**
+   * FLAP COUNT, SOLVED FOR PAD ASPECT — the reason our firs read as thistles.
+   *
+   * A flap is a triangle whose base is a chord of the shoulder ring and whose
+   * apex is the tip out at r. Its base chord is `2*inner*r*sin(PI/half)` and its
+   * radial length is `(1-inner)*r`, so at seg 14 / inner 0.34 the pads measured
+   * 0.30r wide by 0.66r long — an aspect of 1:2.2, which is a THORN. Setting
+   * base = length gives inner = 1/(1 + 2*sin(PI/half)):
+   *
+   *     half 4 (seg 8)  -> inner 0.41      half 6 (seg 12) -> inner 0.50
+   *     half 5 (seg 10) -> inner 0.46      half 7 (seg 14) -> inner 0.54
+   *
+   * and inner has to stay under ~0.50 or the crown fan becomes the exposed pale
+   * plateau. So FEWER, BROADER flaps per tier and MORE tiers, which is also what
+   * the reference has — and it is cheaper: 10 tiers at seg 8 is 178 triangles
+   * against 8 tiers at seg 14's 242.
+   */
+  const seg = o.seg ?? 8;
   // Radius ladder first, because both the trunk length and the tier spacing are
   // derived from it — the old code advanced by a jittered fraction of the TIER
   // height, which made total height a random walk and is why "6-9 tiers" once
@@ -111,12 +128,12 @@ function fir(rng, K, o = {}) {
    * reference's tips barely clear the row below. 0.34-0.46 keeps the serration
    * (it is what the silhouette is made of) without the spikes.
    */
-  const dropK = o.dropK ?? rng.float(0.34, 0.46);
+  const dropK = o.dropK ?? rng.float(0.38, 0.50);
   // `stepK` is the tier advance as a fraction of the tier's OWN radius, and it
   // has to stay a little above `dropK` or the tips of one skirt hang below the
   // shoulder of the next one down and the stack closes into a smooth cone. The
   // ratio that reads as "rows of drooping points" is about 1.15.
-  const stepK = o.stepK ?? rng.float(0.44, 0.52);
+  const stepK = o.stepK ?? rng.float(0.42, 0.50);
   const rad = [];
   const r0 = rng.float(2.20, 2.70) * wide;
   for (let i = 0; i < tiers; i++) {
@@ -137,8 +154,12 @@ function fir(rng, K, o = {}) {
   const drop0 = dropK * r0 * tall;
   // The bare pole, as a fraction of the whole tree. 0.075 is read off the
   // reference: you see grass under the skirt and a stub of bark, never a leg.
-  const trunkH = drop0 + (o.bareK ?? 0.075) * (rise + leaderH);
-  const tr = rng.float(0.15, 0.21) * wide * (1 + tiers * 0.022);
+  // 0.075 of the tree's height was not enough to SEE: at 60-100 px per tree that
+  // is four pixels, and the bottom skirt hangs over it. In target_01 the bare
+  // pole under a fir is closer to an eighth of the whole tree and you can read
+  // grass under the skirt on every one of them.
+  const trunkH = drop0 + (o.bareK ?? 0.13) * (rise + leaderH);
+  const tr = rng.float(0.17, 0.235) * wide * (1 + tiers * 0.018);
   // Open-ended and six-sided: the top is inside the canopy and the bottom is in
   // the turf, so both caps are pure waste. It runs up past the second tier's
   // shoulder so no gap can open between bark and needles.
@@ -897,31 +918,42 @@ const MAKERS = {
   // Short, full, heavy skirts, a slow taper and a wide crown — the "shorter
   // fuller fir" of the reference frame. Fewer tiers, but each one deeper.
   firOld: (r, K) => fir(r, K, {
-    tall: 0.90, wide: 1.28, tiers: 8, seg: 14,
-    dropK: 0.46, stepK: 0.44, profE: 0.42, bareK: 0.10, inner: 0.38,
+    tall: 0.90, wide: 1.28, tiers: 9, seg: 10,
+    dropK: 0.52, stepK: 0.40, profE: 0.42, bareK: 0.16, inner: 0.46,
   }),
   // TALL NARROW SPIRE. Not a needle: at wide 0.72 with six tiers this once came
   // out as a 22 m green spike three metres across, which read as litter. The
   // narrowness comes from SHORT frills and a fast-closing profile rather than
   // from a thin base, so the bottom of the tree still has a skirt on it.
   firSpire: (r, K) => fir(r, K, {
-    tall: 1.02, wide: 0.84, tiers: 10, seg: 10,
-    dropK: 0.30, stepK: 0.56, profE: 0.72, crownK: 0.34, inner: 0.30,
+    tall: 1.02, wide: 0.86, tiers: 12, seg: 8,
+    dropK: 0.34, stepK: 0.50, profE: 0.74, crownK: 0.34, inner: 0.42,
+  }),
+  // SQUAT AND FULL — the fourth silhouette, and the one the reference frame has
+  // that we did not: a shoulder-high conifer wider than it is tall at the skirt,
+  // with heavy overlapping frills and almost no bare trunk. It is what fills the
+  // gaps at the edge of a stand in target_01, and it is what "rounder, bushier
+  // forms in the same view" means without reintroducing the round-canopy
+  // broadleaf that round 5 correctly threw out (a lumpy bright ball on a stick,
+  // the most out-of-place object in that shot).
+  firBushy: (r, K) => fir(r, K, {
+    tall: 0.52, wide: 1.05, tiers: 7, seg: 10,
+    dropK: 0.62, stepK: 0.46, profE: 0.34, bareK: 0.03, inner: 0.48, crownK: 0.26,
   }),
   firYoung: (r, K) => fir(r, K, {
-    tall: 0.74, wide: 0.70, tiers: 6, seg: 12,
-    dropK: 0.42, stepK: 0.56, profE: 0.52, bareK: 0.05, inner: 0.36,
+    tall: 0.74, wide: 0.72, tiers: 7, seg: 8,
+    dropK: 0.46, stepK: 0.50, profE: 0.52, bareK: 0.07, inner: 0.44,
   }),
   // The bottom of the size ladder. The reference is full of knee-to-waist-high
   // conifers filling the gaps between the hero trees; without them the meadow
-  // reads as mown. Cheapest member: 4 tiers at seg 8 is 64 triangles of skirt.
+  // reads as mown. Cheapest member: 5 tiers at seg 6 is 60 triangles of skirt.
   firSapling: (r, K) => fir(r, K, {
-    tall: 0.80, wide: 0.36, tiers: 4, seg: 8,
-    dropK: 0.44, stepK: 0.58, profE: 0.56, bareK: 0.05, inner: 0.32,
+    tall: 0.80, wide: 0.38, tiers: 5, seg: 6,
+    dropK: 0.48, stepK: 0.52, profE: 0.56, bareK: 0.05, inner: 0.42,
   }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
   firSnowOld: (r, K) => fir(r, K, {
-    snow: true, tall: 0.92, wide: 1.24, tiers: 8, seg: 12, dropK: 0.46, stepK: 0.46, profE: 0.46,
+    snow: true, tall: 0.92, wide: 1.24, tiers: 9, seg: 10, dropK: 0.50, stepK: 0.44, profE: 0.46,
   }),
   scotsPine, broadleaf, birch, maple, snag, stump,
   saguaro, barrelCactus, ocotillo, scrub, windPine,
@@ -1121,6 +1153,12 @@ const MIXES = {
       { id: 'firSpire', w: 2.2, alt: [2, 7, 135, 195], wet: [0, 0.12, 0.95, 1.15], flat: 0.64, size: [0.75, 1.26] },
       { id: 'firYoung', w: 1.9, alt: [1, 5, 145, 210], wet: [0, 0.08, 1.0, 1.2], flat: 0.58, size: [0.85, 1.80] },
       { id: 'firSapling', w: 1.1, alt: [1, 4, 155, 235], wet: [0, 0.05, 1.05, 1.25], flat: 0.52, size: [0.9, 2.1] },
+      // The squat full one. Weight kept below the spires and the standard fir —
+      // target_01 is a conifer meadow whose dominant form is the tall fir — but
+      // high enough that a hero frame holds several, because "all one shape at
+      // different scales" is a per-FRAME complaint and a species that appears
+      // once a kilometre does not answer it.
+      { id: 'firBushy', w: 1.5, alt: [1, 4, 140, 210], wet: [0, 0.08, 1.05, 1.2], flat: 0.56, size: [0.80, 1.55] },
       // Kept deliberately low: target_01 is a conifer meadow. Round canopies
       // are the accent, not the crop.
       // A copse picks ONE dominant species and then keeps it for three quarters
