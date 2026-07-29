@@ -364,7 +364,10 @@ const COMPOSITE_FRAG = /* glsl */ `
   uniform vec3  uGain;
   uniform float uContrast;
   uniform float uContrastPivot;
+  uniform float uContrastChroma;
   uniform float uHiKnee;
+  uniform float uHiRecover;    // 0 = plain shoulder; 1 = peaks pass through untouched
+  uniform float uHiRecoverLo;  // peak value at which the release starts
   uniform float uLoKnee;
   uniform float uSaturation;
   uniform vec3  uShadowTint;
@@ -478,7 +481,44 @@ const COMPOSITE_FRAG = /* glsl */ `
     // green in the frame gets darker and the picture loses the sunlit end
     // instead of gaining it. Pivoting at the meadow's own median leaves the mid
     // where it already matched and spends the contrast on the two tails.
-    col = (col - uContrastPivot) * uContrast + uContrastPivot;
+    //
+    // ...AND IT RUNS ON LUMA, NOT PER CHANNEL. THIS IS THE BLUE FIX.
+    //
+    // MEASURED (tools/measure.mjs, round 4): every dominant colour in our frame
+    // ended in 00 — #5d5d00, #5d7400, #465d00, #464600 — while the reference's
+    // greens all carry blue at 0x17. Frame mean blue 26 against the target's 44.
+    // The albedo was never that blue-free; this line was eating it.
+    //
+    // An affine contrast applied PER CHANNEL about a pivot of 0.325 is a
+    // saturation multiplier in disguise. Grass arriving as (0.40, 0.47, 0.06):
+    // green is near the pivot and barely moves (0.47 -> 0.514, x1.09) but blue
+    // is 0.27 BELOW it and gets pushed 1.3x further away (0.06 -> -0.02, then
+    // clamped up off the floor by uLoKnee to 0.01). B/G goes 0.128 -> 0.019.
+    // The weakest channel of every pixel darker than the pivot is destroyed,
+    // which is both the missing blue AND the measured oversaturation (0.830
+    // against the target's 0.756 — and mean saturation is (max-min)/max, i.e.
+    // almost exactly "how far the weak channel is from the strong one").
+    //
+    // Run the SAME affine curve on luma instead and scale the triplet by the
+    // ratio. Because luma is a linear combination whose weights sum to 1, the
+    // resulting LUMINANCE is bit-for-bit what the per-channel form produced —
+    // the tonal shaping this knob exists for is untouched — but the ratio
+    // between the channels, i.e. the hue and the saturation, survives exactly.
+    // Colour then comes from the world and from the tints below, which is where
+    // round 2 concluded it should come from.
+    //
+    // uContrastChroma mixes between the two; it defaults to 0 (the old
+    // behaviour) so the four biomes nobody is shipping keep their authored look.
+    {
+      vec3 perCh = (col - uContrastPivot) * uContrast + uContrastPivot;
+      float lIn = dot(max(col, 0.0), LUMA);
+      float lOut = (lIn - uContrastPivot) * uContrast + uContrastPivot;
+      // Guard the ratio: a near-black pixel has no chroma to preserve, and
+      // lOut/lIn there is either enormous or negative. Below the guard the two
+      // forms agree anyway (both are heading for the low knee).
+      vec3 lumaCh = max(col, 0.0) * clamp(lOut / max(lIn, 0.02), 0.0, 4.0);
+      col = mix(perCh, lumaCh, uContrastChroma);
+    }
 
     // ---- LOW KNEE: the mirror of uHiKnee, and it was the missing half.
     //
@@ -551,12 +591,53 @@ const COMPOSITE_FRAG = /* glsl */ `
     // the pivot, and the brightest thing in frame is the dust plume, which is
     // exactly what must NOT grow. Same peak-channel compression as tonemap(), so
     // it desaturates nothing — it just stops the grade printing paper white.
+    //
+    // ...PLUS HIGHLIGHT RECOVERY, WHICH IS WHAT MAKES A LOW KNEE USABLE.
+    //
+    // Alpine needs the knee down at 0.48, because its dirt road arrives 0.23 of
+    // display range hotter than the reference's and is 14% of the frame. But a
+    // knee low enough to hold the road also flattens everything above it: with
+    // the road landing at 0.60, MEASURED, the frame had 0.0% of pixels above
+    // luma 0.7 against the reference's 1.5% and 0.0% above 0.8 against its 0.2%.
+    // No tail at all, and a picture with no tail reads as capped.
+    //
+    // Those two are not in conflict, but BRIGHTNESS ALONE CANNOT TELL THEM
+    // APART — measured, the road's peak channel averages 0.88 and its brightest
+    // pixels run past 0.95, which is exactly where the plume lives. A release
+    // gated on peak value only was worth 3.2% of the frame above luma 0.7
+    // (target 1.5%) and it emptied the 0.5-0.6 bucket to pay for it.
+    //
+    // CHROMA tells them apart cleanly, and for a real reason. A bright DIFFUSE
+    // surface is bright because of its albedo, and an albedo has a colour: our
+    // road is a saturated ochre, chroma 0.53. A real highlight — dust lit from
+    // behind, a white flower, a car roof, foam — is bright because of the LIGHT,
+    // and the light is white, so its chroma is near zero. Releasing the knee for
+    // achromatic peaks and holding it for coloured ones is the difference
+    // between "recover the highlights" and "turn the exposure back up".
+    //
+    // MEASURED, and the band is not where you would guess. The reference's own
+    // brightest 1% has mean chroma 0.434 — its highlights are the bridge, the
+    // road crown and sunlit rock, all warm, none of them white. So the band is
+    // not "achromatic vs coloured", it is "less coloured than the road", which
+    // measures 0.539 after the grade. Ours: brightest 1% at chroma 0.491.
+    //
+    // The chroma band is not a taste knob and is deliberately not exposed: it is
+    // the definition of "this is a highlight, not a paint colour".
+    //
+    // Monotonic in pk by construction: the released term is (pk - compressed),
+    // which grows with pk, times a smoothstep in pk.
     {
       float pk = max(col.r, max(col.g, col.b));
       if (pk > uHiKnee) {
         float span = max(1.0 - uHiKnee, 1e-3);
         float t = (pk - uHiKnee) / span;
-        col *= (uHiKnee + span * (t / (1.0 + t))) / pk;
+        float pc = uHiKnee + span * (t / (1.0 + t));
+        float chroma = (pk - min(col.r, min(col.g, col.b))) / max(pk, 1e-4);
+        float w = uHiRecover
+                * smoothstep(uHiRecoverLo, 1.0, pk)
+                * (1.0 - smoothstep(0.34, 0.58, chroma));
+        pc += w * (pk - pc);
+        col *= pc / pk;
       }
     }
 
@@ -750,7 +831,10 @@ export function createPostFX(ctx) {
     uGain: { value: new THREE.Vector3(1, 1, 1) },
     uContrast: { value: 1 },
     uContrastPivot: { value: 0.5 },
+    uContrastChroma: { value: 0.0 },
     uHiKnee: { value: 0.88 },
+    uHiRecover: { value: 0.0 },
+    uHiRecoverLo: { value: 0.88 },
     uLoKnee: { value: 0.0 },
     uSaturation: { value: 1 },
     uShadowTint: { value: new THREE.Vector3(1, 1, 1) },
@@ -831,7 +915,10 @@ export function createPostFX(ctx) {
       u.uGain.value.fromArray(g.gain);
       u.uContrast.value = g.contrast;
       u.uContrastPivot.value = g.contrastPivot ?? 0.5;
+      u.uContrastChroma.value = g.contrastChroma ?? 0.0;
       u.uHiKnee.value = g.hiKnee ?? 0.88;
+      u.uHiRecover.value = g.hiRecover ?? 0.0;
+      u.uHiRecoverLo.value = g.hiRecoverRange?.[0] ?? 0.88;
       u.uLoKnee.value = g.loKnee ?? 0.0;
       u.uSaturation.value = g.saturation;
       u.uShadowTint.value.fromArray(g.shadowTint);

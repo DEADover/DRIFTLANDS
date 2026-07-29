@@ -125,7 +125,27 @@ function shadowFloor(p) {
   // the old curve handed it 0.331 and this one hands it 0.293. Measured frame
   // p05 moves 49 -> 44 against the reference's 33, and darkPct (fraction below
   // luma 18) stays under 0.5%: still a coloured step, still not a hole.
-  return THREE.MathUtils.clamp(0.20 + 0.405 * share, 0.26, 0.46);
+  //
+  // ROUND 5, MEASURED (tools/measure.mjs, dominant colour bins). This is the
+  // number the histogram was really asking about. The reference's meadow reads
+  // as three separated values — #8b8b17 in the sun (luma 0.51), #2e4617 in tree
+  // shadow (0.24), #172e17 in the deep (0.16) — and that separation is why its
+  // luma histogram is a plateau (21.5 / 22 / 17.5 across three buckets). Ours
+  // read #5d7417 in the sun (0.41) and #464617 in shadow (0.28): the same
+  // meadow, 0.13 of display range wide instead of 0.29.
+  //
+  // A grade cannot invent that. Solving for the affine contrast that maps our
+  // pair onto the reference's gives a slope of 2.2 ON TOP of the 1.43 already
+  // there — a curve that would posterise every facet in the frame. The
+  // separation has to come from the LIGHT, and this is the only number that
+  // sets it. 0.293 -> 0.215 is that same solve done here instead, where it
+  // costs nothing but a darker shadow.
+  //
+  // Still a clean coloured step and not a hole: the shadow keeps 0.215 of the
+  // full budget, the ambient supplying it is the palette's sky hue (see `tint`
+  // below, deliberately barely desaturated), and the frame's darkest luma
+  // bucket lands at 0.9% — exactly the reference's 0.9%.
+  return THREE.MathUtils.clamp(0.145 + 0.305 * share, 0.20, 0.42);
 }
 
 const _c = new THREE.Color();
@@ -225,7 +245,17 @@ export class LightRig {
     this.hemi.intensity = PI * ambTerm;
 
     this.fill.color.copy(tint(p.ambientSky, Math.max(0, desat - 0.06)));
-    this.fill.intensity = PI * fillTerm * 1.7; // directional, so only ~half the surfaces see it
+    // Directional, so only ~half the surfaces see it — hence a multiplier above
+    // 1. But 1.7 was aiming it straight at the one thing the frame needed dark.
+    // MEASURED (tools/measure.mjs): the reference puts 15.0% of its pixels in
+    // the 0.1-0.2 luma bucket and 0.9% below 0.1; ours put 9.0% and 1.1%. The
+    // missing mass is the anti-sun face of every conifer — the reference's
+    // canopies read as near-black silhouettes with a lit rim, ours read as one
+    // mid green all the way round (measured 0.306 on the shaded face against a
+    // lit face barely 0.14 above it). A shadowless light pointed at exactly
+    // those faces at 1.7x was the reason. 1.05 still keeps them off zero, which
+    // is all this light was ever supposed to do.
+    this.fill.intensity = PI * fillTerm * 1.05;
     this.fill.position.set(
       -Math.cos(p.sunAzimuth) * 100,
       52,
