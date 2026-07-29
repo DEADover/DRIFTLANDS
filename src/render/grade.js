@@ -566,7 +566,11 @@ export const GRADES = {
     // terrain facet under a directional key is one value from edge to edge and
     // the meadow is made of them. Only variation in the scene can break that,
     // and this is the only source of it in the frame.
-    dapple: 0.55,
+    // 0.55 read as BLUR, not broken light: a low-frequency noise field over a
+    // faceted meadow makes soft grey blobs that the eye takes for defocus. The
+    // reference's ground variation comes from real tree shadows. Swept
+    // 0.55/0.25/0.0 and looked: 0 is clean, so keep a trace and no more.
+    dapple: 0.12,
     // The reference's field is yellow-green where the sun lands and blue-green
     // in the hollows, and that warm/cool split across the meadow is most of why
     // it reads as painted rather than lit. 0.06 was almost invisible.
