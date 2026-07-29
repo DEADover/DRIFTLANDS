@@ -285,6 +285,8 @@ export class CarView {
     this.root.add(this.chassis);
 
     this.suspension = this.wheels.map(() => 0);
+    /** Low-passed per-wheel ground-seating offset (see update()). */
+    this._seat = [0, 0, 0, 0];
     this.wheelSpin = 0;
     this._roll = 0;
     this._pitch = 0;
@@ -392,7 +394,14 @@ export class CarView {
         // cut, on the inside of a bank. Track the surface up and down; the
         // range below is wide enough to cover the worst facet a wheel can
         // straddle without ever letting one float or bury.
-        w.position.y += clamp(want - _wp.y, -0.75, 0.75);
+        const raw = clamp(want - _wp.y, -0.75, 0.75);
+
+        // ...but LOW-PASS it. The height query is a continuous function sampled
+        // against a coarse faceted mesh, so consecutive frames disagree by a few
+        // centimetres and the correction alone made every wheel buzz. The spring
+        // is what a real wheel has; this is that spring.
+        this._seat[i] += (raw - this._seat[i]) * (1 - Math.exp(-26 * Math.max(dt, 1e-5)));
+        w.position.y += this._seat[i];
       }
     }
 

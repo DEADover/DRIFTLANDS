@@ -1836,12 +1836,17 @@ class RoadIndex {
     this.samples = [];
   }
   add(route) {
-    for (const sm of route.samples) {
+    for (let k = 0; k < route.samples.length; k++) {
+      const sm = route.samples[k];
+      // Remember which route this station belongs to and where in it, so
+      // heightAt() can blend toward the next station along.
+      sm._route = route;
+      sm._k = k;
       const i = this.samples.length;
       this.samples.push(sm);
-      const k = `${Math.floor(sm.x / this.cell)},${Math.floor(sm.z / this.cell)}`;
-      let l = this.map.get(k);
-      if (!l) this.map.set(k, (l = []));
+      const key = `${Math.floor(sm.x / this.cell)},${Math.floor(sm.z / this.cell)}`;
+      let l = this.map.get(key);
+      if (!l) this.map.set(key, (l = []));
       l.push(i);
     }
   }
@@ -2029,8 +2034,26 @@ export function createRoadNetwork(ctx) {
   const heightAt = (x, z) => {
     const h = index.nearest(x, z);
     if (!h || h.d > h.sm.hw + h.sm.verge) return null;
-    const u = (x - h.sm.x) * h.sm.nx + (z - h.sm.z) * h.sm.nz;
-    return sectionY(h.sm, u);
+    const a = h.sm;
+    const u = (x - a.x) * a.nx + (z - a.z) * a.nz;
+
+    // Longitudinal position between this station and the next one along.
+    const route = a._route;
+    if (route && a._k !== undefined) {
+      const arr = route.samples;
+      const ds = route.ds || 3;
+      const t = ((x - a.x) * a.tx + (z - a.z) * a.tz) / ds;   // -0.5..0.5 typically
+      const dir = t >= 0 ? 1 : -1;
+      const j = a._k + dir;
+      const b = (j >= 0 && j < arr.length) ? arr[j]
+              : (route.closed ? arr[((j % arr.length) + arr.length) % arr.length] : null);
+      if (b) {
+        const ub = (x - b.x) * b.nx + (z - b.z) * b.nz;
+        const w = Math.min(1, Math.abs(t));
+        return sectionY(a, u) * (1 - w) + sectionY(b, ub) * w;
+      }
+    }
+    return sectionY(a, u);
   };
   const surfaceAt = (x, z) => {
     const h = index.nearest(x, z);

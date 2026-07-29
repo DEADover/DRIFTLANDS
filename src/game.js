@@ -273,19 +273,43 @@ export class Game {
    * means the car may ride a few centimetres proud on a crest — which is
    * invisible at this camera height — instead of clipping through, which is not.
    */
-  carGroundAt(v) {
+  carGroundAt(v, dt = 1 / 60) {
     const f = v.forward.clone(), r = v.right.clone();
-    let h = -Infinity;
+    let sum = 0, max = -Infinity;
     let onBridge = false;
     for (const [fwd, side] of [[1.35, 0.92], [1.35, -0.92], [-1.35, 0.92], [-1.35, -0.92]]) {
       const x = v.position.x + f.x * fwd + r.x * side;
       const z = v.position.z + f.z * fwd + r.z * side;
       const g = this.groundAt(x, z);
-      if (g.height > h) h = g.height;
+      sum += g.height;
+      if (g.height > max) max = g.height;
       onBridge = onBridge || g.onBridge;
     }
+
+    // Take the MEAN of the four contact patches, not the max.
+    //
+    // Using the max made the body's height jump the instant a different corner
+    // became the highest — a discontinuous function of position, which is
+    // exactly the twitching you see while driving. The mean moves smoothly, and
+    // the per-wheel seating in car.js still keeps every wheel on the ground.
+    // A little of the max is mixed back in so a crest still lifts the car.
+    const target = sum / 4 + (max - sum / 4) * 0.35;
+
+    // Rate-limit the body so a facet edge or a road/terrain seam cannot pop it.
+    // 3.5 m/s is far faster than any real slope at our speeds but still kills
+    // the single-frame steps.
+    const prev = this._bodyH;
+    if (prev === undefined || Math.abs(target - prev) > 3.0) {
+      this._bodyH = target;                       // teleport / respawn: snap
+    } else {
+      const k = 1 - Math.exp(-18 * dt);
+      const lim = 3.5 * dt;
+      const step = THREE.MathUtils.clamp((target - prev) * k, -lim, lim);
+      this._bodyH = prev + step;
+    }
+
     const centre = this.groundAt(v.position.x, v.position.z);
-    return { height: h, normal: centre.normal, onBridge };
+    return { height: this._bodyH, normal: centre.normal, onBridge };
   }
 
   surfaceAt(x, z) {
@@ -393,7 +417,7 @@ export class Game {
 
     const v = this.vehicle;
     const g = this.groundAt(v.position.x, v.position.z);
-    this.carView.update(scaled, v, this.carGroundAt(v), this._sampleHeight ??=
+    this.carView.update(scaled, v, this.carGroundAt(v, scaled), this._sampleHeight ??=
       (x, z) => this.groundAt(x, z).height);
     this.emitFx(scaled);
     this.skid.update(scaled);
