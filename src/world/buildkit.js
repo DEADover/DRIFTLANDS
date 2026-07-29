@@ -311,6 +311,23 @@ export function slabGeom(rng, opts = {}) {
 const C = (hex) => new THREE.Color(hex);
 const off = (c, h, s, l) => c.clone().offsetHSL(h, s, l);
 
+/**
+ * DARKEN — and the reason `off(c, 0, 0, -x)` must never be used for it.
+ *
+ * THREE.Color stores LINEAR values, so `getHSL` reports a linear lightness. A
+ * mid-brown timber like #6b4a30 measures l = 0.09 there, not the ~0.30 the hex
+ * suggests, and `offsetHSL(0, 0.02, -0.09)` therefore lands it on exactly
+ * black. Auditing every entry in this table found four that had collapsed:
+ * trunkDark, woodDark, tar and (nearly) roofSlate — i.e. every shutter, door,
+ * balcony rail, baluster and window surround on the alpine chalet was a
+ * PURE BLACK box, which at this camera height is the strongest note a small
+ * building can make. The chalet's windows were being blamed for it.
+ *
+ * Scaling is what "further into shadow" means physically and it cannot reach
+ * black by accident: `dark(c, 0.45)` is always 45% of the light coming off c.
+ */
+const dark = (c, k) => c.clone().multiplyScalar(k);
+
 export function derivePalette(p, biomeId) {
   const rock = C(p.rock);
   const rockDark = C(p.rockShadow);
@@ -322,7 +339,7 @@ export function derivePalette(p, biomeId) {
 
   return {
     trunk,
-    trunkDark: off(trunk, 0, 0.02, -0.09),
+    trunkDark: dark(off(trunk, 0, 0.02, 0), 0.42),
     bark: off(trunk, 0.01, -0.04, 0.05),
     birch: off(edge, 0.0, -0.22, 0.16),
     dead: off(trunk, 0.0, -0.30, 0.14),
@@ -337,18 +354,18 @@ export function derivePalette(p, biomeId) {
     plaster: off(edge, 0, -0.10, 0.16),
     plasterWarm: off(edge, -0.02, 0.05, 0.10),
     wood: off(trunk, 0.005, 0.06, 0.02),
-    woodDark: off(trunk, 0, 0.04, -0.11),
+    woodDark: dark(off(trunk, 0, 0.04, 0), 0.38),
     woodPale: off(trunk, 0.01, -0.10, 0.20),
     roofTile: off(accent0, -0.01, -0.12, -0.20),
-    roofSlate: off(rockDark, 0.02, 0.02, -0.05),
+    roofSlate: dark(off(rockDark, 0.02, 0.02, 0), 0.55),
     roofMetal: off(rock, 0.01, -0.12, 0.06),
-    rust: off(accent0, -0.03, -0.18, -0.26),
+    rust: dark(off(accent0, -0.03, -0.18, 0), 0.30),
     metal: off(rock, 0.0, -0.22, 0.04),
     metalDark: off(rockDark, 0, -0.15, -0.02),
     white,
     signRed: accent0,
     signYellow: accent1,
-    tar: off(rockDark, 0, -0.1, -0.16),
+    tar: dark(off(rockDark, 0, -0.1, 0), 0.45),
     glass: off(C(p.skyHorizon), 0, 0.05, -0.28),
     hay: off(C(p.ground[3] ?? p.ground[2]), 0.01, 0.12, 0.02),
     snow: off(C(p.ground[p.ground.length - 1]), 0, 0, 0.02),

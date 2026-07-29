@@ -53,9 +53,18 @@ function fir(rng, K, o = {}) {
   const b = new GeoBuilder();
   const tall = o.tall ?? 1;
   const wide = o.wide ?? 1;
-  const tiers = o.tiers ?? rng.int(3, 5);
-  const trunkH = rng.float(1.3, 2.4) * tall;
-  const tr = rng.float(0.26, 0.38) * wide;
+  // A REAL FRINGE STACK, not three cones on a stick.
+  //
+  // Cropping target_01 at 2x next to our own frame made this the clearest
+  // remaining silhouette difference, and it is not size at all. Its conifers
+  // are seven to nine THIN skirts, each barely wider than the one above and
+  // heavily overlapped, so the tree reads as a soft layered spire whose edge is
+  // a row of little points. Ours were three to five FAT cones, and from a
+  // camera this high a fat cone shows its whole top face — which is why our
+  // stands read as a heap of green pyramids and the reference's read as trees.
+  const tiers = o.tiers ?? rng.int(6, 9);
+  const trunkH = rng.float(1.25, 2.30) * tall;
+  const tr = rng.float(0.24, 0.34) * wide;
   // Open-ended: the trunk's top disappears inside the lowest tier and its
   // bottom is in the turf, so both caps are ten triangles of nothing. Same
   // reasoning for the tier cones below. Across ~30k conifers this is worth
@@ -65,9 +74,34 @@ function fir(rng, K, o = {}) {
   // Broader skirt, slightly shorter tiers than v1. Measured off target_01: the
   // conifers there are about a third as wide as they are tall, with the lowest
   // tier clearly the widest. Ours were nearer a fifth, which read as spikes.
-  let r = rng.float(2.45, 3.35) * wide;
+  //
+  // ROUND 5 SIZE — and the round's most useful negative result.
+  //
+  // Measured against the ROAD (11 m wide, near-vertical in both frames, so
+  // tree/road is a scale-free ratio that survives the two cameras being at
+  // different heights, which a pixel count of the car does not):
+  //
+  //                       skirt / road     height / road    skirt / height
+  //     target_01              0.42            0.88             0.48
+  //     ours r04               0.53            0.92             0.58
+  //
+  // The r04 number is a LIE and it cost two shoots to find out. What was
+  // measured as a 0.53-wide tree was two or three conifers of a 34-member copse
+  // overlapping into one silhouette; an individual r04 fir is 0.44. Cutting the
+  // skirt 26% on that evidence produced a frame of green needles, and cutting
+  // the height with it produced scrub.
+  //
+  // The tree was never the problem — the STAND was. Proportions go back to
+  // roughly where they were (a 6% trim, which the reference does support), and
+  // the whole fix lives in `clump` and in the raised density instead: many
+  // small groups you can see between, not four big ones you cannot.
+  //
+  // Overall height is held where it was: with `tiers` now 6-9 and each skirt
+  // advancing only ~0.46 of its own height, the per-tier height has to come
+  // down by the same factor or a fir turns into a 30 m mast.
+  let r = rng.float(2.30, 3.05) * wide;
   for (let i = 0; i < tiers; i++) {
-    const h = rng.float(3.1, 4.3) * tall * (1 - i * 0.05);
+    const h = rng.float(2.35, 3.15) * tall * (1 - i * 0.04);
     // Dark at the skirt, lighter at the tip. The reference's conifers all read
     // this way — a deep shadowed core with sunlit new growth on top — and it is
     // what stops a stand of firs from being one flat green mass.
@@ -77,8 +111,11 @@ function fir(rng, K, o = {}) {
     if (o.snow && i >= tiers - 2) {
       b.cone(r * 0.62, h * 0.26, rng.int(5, 6), K.snow, { y: y + h * 0.84 });
     }
-    y += h * rng.float(0.60, 0.72);
-    r *= rng.float(0.64, 0.76);
+    // Heavy overlap and a gentle taper: each skirt hides the base of the one
+    // below it, so the silhouette is a continuous cone with a serrated edge
+    // rather than a stack of separate umbrellas.
+    y += h * rng.float(0.42, 0.52);
+    r *= rng.float(0.855, 0.905);
   }
   return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y + 2 };
 }
@@ -259,7 +296,13 @@ function windPine(rng, K) {
 function bush(rng, K, pal) {
   const b = new GeoBuilder();
   const n = rng.int(2, 4);
-  const R = rng.float(1.0, 2.2);
+  // ROUND 5: halved. At R up to 2.2 with an instance scale up to 1.4 a single
+  // shrub was a six-metre green ball — as wide as a conifer's skirt and, being
+  // a smooth blob, far more conspicuous. Three of them landed in the hero frame
+  // and read as round-canopy trees, which is the exact note the reference does
+  // not have. In target_01 a shrub is knee-to-waist high: something you notice
+  // as texture in the grass, never as an object.
+  const R = rng.float(0.55, 1.25);
   for (let i = 0; i < n; i++) {
     b.blob(R * rng.float(0.6, 1.0), pal[i % pal.length], {
       x: rng.gauss(0, R * 0.5), z: rng.gauss(0, R * 0.5),
@@ -430,7 +473,7 @@ function boulder(rng, K, o = {}) {
 
 const MAKERS = {
   fir,
-  firOld: (r, K) => fir(r, K, { tall: 1.35, wide: 1.25, tiers: 5 }),
+  firOld: (r, K) => fir(r, K, { tall: 1.24, wide: 1.10, tiers: 5 }),
   firYoung: (r, K) => fir(r, K, { tall: 0.62, wide: 0.72, tiers: 3 }),
   // The bottom of the size ladder. The reference is full of knee-to-waist-high
   // conifers filling the gaps between the hero trees; without them the meadow
@@ -439,7 +482,7 @@ const MAKERS = {
   // Tall and slightly slim — NOT a needle. At wide: 0.72 with six tiers this
   // came out as a 22 m green spike about three metres across, which read as
   // litter rather than as a tree.
-  firSpire: (r, K) => fir(r, K, { tall: 1.06, wide: 0.88, tiers: 5 }),
+  firSpire: (r, K) => fir(r, K, { tall: 1.08, wide: 0.80, tiers: 5 }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
   firSnowOld: (r, K) => fir(r, K, { snow: true, tall: 1.3, wide: 1.2, tiers: 5 }),
   scotsPine, broadleaf, birch, maple, snag, stump,
@@ -506,7 +549,16 @@ const MIXES = {
     // i.e. the car was clipping trunks all the way round. Past this point more
     // conifers cost the DRIVE, and this is a playable demo before it is a
     // screenshot. 44 000 / 7 400 is where the two curves cross.
-    canopyTarget: 44000, coverTarget: 32000, pebbleTarget: 9000, heroes: 430, singles: 7400, moistScale: 90,
+    //
+    // ROUND 5. Probed: the r04 map carried 34 664 conifers over 2.89 km²
+    // — 12 000/km² against target_01's measured ~25 000. The reason the last
+    // round could not close it was collision, and collision is now fixed at
+    // the cause (see `solidTree`), so the count can finally go where the
+    // reference is. 72 000 lands at ~25 000/km². `singles` doubles with it,
+    // because in target_01 most conifers are NOT in a stand: they are lone
+    // trees with grass all round them, and that is the read the copse pass
+    // can never produce on its own.
+    canopyTarget: 88000, coverTarget: 52000, pebbleTarget: 11000, heroes: 520, singles: 24000, moistScale: 90,
     // macro/meso are the WAVELENGTHS of the two noise scales that decide where
     // wood wants to be. At macro 0.0016 the pattern repeated every ~620 m —
     // wider than the whole visible frame — so any single shot landed entirely
@@ -519,7 +571,7 @@ const MIXES = {
     // meadow on the other" — the exact regression this round is meant to kill.
     // target_01 has conifers in all four quadrants; what varies between them is
     // how CLOSE TOGETHER they are, not whether there are any.
-    forest: { macro: 0.0034, meso: 0.0115, rich: 0.42, bare: 0.02, spacing: 7.4, contrast: 0.14, coverBare: 0.04 },
+    forest: { macro: 0.0044, meso: 0.0135, rich: 0.42, bare: 0.02, spacing: 7.4, contrast: 0.08, coverBare: 0.04 },
     // `sep` is the metres between copse CENTRES, and it alone decides whether a
     // clump is a wood or a bush. Round 2 ran sep 26 with an 84 m footprint: the
     // copses overlapped into a continuous forest edge. Dropping sep to 18 went
@@ -537,7 +589,14 @@ const MIXES = {
     // BIG a stand is, never whether the quadrant gets one. `sep` down from 30
     // to 25 and `radius` widened at the bottom end so the size ladder runs from
     // three-tree groups to proper stands rather than clones of one footprint.
-    clump: { tries: 34000, sep: 25, radius: [7, 33], maxMembers: 34, base: 0.86, kMax: 3.4 },
+    // ROUND 5: smaller stands, more of them. A 33 m copse of 34 members is a
+    // thicket you cannot see through, and four adjacent ones are the solid
+    // green mass that filled the right half of the r04 hero frame while the
+    // left half stayed bald. target_01 has no mass that size anywhere: its
+    // largest group is maybe a dozen trees and you can see grass between most
+    // of them. Halving the footprint and the membership at the same time as
+    // doubling the map total turns one wall into six legible clumps.
+    clump: { tries: 62000, sep: 20, radius: [6, 21], maxMembers: 16, base: 0.94, kMax: 4.2 },
     canopy: [
       // Sizes calibrated against target_01: the hero conifers there stand about
       // 20 m and 7-8 m across the skirt, roughly five car lengths tall. Our
@@ -576,8 +635,13 @@ const MIXES = {
       // and a whole blob-canopy grove landed in the right of the hero frame.
       // target_01 has no round canopies at all. These stay only as a rare
       // single-tree note in damp hollows.
-      { id: 'broadleaf', w: 0.30, accent: true, alt: [1, 5, 30, 46], wet: [0.35, 0.60, 1.05, 1.2], flat: 0.70, size: [0.9, 1.4] },
-      { id: 'birch', w: 0.22, accent: true, alt: [2, 8, 38, 58], wet: [0.30, 0.55, 1.0, 1.2], flat: 0.70, size: [0.9, 1.3] },
+      // ROUND 5: gone. Cropping the hero frame at 2x found a broadleaf standing
+      // a few metres off the road — a lumpy bright-green ball on a grey stick,
+      // the single most out-of-place object in the shot. There are 31 of them
+      // on a 2.89 km² map and one still landed in the one frame that matters,
+      // which is what a 0.30 weight buys you. target_01 contains no round
+      // canopy anywhere: it is a conifer meadow, and the accent that is not in
+      // the reference is not an accent, it is a mistake waiting for a frame.
       // No snags in alpine. A dead pole reads from 200 m up as a two-tone stub
       // — bright sunlit face, near-black shadow face — and the copse pass will
       // happily make one the dominant species of a whole stand, which put
@@ -585,8 +649,8 @@ const MIXES = {
     ],
     heroSpecies: ['firOld', 'firSpire', 'fir'],
     cover: [
-      { id: 'bushDark', w: 1.7, alt: [1, 4, 150, 230], wet: [0, 0.08, 1.05, 1.2], flat: 0.60, size: [0.7, 1.4] },
-      { id: 'bushLight', w: 0.8, alt: [1, 4, 120, 180], wet: [0.05, 0.22, 1.05, 1.2], flat: 0.60, size: [0.7, 1.3] },
+      { id: 'bushDark', w: 1.7, alt: [1, 4, 150, 230], wet: [0, 0.08, 1.05, 1.2], flat: 0.60, size: [0.7, 1.15] },
+      { id: 'bushLight', w: 0.8, alt: [1, 4, 120, 180], wet: [0.05, 0.22, 1.05, 1.2], flat: 0.60, size: [0.7, 1.1] },
       // Flowers are an ACCENT, not a crop. At w 4.4 / 1.7 / 1.0 they were 45%
       // of all ground cover and the meadow came out as confetti. In target_01
       // you can count the drifts in a frame on two hands. The weight that used
@@ -777,7 +841,45 @@ export class PropScatter {
     const hsl = { h: 0, s: 0, l: 0 };
     a.getHSL(hsl);
     const dir = hsl.l > 0.30 ? -1 : 1;
-    const leaf = [
+
+    // ---- CONIFER GREEN, MEASURED --------------------------------------
+    // Sampling every green pixel of target_01 and of our own hero frame, split
+    // into brightness bands, gave this:
+    //
+    //            band g20-60      g60-100      g100-150
+    //   ours     (10,54,26) 2.5%  (12,80,32)   (34,120,36)
+    //   target   (24,51,23) 8.0%  (51,77,21)   (94,121,16)
+    //
+    // Two facts fall out. (a) In EVERY band the reference's greens carry two to
+    // three times our red — its conifers are a warm, slightly olive green, ours
+    // are a pure chroma green that exists nowhere in the picture. That single
+    // channel is most of the 0.83-vs-0.756 saturation gap. (b) The reference
+    // puts three times as many pixels in the DARK green band as we do: its
+    // conifers are shadow shapes with a lit edge, ours are uniformly mid-bright,
+    // which is a large part of why our histogram piles into two buckets.
+    //
+    // The old ramp could not express either. It shaded with offsetHSL, and
+    // THREE.Color is LINEAR: alpine foliage measures l≈0.13, so the `dir` test
+    // always chose +1 and every tier was LIGHTENED, the top one by +0.125 in
+    // linear terms — nearly double the value of the base green. Hence neon.
+    //
+    // So alpine builds its ramp by scaling in linear space (which is what
+    // "further into shadow" physically means) and lerping red toward the green
+    // channel by a measured amount. `mul` is the tier's value, `warm` its red
+    // lift, `blue` the cool lift that keeps the shadow side from going olive.
+    const tier = (c, mul, warm, blue) => {
+      const o = c.clone().multiplyScalar(mul * (1 + j * 2.2));
+      o.r = lerp(o.r, o.g * 0.62, warm);
+      o.b = lerp(o.b, o.g * 0.26, blue);
+      return o;
+    };
+    const alp = this.biome.id === 'alpine';
+
+    const leaf = alp ? [
+      tier(a, 0.68, 0.50, 0.30),
+      tier(a, 1.00, 0.44, 0.26),
+      tier(b2, 0.56, 0.54, 0.34),
+    ] : [
       shade(a, j + dir * 0.035, 0.03),
       shade(a, j + dir * 0.105, 0.06),
       shade(b2, j + dir * 0.01, -0.02),
@@ -792,12 +894,30 @@ export class PropScatter {
     // black skirt. Everything here is expressed as a step off the same `dir`
     // the leaf colours already use.
     const lum = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-    const leafRamp = [
+    // Alpine: a genuine dark-to-light ladder. The skirt sits at a third of the
+    // palette green's value and the sunlit tip a little above it, so a fir reads
+    // as a solid in shadow with light caught on the top two tiers — which is
+    // exactly the silhouette target_01's conifers have. The warm lift falls off
+    // as the tier gets lighter, because in the reference it is the SHADOW side
+    // that is olive and the lit side that is greenest.
+    //
+    // Levels landed by measurement, not by eye. The first pass ran 0.30/0.47/
+    // 0.66/0.92 and put 6.1% of the frame in the BOTTOM luma bucket against the
+    // reference's 0.9% — the conifers had gone from neon to soot and the frame
+    // mean fell to 0.341 against a 0.379 target. Everything is a third brighter
+    // here, which keeps the ladder and the warm lift but lands the mass of the
+    // canopy in luma buckets 1-3 where the reference keeps it.
+    const leafRamp = (alp ? [
+      tier(a, 0.62, 0.58, 0.22),
+      tier(a, 0.84, 0.52, 0.20),
+      tier(b2, 1.06, 0.46, 0.18),
+      tier(b2, 1.34, 0.40, 0.16),
+    ] : [
       shade(a, j + dir * 0.005, 0.045),
       shade(a, j + dir * 0.045, 0.02),
       shade(b2, j + dir * 0.085, -0.01),
       shade(b2, j + dir * 0.125, -0.045),
-    ].sort((p, q) => lum(p) - lum(q));
+    ]).sort((p, q) => lum(p) - lum(q));
 
     return {
       ...D,
@@ -976,6 +1096,47 @@ export class PropScatter {
       return null;
     };
 
+    /**
+     * TRUNK COLLISION POLICY — the reason density used to cost 40 km/h.
+     *
+     * game.js resolves a hit by `velocity *= 0.45` for EVERY overlapping
+     * collider on EVERY fixed step, and it inflates each collider's radius by
+     * the car's own 1.4 m. So a trunk's real radius (~0.35 m) is irrelevant:
+     * what matters is how many 1.75 m discs sit where the car actually goes.
+     * Raising the tree count therefore hit the drive quadratically, and the
+     * previous round backed a 50 000-tree map out at 90 km/h instead of 131.
+     *
+     * Two rules fix the cause instead of capping the count.
+     *
+     *  1. SHOULDER GRACE. A trunk within `SHOULDER` metres of the road's
+     *     keep-out band is drawn but is NOT solid. In the reference the wood
+     *     closes right up to the gravel, and clipping the outermost tree of
+     *     that line at 130 km/h is not a collision the player caused — it is a
+     *     tax on driving near the edge, which is the whole game. Off-road,
+     *     more than a car's width from the band, every mature trunk is solid.
+     *  2. MATURE ONLY, PER SPECIES. `solidTree` gates on the instance's REAL
+     *     height (geometry height x scale), not on its scale, so saplings and
+     *     the young firs that fill the meadow are scenery. Their radius is the
+     *     species' own trunk radius rather than a shared constant.
+     *
+     * Cost: eight isBlocked lookups per candidate, and only for the minority of
+     * trees that pass the height gate.
+     */
+    const SHOULDER = 4.5;
+    const onShoulder = (x, z) => {
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        if (isBlocked(x + Math.cos(a) * SHOULDER, z + Math.sin(a) * SHOULDER)) return true;
+      }
+      return false;
+    };
+    const solidTree = (entry, x, z, s, minH = 11) => {
+      if (entry.trunkR < 0.55 || entry.height * s < minH) return false;
+      if (onShoulder(x, z)) return false;
+      this.colliders.push({ x, z, r: entry.trunkR * s * 0.42 });
+      return true;
+    };
+
     const pickSpecies = (list, e, r) => {
       let total = 0;
       const ws = [];
@@ -1092,20 +1253,7 @@ export class PropScatter {
             r: rng.float(0, Math.PI * 2),
             tx: rng.gauss(0, 0.018), tz: rng.gauss(0, 0.018),
           });
-          // Only MATURE trunks are solid. Every sapling being a collider turned
-          // a copse into a minefield: game.js scales velocity by 0.45 for every
-          // overlapping collider every fixed step, so one brush through a stand
-          // parks the car. Three capture presets were finishing at 0 km/h.
-          //
-          // The gate is the tree's REAL HEIGHT, not its instance scale. Scale
-          // means nothing on its own — `firSapling` at s=2.4 is a four metre
-          // shrub while `firOld` at s=1.2 is a twenty metre tree — and gating
-          // on scale alone quietly turned every sapling stand back into a
-          // minefield the moment the size ranges were retuned.
-          const entry = lib.get(`${spec.id}#${v}`);
-          if (entry.trunkR >= 0.7 && entry.height * s >= 11) {
-            this.colliders.push({ x, z, r: entry.trunkR * s * 0.42 });
-          }
+          solidTree(lib.get(`${spec.id}#${v}`), x, z, s);
           placed++;
         }
       }
@@ -1132,9 +1280,15 @@ export class PropScatter {
     // only thing a density field should do to them is vary how thick. With the
     // default 0.30 floor the drifts collected into the top quarter of the cover
     // mask and whole frames (hero_alpine) came out with a bare lawn.
+    // ROUND 5: more drifts, each smaller. Cropping our meadow at 2x against
+    // target_01's showed the difference is not the amount of grass — it is that
+    // ours arrives in 21 m patches with 40 m of bare polygon between them,
+    // while the reference never gives you more than a few metres of empty turf.
+    // 26-member drifts on a 10 m spacing put something in every gap without
+    // making any one patch read as a planted bed.
     placeClusters(mix.cover, mix.coverTarget, {
-      density: coverDensity, contrast: 1.0, base: 0.70,
-      tries: 24000, sep: 13, radius: [5, 21], spacing: 4.2, maxMembers: 42,
+      density: coverDensity, contrast: 1.0, base: 0.86,
+      tries: 42000, sep: 10, radius: [4, 15], spacing: 3.6, maxMembers: 26,
     });
 
     // ---- ROAD VERGE DRESSING --------------------------------------------
@@ -1166,13 +1320,9 @@ export class PropScatter {
           r: rng.float(0, Math.PI * 2),
           tx: rng.gauss(0, 0.03), tz: rng.gauss(0, 0.03),
         });
-        // Verge trees are solid on the same rule the copse pass uses. Without
-        // this a mature conifer a metre off the gravel is scenery you drive
-        // straight through, which is worse than not having it.
-        const ventry = lib.get(`${id}#${v}`);
-        if (ventry.trunkR >= 0.7 && ventry.height * s >= 11) {
-          this.colliders.push({ x: p.x, z: p.z, r: ventry.trunkR * s * 0.42 });
-        }
+        // Verge props are never solid — by construction they sit inside the
+        // shoulder grace band, so `solidTree` would reject them anyway, and
+        // asking it would cost eight isBlocked lookups apiece to learn that.
         vplaced++;
       }
     }
@@ -1201,8 +1351,9 @@ export class PropScatter {
       // mistake rather than as a landmark. Half again as tall is enough.
       const s = rng.float(1.16, 1.40);
       emit(id, v, { x, y: e.h - 0.15, z, s, r: rng.float(0, Math.PI * 2), tx: 0, tz: 0 });
-      const entry = lib.get(`${id}#${v}`);
-      if (entry.trunkR >= 0.6) this.colliders.push({ x, z, r: entry.trunkR * s * 0.55 });
+      // A hero IS the landmark of its patch of meadow, so it stays solid at a
+      // lower height gate and a fatter radius than an ordinary tree.
+      solidTree(lib.get(`${id}#${v}`), x, z, s * 1.3, 9);
       heroes++;
     }
 
@@ -1232,10 +1383,7 @@ export class PropScatter {
         x, y: e.h - 0.15, z, s, r: rng.float(0, Math.PI * 2),
         tx: rng.gauss(0, 0.014), tz: rng.gauss(0, 0.014),
       });
-      const entry = lib.get(`${spec.id}#${v}`);
-      if (entry.trunkR >= 0.7 && entry.height * s >= 11) {
-        this.colliders.push({ x, z, r: entry.trunkR * s * 0.42 });
-      }
+      solidTree(lib.get(`${spec.id}#${v}`), x, z, s);
       lone++;
     }
 
@@ -1303,7 +1451,19 @@ export class PropScatter {
     };
 
     // -- groups
-    const groupTarget = Math.round(rockTarget * 0.42);
+    // ROUND 5. In target_01 a boulder is almost never alone: it is an anchor
+    // block with two or three smaller stones lying in a rough LINE off one of
+    // its faces, sizes stepping down along the line — the shape a rock makes
+    // when it splits and the pieces slide downhill. Ours were an anchor with a
+    // symmetrical RING of satellites at 0.8-2.4 anchor-radii, which from above
+    // reads as a flower, not a train, and at 42% of the rock budget the other
+    // 58% were ambient singles anyway.
+    //
+    // So: groups take nearly three quarters of the budget, the satellites lie
+    // along a heading with only a little lateral scatter, and they are big
+    // enough (0.30-0.72 of the anchor) to read as the same rock broken up
+    // rather than as gravel that happens to be nearby.
+    const groupTarget = Math.round(rockTarget * 0.72);
     let grouped = 0;
     for (let i = 0; i < groupTarget * 14 && grouped < groupTarget; i++) {
       const cx = rng.float(-half, half), cz = rng.float(-half, half);
@@ -1325,17 +1485,41 @@ export class PropScatter {
       // deliberately car-sized or bigger: a boulder that is not clearly larger
       // than the car gives the frame no sense of scale at all.
       const big = lerp(1.7, 3.8, Math.pow(rng.float(0, 1), 1.5)) * (1 + rocky * 0.3);
-      dropRock(cx, cz, big, rockId) && grouped++;
-      const n2 = rng.int(2, 5);
+      if (!dropRock(cx, cz, big, rockId)) continue;
+      grouped++;
+      // The train runs DOWNHILL from the anchor where the ground has a slope to
+      // speak of, and along an arbitrary heading where it does not. Following
+      // the gradient is most of what makes a group look deposited rather than
+      // arranged, and it costs two height lookups.
+      const eps = 5;
+      const gx = T.heightAt(cx + eps, cz) - T.heightAt(cx - eps, cz);
+      const gz = T.heightAt(cx, cz + eps) - T.heightAt(cx, cz - eps);
+      const gl = Math.hypot(gx, gz);
+      let a0 = gl > 0.25 ? Math.atan2(-gz, -gx) : rng.float(0, Math.PI * 2);
+      a0 += rng.float(-0.5, 0.5);
+      const ux = Math.cos(a0), uz = Math.sin(a0);
+      const n2 = rng.int(2, 4);
+      // Walk out from the anchor's own edge, stone by stone, each a step
+      // smaller than the last. `run` is the distance travelled so far, so the
+      // train never doubles back on itself the way a random ring does.
+      let run = big * rng.float(0.62, 0.95);
+      let s = big * rng.float(0.52, 0.72);
       for (let k = 0; k < n2 && grouped < groupTarget; k++) {
-        const a = rng.float(0, Math.PI * 2);
-        const d = big * rng.float(0.8, 2.4);
-        const s = big * rng.float(0.16, 0.55);
-        if (dropRock(cx + Math.cos(a) * d, cz + Math.sin(a) * d, s, rockId)) grouped++;
+        const lat = rng.gauss(0, big * 0.24);
+        const x = cx + ux * run - uz * lat;
+        const z = cz + uz * run + ux * lat;
+        if (dropRock(x, z, s, rockId)) grouped++;
+        run += (s + big * 0.34) * rng.float(0.85, 1.45);
+        s *= rng.float(0.52, 0.78);
+        if (s < big * 0.14) break;
       }
     }
 
     // -- ambient scatter
+    // Deliberately SMALL now. Its job is to keep the meadow floor from being an
+    // empty plane between the trains; anything here big enough to read as a
+    // boulder in its own right is a lone boulder, which is the exact thing the
+    // group pass exists to avoid.
     for (let i = 0; i < rockTarget * 4 && rocks < rockTarget; i++) {
       const x = rng.float(-half, half), z = rng.float(-half, half);
       const n = T.normalAt(x, z, 3.5);
@@ -1343,7 +1527,7 @@ export class PropScatter {
       const field = fbm(x * 0.0052, z * 0.0052, { octaves: 3, seed: S + 431 });
       const p = 0.12 + rocky * 0.55 + Math.max(0, field) * 0.5;
       if (rng.float(0, 1) > p) continue;
-      const s = lerp(0.5, 2.4, Math.pow(rng.float(0, 1), 2.4)) * (1 + rocky * 0.4);
+      const s = lerp(0.42, 1.35, Math.pow(rng.float(0, 1), 2.4)) * (1 + rocky * 0.5);
       dropRock(x, z, s, rng.bool(0.45) ? rockId : mix.boulder);
     }
 
@@ -1396,6 +1580,10 @@ export class PropScatter {
 
     this.stats = {
       instances: Object.values(this.counts).reduce((a, b) => a + b, 0),
+      // Collider count is the number that actually trades against the drive.
+      // Without it "raise the density" and "the car got slower" are two
+      // unrelated observations instead of one curve.
+      colliders: this.colliders.length,
       tris, kinds: buckets.size,
     };
     // Tuning aid, same shape as landmarks' `window.__LM`: what actually got

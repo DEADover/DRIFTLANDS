@@ -73,7 +73,17 @@ function chalet(rng, K, o = {}) {
       // Deep, nearly unlit glass with a timber surround. `K.glass` neat is the
       // sky colour and at 6 px it fired off as two cyan pixels per window — the
       // brightest chroma in the frame, on a building meant to sit back.
-      b.box(0.66, 0.66, 0.10, K.glass.clone().lerp(K.stoneDark, 0.62), { x: sz * wx, y: plinth + h1 * 0.62, z: fz });
+      // ROUND 5. The pane was still built the wrong way round: a SKY colour
+      // pulled 62% toward stone is a stone-tinted sky, and measured it comes
+      // out #3d738d — a saturated cyan on a building whose every other surface
+      // is warm. Luminance was never the problem (0.15 against the plaster's
+      // 0.65); CHROMA was, and it is chroma the eye picks out of a 6 px note.
+      // Built the other way round it is a dark warm slate with a hint of sky in
+      // it, which is what a small deep-set window actually looks like from 200 m
+      // up. The shutters either side stopped being pure black in the same pass
+      // (see `dark` in buildkit) — between them they were the loudest thing on
+      // the house.
+      b.box(0.58, 0.62, 0.10, K.stoneDark.clone().lerp(K.glass, 0.22), { x: sz * wx, y: plinth + h1 * 0.62, z: fz });
       b.box(0.14, 0.74, 0.09, K.woodDark, { x: sz * wx - 0.40, y: plinth + h1 * 0.62, z: fz + sz * 0.02 });
       b.box(0.14, 0.74, 0.09, K.woodDark, { x: sz * wx + 0.40, y: plinth + h1 * 0.62, z: fz + sz * 0.02 });
     }
