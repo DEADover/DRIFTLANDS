@@ -317,6 +317,25 @@ export function createBridges(ctx) {
     // forest standing in open water.
     const plan = planLakes({ ...ctx, roads }, P);
     if (plan) carveLakes(ctx, plan);
+    // Tuning aid, same shape as landmarks' `window.__LM`. Where the water
+    // actually landed, so a probe can ask "how far is the nearest wet thing
+    // from the camera" instead of us guessing from screenshots.
+    if (typeof window !== 'undefined') {
+      window.__WATER = plan
+        ? {
+            stats: plan.stats,
+            crossings: plan.crossings.length,
+            crossAt: plan.crossings.map((c) => ({
+              s: Math.round(c.sFromSpawn ?? -1),
+              x: Math.round(P[c.station].x), z: Math.round(P[c.station].z),
+            })),
+            lakes: plan.lakes.map((L) => ({
+              x: L.x, z: L.z, Ra: L.Ra, Rc: L.Rc, level: L.level, neck: !!L.neck,
+              tx: L.tx, tz: L.tz, nx: L.nx, nz: L.nz,
+            })),
+          }
+        : { stats: null, crossings: 0, lakes: [] };
+    }
     // Route heights move with the ground under them.
     if (plan && P) for (const p of P) p.yT = terrain.heightAt(p.x, p.z);
 
@@ -340,12 +359,30 @@ export function createBridges(ctx) {
       : (x, z) => terrain.heightAt(x, z) < level + 0.35;
     stub.isBlocked = drown;
 
+    // PROP KEEP-OUT, part one and a half: THE ANIMALS.
+    //
+    // game.js composes props' keep-out from roads + bridges + landmarks, so
+    // trees and rocks already respect the lake. animals.js does not: it asks
+    // `roads.isBlocked` and nothing else (src/entities/animals.js), so a herd
+    // is free to graze in open water — measured, four deer standing in the lake
+    // off the near shore in shots/i4/lake_bridge_t4.png. There is no other hook
+    // into it, so the lake extends the road's own keep-out, exactly as it
+    // already extends terrain.heightAt(). This runs AFTER planLakes(), which
+    // uses the unwrapped isBlocked to find the spurs, so the spur field is
+    // unaffected.
+    if (plan && typeof roads?.isBlocked === 'function' && !roads.__lakeWrapped) {
+      const wasBlocked = roads.isBlocked.bind(roads);
+      roads.isBlocked = (x, z) => wasBlocked(x, z) || drown(x, z);
+      roads.__lakeWrapped = true;
+    }
+
     if (!P) return stub;
     const n = P.length;
 
     if (plan) buildPlannedDecks({ plan, P, terrain, group, decks, colliders });
     else buildFoundDecks({ P, terrain, level, group, decks, colliders });
 
+    if (typeof window !== 'undefined' && window.__WATER) window.__WATER.decks = decks.length;
     if (!decks.length) return stub;
 
     const bbox = decks.map((d) => d.bbox);

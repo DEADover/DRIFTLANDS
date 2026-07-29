@@ -173,7 +173,13 @@ const VIEW_Z = -Math.sin(VIEW_YAW);
 
 const CARVE = {
   CELL: 5,            // distance-field resolution, metres
-  STRIDE: 155,        // route metres between tarns
+  // 155 m of stride with basins three to five hundred metres across floods the
+  // whole map: the plan view came back a maze of blue with green ribbons in it,
+  // and the hero frame was a road running down an isthmus with open water on
+  // BOTH sides (shots/i1/hero_alpine_t8.png). A tarn every two hundred and
+  // forty metres is still water inside the first half-kilometre of the drive,
+  // and it leaves meadow between them.
+  STRIDE: 240,        // route metres between tarns
   VIEW_PUSH: 58,      // metres down-view to slide a scenic basin
   // The guard band is also the BANK. Ramping from untouched ground to eight
   // metres of cut over sixteen metres put a 1:1.4 wall of green right at the
@@ -209,10 +215,94 @@ const CARVE = {
   // in open water surrounded by boulders (shots/i18/hero_alpine_t12.png). A dry
   // frame is a worse picture; a car swimming is a worse GAME, and this is a
   // playable demo. The shore stays where the run-off ends.
-  ROAD_IN: 40,        // no carve within this of the centreline...
-  ROAD_OUT: 116,      // ...full depth beyond this
-  APRON_IN: 26,       // ground held clear of the water out to here...
-  APRON_OUT: 76,      // ...tapering to nothing here
+  // MEASURED AGAIN, AND THE ABOVE IS WRONG — not about the run-off, about the
+  // FRAME. At 40/116 with a 76 m apron the plan view (tools/watermap.mjs) shows
+  // a dry corridor a hundred and sixty metres wide following the entire loop,
+  // and the capture camera's ground footprint is a hundred metres across by a
+  // hundred and twenty deep. The lake therefore begins, on every seed, a few
+  // metres PAST the far edge of the picture: thirty-eight basins, six bridges,
+  // a hundred and ten thousand triangles of lattice, and 0.0% blue in eighteen
+  // consecutive frames across all three presets (tools/waterprobe.mjs).
+  //
+  // The run-off argument was sound and the answer to it was wrong. Holding the
+  // water eighty metres away is not the only way to stop a car swimming; the
+  // reference does it with a rocky rim between the road and the shore, which
+  // costs no frame at this camera angle because a three-metre bank seen from
+  // fifty-two degrees down occludes almost nothing behind it. So the corridor
+  // comes in to where the water is READABLE, and the RIM below is what keeps
+  // the car out of it.
+  // 40/116 -> 22/60 halved the corridor and changed nothing measurable: the
+  // median shore offset came down from 70 m to 55 m and the frame was still
+  // 0.0% blue on all eighteen shots. The plan view at capture time
+  // (shots/map/hero_alpine_t8_zoom.png) shows the reason — the camera's ground
+  // footprint is a 120 m square whose near corner sat about twenty-five metres
+  // short of the lake. The corridor has to be narrower than HALF the frame, not
+  // merely narrower than it was.
+  //
+  // The carriageway is 15 m wide, so its edge is 7.5 m out and the verge ends
+  // at 9. An apron to 27 m leaves eighteen metres of dry run-off past the
+  // verge, the rim crests at 27 and the water starts around 36 — which is
+  // about where the reference puts it either side of its bridge.
+  // AND NARROWER STILL, because the frame is smaller than anyone assumed.
+  // Unprojecting the four screen corners onto the ground at capture time
+  // (tools/watermap.mjs) gives a footprint of about 80 m across by 55 m deep at
+  // the car — not the 70 x 150 the old note claimed. Rendering the lattice as
+  // opaque magenta (tools/watervis.mjs) confirmed it from the other end: with
+  // the shore 36 m out the geometry covered 0.00 / 0.66 / 0.01 per cent of the
+  // three hero frames. There is no siting trick that fixes that. In a frame
+  // eighty metres wide, water thirty-six metres from the centreline is water
+  // you will never photograph.
+  //
+  // So the lake comes to the verge. The carriageway is 15 m wide and the verge
+  // ends at 9; ground is held dry to 18, the rim crests at 19 and the water
+  // starts around 25. That is one road-width of shoulder — which is what the
+  // reference has beside its bridge, and it is the rim below, not distance,
+  // that keeps a car out of the lake.
+  // ROAD_OUT is the BANK ANGLE, and 30 m made a cliff. Eight and a half metres
+  // of cut reached in twenty gave a 1:2.4 face: no pale shelf, no submerged
+  // rocks, no lily pads, and the foam compressed into a hard glowing zigzag
+  // piping along the whole shore. Reaching full depth at sixty-eight instead
+  // puts the same waterline in the same place but with a shelf you can see
+  // through, which is where everything the reference shows lives.
+  ROAD_IN: 12,        // no carve within this of the centreline...
+  // A LONG SHALLOW APPROACH IS THE REAL GUARD, not the rim. Three and a half
+  // metres of bank did not turn a rally car at a hundred km/h and it never
+  // will; what decides whether a car that ran wide is a splash or a drowning is
+  // how deep the water it lands in is. Reaching full depth only at a hundred
+  // and twenty-five metres puts about half a metre of water sixty metres off
+  // the centreline — measured, that is exactly where hero_alpine's car came to
+  // rest in 4.7 m and stayed. The basin still reaches its full eight and a half
+  // metres in the middle, because the ellipse ramp multiplies this one; it is
+  // only the shore nearest the road that is shallow, which is also where the
+  // reference puts its pale band and its lily pads.
+  ROAD_OUT: 125,      // ...full depth beyond this
+  APRON_IN: 11,       // ground held clear of the water out to here...
+  APRON_OUT: 26,      // ...tapering to nothing here
+  // THE RIM. A band of ground just outside the apron, raised to a hump above
+  // the causeway. It is the thing that stops a car that ran wide: it arrives at
+  // a bank climbing at about 1:7 and either climbs it and stops, or is turned
+  // by it — instead of arriving at a shelf that slopes gently INTO the water.
+  // It is also, and not incidentally, exactly what the reference frame has
+  // along its whole left-hand shore: a grey rock lip between the meadow and the
+  // blue, never a beach running smoothly under.
+  // GENTLE, OR IT IS A SLAB. At 4.6 m gained over ten metres the rim's inner
+  // face is a 1:2.2 wall standing at the verge, and Lambert shading turns every
+  // one of those 8.7 m facets into a charcoal wedge lying beside the road —
+  // conspicuous, and read as tarmac rather than as ground
+  // (shots/i2/lake_bridge_t4.png). Disabling the bed repaint changed nothing,
+  // so it is the geometry and not the colour. Two metres gained over fourteen
+  // is a swell that still turns a car and that the light can find.
+  // TALLER, BUT NOT STEEPER. 2.2 m did not turn anything: on hero_alpine the
+  // autopilot loses the car at t=11 (it did at baseline too, into a forest),
+  // and with the lake where it now is the car ploughed over the rim and drowned
+  // in eight metres of water — every frame from t=16 to the end of the tape was
+  // 73% blue with the car on the bottom (shots/i11/hero_alpine_t16.png). Three
+  // and a half metres gained over eighteen is the same 1:5 face that stayed out
+  // of the picture, with half as much again to climb.
+  RIM_IN: 16,         // rim starts here (just past the apron's taper)...
+  RIM_PEAK: 34,       // ...crests here...
+  RIM_OUT: 52,        // ...and is gone by here, into open water
+  RIM_H: 3.5,         // metres of hump above the causeway fill
   // AT A CROSSING THE WATER GOES UNDER THE ROAD, not up to it.
   //
   // Leaving nine metres of dry causeway either side of the centreline meant the
@@ -454,7 +544,7 @@ export function planLakes(ctx, P) {
     // metres BEHIND the lens on lake_bridge and the frame came back emptier
     // than before. Three hundred metres is kept because it is the measured best
     // over the ladder of settle times, not because it suits one shutter.
-    s0 = cum[bi] + 300;
+    s0 = cum[bi] + 250;
   }
 
   for (let s = s0; s < s0 + total - 40; s += CARVE.STRIDE) {
@@ -462,7 +552,13 @@ export function planLakes(ctx, P) {
     // Every third station is a crossing. One bridge on a four-kilometre loop is
     // a bridge nobody ever sees: the camera reaches about 200 m, so a landmark
     // has to recur every few hundred metres to be part of the drive at all.
-    const neck = (ord % 3) === 0;
+    // EVERY OTHER STATION, not every third. At a 240 m stride every third
+    // station is a crossing every seven hundred and twenty metres, and the
+    // player is stopped, crashed or out of shot long before then: measured on
+    // hero_alpine the car covers about four hundred metres in the twelve
+    // seconds before the autopilot loses it. A bridge every four hundred and
+    // eighty metres is one you actually meet.
+    const neck = (ord % 2) === 0;
     ord++;
 
     if (neck) {
@@ -472,10 +568,23 @@ export function planLakes(ctx, P) {
       // Search half a stride either way, not sixty metres: on a loop with two
       // hairpins a narrow window has no straight in it at all, and the deck
       // gets built in whichever bend was least bad.
+      // THE SEARCH WINDOW IS IN METRES, AND THE FIRST ONE MAY ONLY GO FORWARD.
+      //
+      // "half a stride either way" was written as +-150 STATIONS, and P is
+      // resampled at about three metres, so the window was +-450 m — nearly a
+      // quarter of the loop. Measured on hero_alpine: the chain is phased to
+      // put the first crossing three hundred metres past the start line, and
+      // the flatness search moved it to a hundred and fifty metres BEHIND it
+      // (route index 1284 against a spawn at 1359, tools/_dir.mjs). The player
+      // drives away from the only bridge he was ever going to see.
+      const perSample = total / n;
+      const KW = Math.max(4, Math.round(75 / perSample));
+      const kLo = ord === 1 ? 0 : -KW;      // ord was ++'d above; 1 is the first
       let station = nominal, best = Infinity;
-      for (let k = -150; k <= 150; k += 4) {
+      const kStep = Math.max(1, Math.round(KW / 24));
+      for (let k = kLo; k <= KW; k += kStep) {
         const c = (nominal + k + n * 4) % n;
-        const cost = crossingCost(c, 90);
+        const cost = crossingCost(c, Math.round(90 / perSample) * 3);
         if (cost < best) { best = cost; station = c; }
       }
       const p = P[station];
@@ -497,7 +606,7 @@ export function planLakes(ctx, P) {
       // the lobes until both fit rather than giving up on the crossing.
       stats.neckTried++;
       let made = null;
-      for (const Rc of [162, 138, 116, 96, 78]) {
+      for (const Rc of [130, 110, 92, 76, 62]) {
         const a = mk(p, 1, Ra, Rc, Rc * 0.50, level, true, station);
         const b = mk(p, -1, Ra, Rc, Rc * 0.50, level, true, station);
         if (basinCost(terrain, a, level) < 20 && basinCost(terrain, b, level) < 20) {
@@ -505,7 +614,7 @@ export function planLakes(ctx, P) {
           break;
         }
       }
-      if (made) { stats.neckOk++; lakes.push(...made); crossings.push({ station, level, Ra }); }
+      if (made) { stats.neckOk++; lakes.push(...made); crossings.push({ station, level, Ra, sFromSpawn: s - s0 }); }
       continue;
     }
 
@@ -525,8 +634,8 @@ export function planLakes(ctx, P) {
     for (const ds of [0, -70, 70]) {
       const st = (nominal + ds + n * 4) % n;
       const p = P[st];
-      for (const D of [150, 122, 96]) {                 // metres down-view                 // metres down-view
-        for (const Rc of [168, 140, 114]) {           // half depth along view
+      for (const D of [120, 96, 74]) {              // metres down-view
+        for (const Rc of [128, 104, 84]) {            // half depth along view
           const Ra = Rc * 1.5;                        // half width across view
           const cx = p.x + VIEW_X * D, cz = p.z + VIEW_Z * D;
           // The waterline has to clear the LOWEST carriageway the basin can
@@ -655,11 +764,31 @@ export function planLakes(ctx, P) {
   }
 
   // --- the carve -----------------------------------------------------------
-  const guardOf = (L, x, z) => {
+  // A CROSSING IS A PLACE, NOT A WHOLE LOBE.
+  //
+  // The neck's keep-out is four to seven metres, because the water has to run
+  // under the planks. That was applied over the ENTIRE lobe — 66 x 162 m of it
+  // — so a crossing put the waterline at the verge for a hundred and thirty
+  // metres of road in each direction. With a crossing every four hundred and
+  // eighty metres the loop drowned: hero_alpine t14 came back 82% blue with the
+  // car swimming and no road in shot (shots/i7/hero_alpine_t12.png).
+  //
+  // `w` is one at the crossing station and falls to zero about forty metres
+  // along the lobe, and every band below is interpolated on it. So the deck
+  // still spans open water and the same lobe still makes a big lake, but the
+  // road meets that lake only where the bridge is.
+  const neckW = (L, dx, dz) => {
+    if (!L.neck) return 0;
+    return 1 - sstep(0.34, 0.78, Math.abs((dx * L.tx + dz * L.tz) / L.Ra));
+  };
+  const mix = (a, b, t) => a + (b - a) * t;
+  const guardOf = (L, x, z, w) => {
     const dr = dRoute(x, z);
-    const g = L.neck
-      ? sstep(CARVE.NECK_IN, CARVE.NECK_OUT, dr)
-      : sstep(CARVE.ROAD_IN, CARVE.ROAD_OUT, dr);
+    const g = sstep(
+      mix(CARVE.ROAD_IN, CARVE.NECK_IN, w),
+      mix(CARVE.ROAD_OUT, CARVE.NECK_OUT, w),
+      dr,
+    );
     return g * sstep(CARVE.SPUR_IN, CARVE.SPUR_OUT, dSpur(x, z));
   };
 
@@ -706,7 +835,9 @@ export function planLakes(ctx, P) {
       // cannot resolve, and everything placed analytically on top of it — the
       // shore boulders especially — ends up hanging in the air beside it.
       const berm = sstep(0.58, 0.88, u) * (1 - sstep(0.98, 1.38, u));
-      const g = guardOf(L, x, z);
+      const w = neckW(L, dx, dz);
+      const nk = w > 0.35;
+      const g = guardOf(L, x, z, w);
       // The causeway fill. Runs wherever the basin reaches, INCLUDING the
       // stretch the guard protects from digging — that is the whole point.
       if (u < 1.25) {
@@ -715,20 +846,31 @@ export function planLakes(ctx, P) {
         // causeway clear of the water, which is precisely the condition
         // bridges.js tests for when it decides there is anything to bridge —
         // and every deck in the world silently stopped being built.
-        const ain = L.neck ? CARVE.NECK_IN : CARVE.APRON_IN;
-        const aout = L.neck ? CARVE.NECK_OUT : CARVE.APRON_OUT;
+        const ain = mix(CARVE.APRON_IN, CARVE.NECK_IN, w);
+        const aout = mix(CARVE.APRON_OUT, CARVE.NECK_OUT, w);
         // The apron follows the spurs too, or a branch road walks into the lake.
+        const dr0 = dRoute(x, z);
+        // The rim rides on the same fill field as the apron — one band of
+        // raised ground running from the verge out to open water, flat at
+        // causeway height under the run-off and humped where it meets the
+        // shore. Doing it as a second pass gave a visible step where the two
+        // met; as one height profile it is a bank.
+        const rimP = (1 - w)
+          * sstep(CARVE.RIM_IN, CARVE.RIM_PEAK, dr0)
+          * (1 - sstep(CARVE.RIM_PEAK, CARVE.RIM_OUT, dr0));
         const k = Math.max(
-          1 - sstep(ain, aout, dRoute(x, z)),
-          L.neck ? 0 : 1 - sstep(CARVE.SPUR_IN, CARVE.SPUR_OUT, dSpur(x, z)),
+          1 - sstep(ain, aout, dr0),
+          rimP,
+          nk ? 0 : 1 - sstep(CARVE.SPUR_IN, CARVE.SPUR_OUT, dSpur(x, z)),
         ) * (1 - sstep(0.98, 1.25, u));
-        if (L.neck) {
+        if (nk) {
           if (u < 1.12) underNeck = true;
           const need = L.level + CARVE.NECK_CAUSEWAY;
           if (need > neckTo) neckTo = need;
           if (k > neckK) neckK = k;
         } else {
-          const need = L.level + CARVE.CAUSEWAY;
+          const need = L.level + mix(CARVE.CAUSEWAY, CARVE.NECK_CAUSEWAY, w)
+                     + CARVE.RIM_H * rimP;
           if (need > fillTo) fillTo = need;
           if (k > fillK) fillK = k;
         }
@@ -853,6 +995,16 @@ export function carveLakes(ctx, plan) {
       const mz = (pos[t + 2] + pos[t + 5] + pos[t + 8]) / 3;
       const L = nearestLake(plan.lakes, mx, mz);
       if (!L) continue;
+      // THE REPAINT KEEPS OFF THE ROAD CORRIDOR ENTIRELY.
+      //
+      // The bank branch below re-runs biome.colorAt() with the face's CURRENT
+      // slope, and the carve makes the ground beside a narrow causeway steep —
+      // so every facet within twenty metres of the verge came back rock, and
+      // what the frame had was two charcoal slabs lying along the road, read at
+      // this camera height as tarmac (shots/i3/lake_bridge_t4.png). Both
+      // branches now stop at the apron; there is no water inside it anyway, and
+      // the meadow beside the road is not this module's to recolour.
+      if (plan.dRoute(mx, mz) < keepOutOf(L, mx, mz)) continue;
       const d = L.level - my;
       // Only the wetted bed and a hand's width of strand above it. A band that
       // reached a metre and a half up the bank painted the whole verge — and
@@ -879,7 +1031,13 @@ export function carveLakes(ctx, plan) {
         const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
         const ilen = 1 / (Math.hypot(nx, ny, nz) || 1);
         const slope = 1 - Math.abs(ny * ilen);
-        biome.colorAt(c, cols, h0, slope, mx, mz, seed);
+        // DAMPED SLOPE. colorAt keys its rock swatch on slope, and the carve
+        // makes a bank steeper than the meadow that was there — so a shore that
+        // is still grass came back scree, and at this camera height a band of
+        // scree beside the road reads as tarmac. The point of this branch is to
+        // keep the meadow's colour on ground the lake merely moved; passing the
+        // carved slope defeats it.
+        biome.colorAt(c, cols, h0, slope * 0.35, mx, mz, seed);
         // Keep a touch of the shading the terrain builder baked in, so the bank
         // does not come out as one flat wash beside faceted meadow.
         c.lerp(new THREE.Color(col[t], col[t + 1], col[t + 2]), 0.30);
@@ -890,7 +1048,6 @@ export function carveLakes(ctx, plan) {
       // and the difference shows up as a wide pale beach of wetted gravel with
       // no water on it — which is what the whole left third of the hero frame
       // had become.
-      if (plan.dRoute(mx, mz) < (L.neck ? 6.4 : 18.0)) continue;
       // gravel right at the waterline, darker silt as it drops away
       const k = Math.min(1, sstep(1.2, 2.6, d) * 0.85);
       c.setRGB(col[t], col[t + 1], col[t + 2]);
@@ -902,6 +1059,28 @@ export function carveLakes(ctx, plan) {
 
   mesh.geometry.computeVertexNormals();
   mesh.geometry.computeBoundingSphere();
+}
+
+/**
+ * How close to the centreline this basin is allowed to come.
+ *
+ * A crossing has to reach the deck edge — the water runs UNDER the planks, and
+ * holding it back is what turns a bridge into a brown slab on a grass shoulder.
+ * But a neck's lobe is a hundred and thirty metres long, and applying the
+ * crossing's six-metre keep-out over the whole of it painted a charcoal band of
+ * "wetted bank" down the verge for the entire lobe, on a stretch of road with
+ * no bridge anywhere near it (shots/i9/lake_bridge.png; disabling the repaint
+ * removed it exactly). So it is six metres AT the crossing and the scenic
+ * apron's width everywhere else, on the same falloff the carve uses.
+ *
+ * The repaint and the lattice clip must return the same number or the
+ * difference shows up as a band of wetted gravel with no water on it.
+ */
+function keepOutOf(L, x, z) {
+  const wide = CARVE.APRON_OUT + 6;
+  if (!L.neck) return wide;
+  const w = 1 - sstep(0.34, 0.78, Math.abs(((x - L.x) * L.tx + (z - L.z) * L.tz) / L.Ra));
+  return 6.4 + (wide - 6.4) * (1 - w);
 }
 
 /**
@@ -924,6 +1103,13 @@ function nearestByRadius(lakes, x, z) {
   return best;
 }
 
+// The lattice emits water wherever `own` is set, and `own` is u <= 1.18 — so a
+// disc at u = 1.0 leaves a ring of open water that levelAt(), contains() and
+// therefore the whole prop/animal keep-out believe is dry land. Measured: deer
+// standing in the lake off the near shore in shots/i3/lake_bridge_t4.png. The
+// two thresholds have to be the same number.
+const OWN_U = 1.18;
+
 function nearestLake(lakes, x, z) {
   for (let i = 0; i < lakes.length; i++) {
     const L = lakes[i];
@@ -931,7 +1117,7 @@ function nearestLake(lakes, x, z) {
     if (dx * dx + dz * dz > L.R2out) continue;
     const ua = (dx * L.tx + dz * L.tz) / L.Ra;
     const uc = (dx * L.nx + dz * L.nz) / L.Rc;
-    if (ua * ua + uc * uc <= 1.0) return L;
+    if (ua * ua + uc * uc <= OWN_U * OWN_U) return L;
   }
   return null;
 }
@@ -1001,7 +1187,13 @@ const FRAG = /* glsl */ `
     // octaves: the coarse one makes the inlets, the fine one chews the lip.
     sg += (noise(vWorld * 0.011) - 0.5) * 9.0
         + (noise(vWorld * 0.042) - 0.5) * 3.4
-        + (noise(vWorld * 0.155) - 0.5) * 1.3;
+        + (noise(vWorld * 0.155) - 0.5) * 1.3
+        // A fourth octave under the lattice cell. The three above are all
+        // coarser than the 4 m grid, so they move the whole waterline about
+        // without touching the thing that is actually conspicuous: the foam
+        // lip landing inside one cell and following its diagonal, which reads
+        // as a regular 45-degree zigzag of white piping round the whole lake.
+        + (noise(vWorld * 0.46) - 0.5) * 1.05;
     float s = max(sg, 0.0);
 
     // --- shelf -> shallow -> mid -> deep ------------------------------------
@@ -1009,10 +1201,16 @@ const FRAG = /* glsl */ `
     // never reaches its own deep colour and the whole body reads as one pale
     // cyan. The shelf is a couple of metres wide and then it is straight into
     // cobalt, which is what the reference does.
+    // A WIDER SHELF. The bank is a 1:4 shelf now rather than the 1:2 wall it
+    // was, and on the old ramp the whole of it was past uMid within nine metres
+    // of the shore — so the frame had grass, a white line, and cobalt, with
+    // none of the pale blue band the reference carries all along its near
+    // shore. These widths are horizontal metres, and they are chosen to match
+    // the bathymetry the carve actually makes.
     vec3 col = uShore;
-    col = mix(col, uShallow, smoothstep(0.3, 3.0, s));
-    col = mix(col, uMid,     smoothstep(2.5, 9.0, s));
-    col = mix(col, uDeep,    smoothstep(1.6, 4.8, d));
+    col = mix(col, uShallow, smoothstep(0.5, 7.0, s));
+    col = mix(col, uMid,     smoothstep(6.0, 22.0, s));
+    col = mix(col, uDeep,    smoothstep(2.6, 7.0, d));
 
     // Broad ripple bands. Posterised, because everything else in this world is
     // cut paper and a smooth gradient reads as a different game.
@@ -1041,9 +1239,14 @@ const FRAG = /* glsl */ `
     // ABSENT along stretches of shore. An unbroken white piping all the way
     // round the lake is the single loudest tell that the water is a decal; the
     // reference only really foams where the water meets rock.
-    float gate = smoothstep(0.40, 0.88, chew * 0.75 + chew2 * 0.45);
+    // RARER AND QUIETER. At 0.66 with a gate opening at 0.40 the lip ran
+    // unbroken round every shore, and the bloom pass turned it into a glowing
+    // cyan-white piping that was the single loudest thing in the frame. The
+    // reference only foams where the water meets rock; everywhere else its
+    // shoreline is simply grass meeting blue.
+    float gate = smoothstep(0.52, 0.95, chew * 0.75 + chew2 * 0.45);
     float foam = clamp(lip + wash, 0.0, 1.0) * gate;
-    col = mix(col, uFoam, foam * 0.66);
+    col = mix(col, uFoam, foam * 0.40);
 
     // --- sun glitter --------------------------------------------------------
     // Sparse and restrained. At 1.1x this fed the bloom pass two soft white
@@ -1055,7 +1258,7 @@ const FRAG = /* glsl */ `
     // Near-opaque past the shelf; glassy right at the edge so the bed and any
     // rock standing in the shallows read through.
     float alpha = mix(0.80, 0.97, smoothstep(0.4, 2.6, d));
-    alpha = max(alpha, foam * 0.95);
+    alpha = max(alpha, foam * 0.70);
     // THE LATTICE CLIPS ITSELF.
     //
     // It carries a ring of dry vertices past the waterline on purpose, so the
@@ -1190,7 +1393,8 @@ export class Water {
       // is 10 m half width). Blue immediately either side of the timber is the
       // whole difference between a bridge and a brown slab: hold the water back
       // fifteen metres and the eye reads a ramp lying on grass.
-      const keep = L.neck ? 6.4 : 18.0;
+      // (see keepOutOf) — six metres at the crossing, the apron's width along
+      // the rest of the lobe.
       // ONE CELL, ONE PATCH.
       //
       // Every basin used to emit its own lattice clipped to its own ellipse, so
@@ -1213,15 +1417,27 @@ export class Water {
           const ua = (dx * L.tx + dz * L.tz) / L.Ra;
           const uc = (dx * L.nx + dz * L.nz) / L.Rc;
           const u = Math.hypot(ua, uc);
-          if (u > 1.30) d = Math.min(d, -3 - (u - 1.30) * L.Rc);
+          // THE WATERLINE HAS TO CLOSE INSIDE THE PATCH.
+          //
+          // Triangles are only emitted out to u = 1.18, but the DIG stops at
+          // 1.02 — so wherever the natural meadow happened to lie below the
+          // waterline between the two, the lattice ran to its own boundary and
+          // stopped, and what the frame had was a dead straight elliptical edge
+          // of open water lying across the hillside (shots/i12/wildlife.png,
+          // which is the 0.6 zoom preset and shows it at full size). Tapering
+          // the depth to zero at 1.14 puts the shoreline a clear cell inside
+          // the boundary; the shader's shore noise, +-7 m of it, is what makes
+          // that arc read as a shore rather than as an arc.
+          if (u > 0.98) d = Math.min(d, (1.14 - u) * L.Rc * 0.5);
           // Never over the road — but RAMPED, not cut. A hard clip put the
           // waterline exactly on a 4 m lattice edge and the shore came out as a
           // sawtooth of white foam running parallel to the carriageway; the
           // ramp lands the zero crossing wherever it falls inside a cell.
           const dr = plan.dRoute(x, z);
+          const keep = keepOutOf(L, x, z);
           if (dr < keep) d = Math.min(d, (dr - keep) * 0.55);
           depth[j * M + i] = d;
-          if (u <= 1.18 && nearestByRadius(plan.lakes, x, z) === L) {
+          if (u <= OWN_U && nearestByRadius(plan.lakes, x, z) === L) {
             own[j * M + i] = 1;
             if (d > 0) wet++;
           }
@@ -1435,7 +1651,13 @@ export class Water {
     for (let j = 2; j < N - 1; j++) {
       for (let i = 2; i < N - 1; i++) {
         const d = depth[j * VN + i];
-        if (d < 0.45 || d > 2.1) continue;
+        // A CLEAR METRE UNDER, for the same reason the bed repaint stays a
+        // metre under: the pads are placed off the analytic depth field on a
+        // 4 m grid while the ground you SEE is a mesh with 8.7 m facets that
+        // cuts the corner off every bank. Pads sited in half a metre of
+        // analytic water came out lying on green grass several metres up the
+        // shore, a raft of leaves floating over a meadow.
+        if (d < 1.15 || d > 2.4) continue;
         // Rafts, never a sprinkle — and only in the corner of a bay, so a wide
         // shelf does not come out carpeted in leaves.
         if (F.shore && F.shore[j * VN + i] > 15) continue;
@@ -1450,7 +1672,7 @@ export class Water {
           const ii = Math.round((px - x0) / cell), jj = Math.round((pz - z0) / cell);
           if (ii < 0 || jj < 0 || ii >= VN || jj >= VN) continue;
           const dd = depth[jj * VN + ii];
-          if (dd < 0.30 || dd > 2.6) continue;
+          if (dd < 0.95 || dd > 2.9) continue;
           const R = 0.70 + rng.float() * 0.60;
           const rot = rng.float() * Math.PI * 2;
           c.set(green[rng.int(0, 3)]);
