@@ -55,8 +55,25 @@ if (shotId) {
   game.loadBiome(params.get('biome') ?? 'alpine');
 
   const kb = new KeyboardInput();
-  const startAudio = () => { game.audio.start?.(); window.removeEventListener('keydown', startAudio); };
-  window.addEventListener('keydown', startAudio);
+
+  /**
+   * Title screen. The world is already rendering behind it, so the backdrop is
+   * the live game. Starting on a click (or any key) also supplies the user
+   * gesture WebAudio requires before an AudioContext is allowed to run — doing
+   * it here means the engine note is there from the first metre.
+   */
+  let started = false;
+  const titleEl = document.getElementById('title');
+  const start = () => {
+    if (started) return;
+    started = true;
+    titleEl?.classList.add('gone');
+    game.audio.start?.();
+    window.removeEventListener('keydown', onAnyKey);
+  };
+  const onAnyKey = (e) => { if (e.code !== 'Tab') start(); };
+  document.getElementById('play')?.addEventListener('click', start);
+  window.addEventListener('keydown', onAnyKey);
 
   /**
    * Respawn on the route. Also used to rescue the player: at this camera height

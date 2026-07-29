@@ -11,11 +11,79 @@
       #app { position: fixed; inset: 0; }
       canvas { display: block; width: 100%; height: 100%; }
       #ui { position: fixed; inset: 0; pointer-events: none; }
+
+      /* ---------------------------------------------------------- title screen
+         The world renders live behind this, so the backdrop is the actual game
+         rather than a picture of it. The button also gives us the user gesture
+         that WebAudio needs before an AudioContext may start. */
+      #title {
+        position: fixed; inset: 0; z-index: 10;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 26px; text-align: center;
+        font-family: ui-sans-serif, -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+        color: #fff;
+        background:
+          radial-gradient(ellipse at 50% 45%, rgba(8,12,18,.30) 0%, rgba(8,12,18,.78) 70%);
+        backdrop-filter: blur(2px);
+        transition: opacity .45s ease, visibility .45s;
+      }
+      #title.gone { opacity: 0; visibility: hidden; }
+
+      #title h1 {
+        font-size: clamp(46px, 9vw, 112px);
+        font-weight: 900; letter-spacing: -.045em; line-height: 1.0;
+        text-shadow: 0 6px 40px rgba(0,0,0,.65);
+      }
+      #title .sub {
+        font-size: 12.5px; letter-spacing: .42em; text-transform: uppercase;
+        opacity: .72; margin-top: 10px;
+      }
+      #play {
+        pointer-events: auto; cursor: pointer;
+        font: inherit; font-size: 17px; font-weight: 800; letter-spacing: .16em;
+        text-transform: uppercase; color: #10141b;
+        background: #fff; border: 0; border-radius: 999px;
+        padding: 17px 54px;
+        box-shadow: 0 10px 40px rgba(0,0,0,.5);
+        transition: transform .14s ease, box-shadow .14s ease, background .14s;
+      }
+      #play:hover { transform: translateY(-2px) scale(1.02); box-shadow: 0 16px 50px rgba(0,0,0,.6); }
+      #play:active { transform: translateY(0) scale(.99); }
+
+      #title .keys {
+        display: flex; gap: 22px; flex-wrap: wrap; justify-content: center;
+        font-size: 12px; letter-spacing: .08em; opacity: .78; margin-top: 4px;
+      }
+      #title .keys b {
+        display: inline-block; min-width: 26px; padding: 3px 7px; margin-right: 7px;
+        border: 1px solid rgba(255,255,255,.35); border-radius: 5px;
+        font-size: 11px; font-weight: 700;
+      }
+      #title .hint { font-size: 11.5px; opacity: .5; letter-spacing: .08em; }
+      #title .hint a { color: #9ec7ff; }
     </style>
   </head>
   <body>
     <div id="app"></div>
     <div id="ui"></div>
+
+    <div id="title">
+      <div>
+        <h1>DRIFTLANDS</h1>
+        <div class="sub">Alpine Meadows &middot; Stage 01</div>
+      </div>
+      <button id="play" type="button">Drive</button>
+      <div class="keys">
+        <span><b>W A S D</b>drive</span>
+        <span><b>Space</b>handbrake</span>
+        <span><b>R</b>reset</span>
+        <span><b>M</b>map</span>
+        <span><b>N</b>mute</span>
+        <span><b>H</b>hide HUD</span>
+      </div>
+      <div class="hint">Chain drifts to score &middot; <a href="/progress/index.html">build progress</a></div>
+    </div>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
