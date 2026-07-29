@@ -1084,6 +1084,48 @@ const BANDS = [
   [0.66, 1.00, 'edge'],
 ];
 
+/**
+ * The same table, subdivided so no slice is wider than 0.085 of the half width
+ * (~0.47 m on an 11 m road).
+ *
+ * WHY: the reference's carriageway is not two dark ruts on a flat plane, it is
+ * a dozen overlapping arcs of worn and thrown dirt, and that is most of the
+ * tonal range in the picture. Measured on the shipped frame, 73% of our pixels
+ * sat in three adjacent luminance buckets against the target's 60%, and the
+ * road — a quarter of the image — was contributing one flat tone to that. A
+ * per-slice tonal streak (see `streak` below) needs slices fine enough to carry
+ * it; at 13 bands the finest streak was three metres wide and read as banding.
+ */
+const SLICES = (() => {
+  const out = [];
+  for (const [u0, u1, kind] of BANDS) {
+    const k = Math.max(1, Math.ceil((u1 - u0) / 0.085));
+    for (let i = 0; i < k; i++) {
+      out.push([u0 + (u1 - u0) * (i / k), u0 + (u1 - u0) * ((i + 1) / k), kind]);
+    }
+  }
+  return out;
+})();
+
+/**
+ * LONGITUDINAL WEAR STREAKS. Coherent in arc length and in lateral station, so
+ * they draw long thin light-and-dark arcs that follow the road round a corner —
+ * traffic, not dither. `jitter` alone is per-quad hash noise: it adds variance
+ * to a histogram without adding anything the eye reads as a surface.
+ */
+function streak(s, uf) {
+  // Deliberately non-harmonic frequencies (11.3 : 29.7 : 4.1 shares no small
+  // common factor) and a phase that drifts with arc length, so the arcs vary in
+  // width and spacing down the road. Three near-harmonic terms produced evenly
+  // ruled corduroy — regular enough to read as a texture bug rather than as
+  // traffic.
+  const wobble = 0.62 + 0.38 * Math.sin(s * 0.0033 + 0.9);
+  return 1 + wobble * (
+    0.150 * Math.sin(uf * 11.3 + s * 0.021 + 0.7 * Math.sin(s * 0.0027))
+    + 0.090 * Math.sin(uf * 29.7 - s * 0.0088 + 1.7)
+    + 0.070 * Math.sin(uf * 4.1 + s * 0.0039 + 3.1));
+}
+
 /** Nominal lateral station of the two ruts, as a fraction of the half width. */
 const RUT_U = 0.42;
 
@@ -1192,6 +1234,7 @@ class Strip {
 }
 
 const _jc = new THREE.Color();
+const _sc = new THREE.Color();
 function jitter(base, i, amt) {
   const t = ((Math.imul(i, 2654435761) >>> 0) / 4294967296 - 0.5) * amt;
   return _jc.copy(base).multiplyScalar(1 + t);
@@ -1310,14 +1353,19 @@ function buildRibbonMesh(ctx, route, colours, name) {
       if (a >= 0.999) f *= hem[uf > 0 ? 1 : 0];
       return { u: f * sm.hw, y: drape(sm, f * sm.hw) };
     };
-    for (let j = 0; j < BANDS.length; j++) {
-      const [u0, u1, kind] = BANDS[j];
+    for (let j = 0; j < SLICES.length; j++) {
+      const [u0, u1, kind] = SLICES[j];
       const a0 = put(A, u0, swayA, hemA), a1 = put(A, u1, swayA, hemA);
       const b0 = put(B, u0, swayB, hemB), b1 = put(B, u1, swayB, hemB);
+      // Streak first, hash-jitter second: the streak is the surface, the
+      // jitter is the grit sitting on it.
+      const uc = (u0 + u1) * 0.5;
+      const sc = streak((A.s + B.s) * 0.5, uc);
       b.quad(
         st(A, a0.u, a0.y), st(A, a1.u, a1.y),
         st(B, b0.u, b0.y), st(B, b1.u, b1.y),
-        jitter(tone[kind], i * 11 + j, kind === 'rut' ? 0.10 : 0.075)
+        jitter(_sc.copy(tone[kind]).multiplyScalar(sc), i * 11 + j,
+          kind === 'rut' ? 0.09 : 0.06)
       );
     }
 
@@ -1440,18 +1488,70 @@ function kerbGeom() {
  * follows the ground the way a real fence does instead of floating level.
  */
 function buildFence(strip, routes, terrain, seed, colPost, colRail) {
-  // Stylised, not scale-accurate. At a 50-degree camera 200 m up, a real 0.15 m
-  // fence post is two pixels of nothing; the references draw chunky timber that
-  // reads instantly, so the posts are ~0.34 m square and the rails 0.24 m thick.
+  // WHY THESE NUMBERS, AND WHY THE FENCE MUST STAY SHORT.
+  //
+  // The camera looks down from ~26 degrees above the horizon, which means the
+  // ground is foreshortened to 0.44 while anything VERTICAL keeps 0.90 of its
+  // length on screen. A fence that runs along the road — which is every fence
+  // here — therefore has its bays squashed to 0.44 while its posts do not, and
+  // as soon as
+  //
+  //     bay x 0.44   <   post height x 0.90
+  //
+  // consecutive posts overlap and the whole line renders as one solid brown
+  // bar. A 3.15 m bay with a 1.72 m post is exactly that case, and the frame it
+  // produced was a fence-coloured kerb, not a fence.
+  //
+  // So the geometry is now the real thing: a post-and-rail fence is about 1.2 m
+  // tall with 4-4.5 m bays, which puts the ratio at 4.4x0.44 / 1.28x0.90 = 1.7
+  // and leaves a clear run of open rail with meadow visible through it — which
+  // is what target_01 shows at every magnification.
   const SPACING = 4.4;      // bay length
-  const POST_H = 1.55;
-  const POST_R = 0.17;      // half-width of the square post
-  const RAILS = [0.66, 1.20];
-  const RAIL_T = 0.12;      // rail half-thickness
-  const RAIL_H = 0.17;      // rail half-height
+  const POST_H = 1.28;
+  const POST_R = 0.16;      // half-width of the square post
+  const RAILS = [0.46, 0.94];
+  const RAIL_T = 0.10;      // rail half-thickness
+  const RAIL_H = 0.13;      // rail half-height
 
-  /** An axis-aligned-to-the-road box: four sides plus the top the camera sees. */
-  const box = (strip, cx, cy, cz, ax, az, halfA, halfB, halfH, col, top) => {
+  /**
+   * HOW MUCH OF THE ROAD CARRIES A FENCE.
+   *
+   * The old rule was `fbm(...) > -0.02`, an eyeballed threshold against a noise
+   * function whose distribution nobody had measured. It produced 46% coverage
+   * in long blocks, and the hero frame landed in one of the holes: the nearest
+   * post to the car was 64 m away and not one fence vertex projected inside the
+   * viewport. Three alpine frames in a row shipped with no fence in them at all
+   * while the world happily reported a fence mesh with 67k vertices in it.
+   *
+   * So the coverage is now a NUMBER rather than a threshold. The gate is the
+   * (1 - COVER) quantile of the noise sampled along these very routes, which
+   * pins the fraction of the road that carries fence no matter what the noise
+   * does. In target_01 the post-and-rail runs almost continuously on both sides
+   * of the road, broken only by field gates and the bridge approach.
+   */
+  const COVER = 0.94;
+  const FREQ = 0.0030;      // ~330 m per cycle: long runs, occasional gates
+  const noiseAt = (s, side) =>
+    fbm(s * FREQ + side * 17.3, seed * 0.011, { octaves: 2, seed: seed + 613 });
+
+  const vals = [];
+  for (const route of routes) {
+    for (let i = 0; i < route.samples.length; i += 2) {
+      vals.push(noiseAt(route.samples[i].s, 1), noiseAt(route.samples[i].s, -1));
+    }
+  }
+  vals.sort((a, b) => a - b);
+  const GATE = vals.length
+    ? vals[clamp(Math.floor((1 - COVER) * vals.length), 0, vals.length - 1)]
+    : -1;
+
+  /**
+   * An axis-aligned-to-the-road box: four sides plus the top the camera sees.
+   * `ends = false` drops the two faces perpendicular to the long axis, which is
+   * what a rail wants — both of its ends are buried inside a post, and at this
+   * coverage that is a quarter of the fence's triangles saved for nothing.
+   */
+  const box = (strip, cx, cy, cz, ax, az, halfA, halfB, halfH, col, top, ends = true) => {
     const bx = -az, bz = ax;                       // the other horizontal axis
     const ux = ax * halfA, uz = az * halfA;
     const vx = bx * halfB, vz = bz * halfB;
@@ -1461,9 +1561,14 @@ function buildFence(strip, routes, terrain, seed, colPost, colRail) {
     ];
     const lo = cy - halfH, hi = cy + halfH;
     for (let q = 0; q < 4; q++) {
+      if (!ends && q % 2 === 0) continue;           // the two end caps
       const p = c[q], r = c[(q + 1) % 4];
+      // A vertical face at this sun angle gets almost nothing from the light
+      // rig, so a 0.84 side multiplier came out black and the fence read as a
+      // dashed shadow. The sides are lifted instead: the object has to survive
+      // being lit almost entirely from above.
       strip.quad([p[0], hi, p[1]], [p[0], lo, p[1]], [r[0], hi, r[1]], [r[0], lo, r[1]],
-        q % 2 ? col.clone().multiplyScalar(0.84) : col);
+        q % 2 ? col.clone().multiplyScalar(0.93) : col);
     }
     strip.quad([c[0][0], hi, c[0][1]], [c[1][0], hi, c[1][1]],
       [c[3][0], hi, c[3][1]], [c[2][0], hi, c[2][1]], top);
@@ -1472,61 +1577,89 @@ function buildFence(strip, routes, terrain, seed, colPost, colRail) {
   // A fence must never run across a carriageway. Spurs leave the main route at
   // a T, and without this check the fence line marches straight over the
   // junction and out the other side, which reads as a bug rather than a farm.
+  //
+  // The test has to ignore the fence's OWN stretch of road — it is standing a
+  // couple of metres off it by construction — but only the own stretch. The
+  // previous version excluded exactly one sample object, which meant the offset
+  // point was tested against its own immediate neighbours and cleared them by
+  // less than a metre; anything that moved the fence line closer to the road
+  // silently deleted the whole thing. Now it skips a window of arc length on
+  // the owning route and tests everything else properly.
   const CELL = 24;
   const grid = new Map();
-  for (const route of routes) {
-    for (const sm of route.samples) {
+  routes.forEach((route, ri) => {
+    route.samples.forEach((sm, i) => {
       const k = `${Math.floor(sm.x / CELL)},${Math.floor(sm.z / CELL)}`;
       let l = grid.get(k);
       if (!l) grid.set(k, (l = []));
-      l.push(sm);
-    }
-  }
-  const overRoad = (x, z, own) => {
+      l.push({ sm, ri, i });
+    });
+  });
+  const overRoad = (x, z, ri, i, n, skip) => {
     const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
     for (let u = -1; u <= 1; u++) {
       for (let v = -1; v <= 1; v++) {
         const l = grid.get(`${ci + u},${cj + v}`);
         if (!l) continue;
-        for (const sm of l) {
-          if (sm === own) continue;
-          const d = Math.hypot(sm.x - x, sm.z - z);
-          if (d < sm.hw + sm.verge + 1.6) return true;
+        for (const e of l) {
+          if (e.ri === ri) {
+            const d = Math.abs(e.i - i);
+            if (Math.min(d, n - d) <= skip) continue;
+          }
+          if (Math.hypot(e.sm.x - x, e.sm.z - z) < e.sm.hw + e.sm.verge + 1.4) return true;
         }
       }
     }
     return false;
   };
 
-  for (const route of routes) {
+  routes.forEach((route, ri) => {
     const S = route.samples;
     const n = S.length;
-    if (n < 8) continue;
+    if (n < 8) return;
+    const closed = route.closed !== false;
+    const ds = route.ds;
+    const total = closed ? n * ds : (n - 1) * ds;
+    // Arc length of road the keep-out test forgives on the owning route: far
+    // enough that a fence never trips over its own carriageway, short enough
+    // that it still notices the other leg of a hairpin.
+    const skip = Math.max(3, Math.round(26 / ds));
+
     for (const side of [1, -1]) {
       let prev = null;
-      let since = 1e9;
-      for (let i = 0; i < n; i++) {
-        const sm = S[i];
-        since += route.ds;
-        // Long runs with long gaps, decided by arc length so the same stretch
-        // of road always carries the same fence.
-        const on = fbm(sm.s * 0.0042 + side * 17.3, seed * 0.011,
-          { octaves: 2, seed: seed + 613 }) > -0.02;
-        if (!on || sm.wet || since < SPACING) {
-          if (!on || sm.wet) prev = null;
-          continue;
-        }
-        const u = side * (sm.hw + sm.verge + 2.3);
-        const x = sm.x + sm.nx * u, z = sm.z + sm.nz * u;
-        if (overRoad(x, z, sm)) { prev = null; continue; }
-        since = 0;
+      // MARCHED IN ARC LENGTH, not per sample. Stations are ~3 m apart, so a
+      // "one post per sample, skip if closer than SPACING" loop can only ever
+      // produce bays of 6 m — double what the reference shows. Interpolating
+      // between the two bracketing samples puts the post exactly where the bay
+      // wants it and lets the bay length be a design decision again.
+      for (let s = 0; s < total; s += SPACING) {
+        const f = s / ds;
+        const i0 = Math.floor(f) % n;
+        const i1 = closed ? (i0 + 1) % n : Math.min(i0 + 1, n - 1);
+        const t = f - Math.floor(f);
+        const a = S[i0], b = S[i1];
+        if (a.wet || b.wet || noiseAt(s, side) <= GATE) { prev = null; continue; }
+
+        const hw = lerp(a.hw, b.hw, t), verge = lerp(a.verge, b.verge, t);
+        let nx = lerp(a.nx, b.nx, t), nz = lerp(a.nz, b.nz, t);
+        const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+        let tx = lerp(a.tx, b.tx, t), tz = lerp(a.tz, b.tz, t);
+        const tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
+        // Clear of the guaranteed soft skirt (SKIRT_MIN) so the post is planted
+        // in the meadow rather than growing out of the road's own embankment.
+        const u = side * (hw + verge + 2.15);
+        const x = lerp(a.x, b.x, t) + nx * u, z = lerp(a.z, b.z, t) + nz * u;
+        if (overRoad(x, z, ri, i0, n, skip)) { prev = null; continue; }
+
         const g = terrain.heightAt(x, z) - 0.14;   // planted, never floating
-        const cur = { x, z, g, tx: sm.tx, tz: sm.tz };
+        const cur = { x, z, g };
 
-        box(strip, x, g + POST_H * 0.5, z, sm.tx, sm.tz, POST_R, POST_R, POST_H * 0.5,
-          colPost, colPost.clone().multiplyScalar(1.10));
+        box(strip, x, g + POST_H * 0.5, z, tx, tz, POST_R, POST_R, POST_H * 0.5,
+          // The cap is the giveaway from above: in the reference it is a bright
+          // orange square sitting proud of the rails, one per bay.
+          colPost, colPost.clone().multiplyScalar(1.34));
 
-        if (prev && Math.hypot(x - prev.x, z - prev.z) < SPACING * 2.4) {
+        if (prev && Math.hypot(x - prev.x, z - prev.z) < SPACING * 1.9) {
           const dx = x - prev.x, dz = z - prev.z;
           const l = Math.hypot(dx, dz) || 1;
           const ax = dx / l, az = dz / l;
@@ -1536,13 +1669,13 @@ function buildFence(strip, routes, terrain, seed, colPost, colRail) {
             // post heights, so a fence on a slope steps down with the slope
             const my = (prev.g + g) * 0.5 + h;
             box(strip, mx, my, mz, ax, az, l * 0.5, RAIL_T, RAIL_H,
-              colRail, colRail.clone().multiplyScalar(1.08));
+              colRail, colRail.clone().multiplyScalar(1.14), false);
           }
         }
         prev = cur;
       }
     }
-  }
+  });
 }
 
 function buildFurniture(ctx, routes, colours) {
@@ -1627,9 +1760,14 @@ function buildFurniture(ctx, routes, colours) {
   // Warm timber. The palette trunk colour is the right family but too dark and
   // too cool on its own for sunlit rails, so it is lifted toward the measured
   // reference timber (ART_DIRECTION §6, `timber #a8763f`).
-  const timber = new THREE.Color(palette.trunk ?? 0x6b4a30).lerp(new THREE.Color(0xa8763f), 0.85);
+  // Sampled off target_01 with tools/road_scan.mjs / crop.mjs: the sunlit rails
+  // sit around #b07c42 and the post caps closer to #e0a050. Vertical timber
+  // barely catches this light rig, so the material has to start bright or the
+  // fence renders as a dark line and the client's most recognisable piece of
+  // roadside furniture disappears into the meadow.
+  const timber = new THREE.Color(palette.trunk ?? 0x6b4a30).lerp(new THREE.Color(0xb07c42), 0.95);
   buildFence(fence, routes, terrain, seed ?? 1337,
-    timber.clone().multiplyScalar(0.86), timber);
+    timber.clone().multiplyScalar(0.94), timber);
 
   const mat = new THREE.MeshLambertMaterial({ flatShading: true });
   const dummy = new THREE.Object3D();
@@ -1826,6 +1964,14 @@ export function createRoadNetwork(ctx) {
   // turf the road actually runs through.
   const ramp = palette.ground ?? [0x5faa3c];
   const grass = new THREE.Color(ramp[Math.min(ramp.length - 1, 2)]);
+  // THE MISSING BLUE. tools/measure.mjs: every dominant colour in our frame ends
+  // in 00 — the ground ramp carries literally zero blue — while the reference's
+  // meadow greens measure 0x17 (23) and its frame mean blue is 44 against our
+  // 26. The ramp is not mine to change, but everything this module blends INTO
+  // the meadow is: the shoulder, the fill and cut faces, the soft blend that
+  // lands on the turf, and the greened strip between the ruts. All of them get
+  // the reference's blue back, or the whole fringe of the road reads as khaki.
+  if (grass.b < 23 / 255) grass.b = 23 / 255;
 
   const colours = {};
   for (const k of new Set(style.kinds)) {
@@ -1847,7 +1993,11 @@ export function createRoadNetwork(ctx) {
     colours[`${k}:edge`] = c.clone().lerp(new THREE.Color(palette.roadEdge), 0.26);
   }
   const base = colours[style.kinds[0]];
-  colours.shoulder = base.clone().lerp(grass, 0.55);
+  // Mostly turf, not mostly road. At 0.55 the shoulder rendered as a pale grey
+  // ring following the carriageway a metre outside it — a kerb, which is the
+  // one thing an unsurfaced rally road does not have. target_01 goes from dust
+  // to meadow across about a metre with no light band in between.
+  colours.shoulder = base.clone().lerp(grass, 0.70).multiplyScalar(0.96);
   colours.blend = grass.clone().lerp(base, 0.07);
   colours.cut = new THREE.Color(palette.rock).lerp(base, 0.45);
   colours.fill = grass.clone().lerp(base, 0.30);
@@ -1981,14 +2131,26 @@ export function createRoadNetwork(ctx) {
     // A 9 s capture from a standstill covers ~230-270 m at rally pace; a run
     // with a real corner in it scrubs speed, so the shutter lands nearer 230.
     const runN = Math.max(8, Math.round(400 / main.ds));
-    // MEASURED, not assumed: with the run-up kept open the hero tape puts the
-    // car 273 m along the route at its 9 s settle time. Get this wrong by 40 m
-    // and the whole frame is scored around the wrong piece of road.
-    const endN = Math.max(4, Math.round(272 / main.ds));
-    // Where the shutter opens, in metres along the route, for each alpine
-    // capture preset — lake_bridge settles at 7 s, hero_alpine at 9 s and
-    // wildlife at 10 s. Weighted toward the hero, which is the judged frame.
-    const SHUTTERS = [{ m: 190, w: 0.22 }, { m: 272, w: 0.56 }, { m: 315, w: 0.22 }];
+    // Where the shutter opens, in metres along the route.
+    //
+    // This is the single most load-bearing number in the whole scorer and it
+    // was wrong. The old value — 272 m at the hero's 9 s settle — came from one
+    // trace on a route with far fewer corners in it. tools/route_probe.mjs now
+    // reports the car's station directly, and on the current routes it is:
+    //
+    //     lake_bridge   7 s -> 155 m      hero_alpine  9 s -> 221 m
+    //     wildlife     10 s -> 237 m  (throttle 0.8)
+    //
+    // Scoring the hero at 272 m is scoring a piece of road fifty metres past
+    // the one that ends up in the picture, which is exactly how a spawn with a
+    // measured 7.6 m sagitta photographed at 1.4 m — a straight line.
+    //
+    // So the stations are DERIVED from the fitted v(d) below rather than
+    // hard-coded, and each one is scored across a tolerance band: the tape's
+    // handbrake flick and each world's own corners move the settle point by
+    // tens of metres, and a spawn scored at a single station is a spawn scored
+    // at the wrong one.
+    const SETTLE = [{ t: 7.0, w: 0.22 }, { t: 9.0, w: 0.56 }, { t: 10.0, w: 0.22 }];
     // The green band of the ground ramp. Anything much above this is the pale
     // upper alp, and the frame loses its saturation.
     const GREEN = 34;
@@ -2001,13 +2163,34 @@ export function createRoadNetwork(ctx) {
     //
     //     v(d) = V·tanh( sqrt(2·A₀·d) / V )
     //
-    // — constant-power-ish, within a metre per second everywhere. The earlier
-    // sqrt(2·5.6·d) fit was 25% low at 30 m, which understated the lateral
-    // demand of the opening corners by half and let the run-up throw the car
-    // thirty metres into the meadow.
-    const A0 = 10.6, V_MAX = 42;
+    // — constant-power-ish. REFITTED this round against tools/route_probe.mjs,
+    // which reads the car's station off the live scene at settle time instead
+    // of off a hand-taken trace: A₀ = 10.6 predicted 184/261/301 m at the three
+    // settle times against a measured 155/221/237, a 20-27% overshoot, and
+    // every one of those metres came out of the composition. A₀ = 7.5 predicts
+    // 152/223/261, which is inside the noise for the two presets that run flat
+    // out and long only for wildlife, whose tape holds 0.8 throttle.
+    const A0 = 7.5, V_MAX = 42;
     const vAt = (metres) =>
       V_MAX * Math.tanh(Math.sqrt(2 * A0 * Math.max(1, metres)) / V_MAX);
+    /** Distance covered from a standstill after `t` seconds of that model. */
+    const dAt = (t) => {
+      let d = 0;
+      for (let s = 0; s < t; s += 0.02) d += vAt(d) * 0.02;
+      return d;
+    };
+    // Each settle time, spread over a ±16% tolerance band so the winning spawn
+    // is one whose road photographs well over a STRETCH rather than at a point.
+    const SHUTTERS = [];
+    for (const { t, w } of SETTLE) {
+      const m = dAt(t);
+      // ±8%. The band existed because the old speed model was 20-27% long; with
+      // v(d) refitted it lands within 3% of the measured station, so a wide
+      // band now only blurs the score across road the camera never sees.
+      for (const [f, fw] of [[0.92, 0.25], [1.0, 0.50], [1.08, 0.25]]) {
+        SHUTTERS.push({ m: m * f, w: w * fw });
+      }
+    }
     // Every capture tape does its scripted handbrake flick in the opening
     // seconds — the hero preset's runs from 4.4 s to 5.2 s, which lands between
     // roughly 50 m and 130 m along the route. With the rear axle let go there is
@@ -2030,13 +2213,33 @@ export function createRoadNetwork(ctx) {
     // Every earlier version of this scoring reasoned about 140-260 m windows
     // and kept choosing beautiful hairpins that were off the top of the frame
     // while the car sat on a 300 m sweeper photographing as a ruled line.
-    // Nothing outside ±50 m of the car exists as far as the composition goes.
-    const frameN = Math.max(4, Math.round(66 / main.ds));
-    const frameBack = Math.round(21 / main.ds);
+    // Nothing outside ±30 m of the car exists as far as the composition goes.
+    //
+    // RE-MEASURED. The old 66 m window starting 21 m behind the car was taken
+    // from one preset on one route. Projecting every station through the three
+    // alpine capture cameras now gives, in metres behind/ahead of the car:
+    //
+    //     hero_alpine [-33, +27]   lake_bridge [-36, +57]   wildlife [-24, +21]
+    //
+    // The old window therefore ran 27 m PAST the right-hand edge of the hero
+    // frame, and that overhang is where its 11.6 m of sagitta was hiding: the
+    // corner it scored was off the side of the picture, and the road that was
+    // actually in shot bowed 2.7 m. The window is now the intersection of all
+    // three — the road every alpine preset can see — so a corner that scores
+    // here is a corner that is in the photograph.
+    const frameN = Math.max(4, Math.round(48 / main.ds));
+    const frameBack = Math.round(24 / main.ds);
     // How far the road should bow away from the straight line across the frame.
-    // Over 66 m of visible ribbon, 12 m of sagitta is a corner of about 45 m
-    // radius — it fills the frame with arc. The shipped frame measured 3.6 m.
-    const SAG_WANT = 12;
+    // Over a 48 m chord, 7 m of sagitta is an arc of about 41 m radius, which
+    // is the sweep target_01 draws through the middle of its frame. (Sagitta
+    // scales with the SQUARE of the chord, so the old 12 m over 66 m is 6.3 m
+    // over 48 m — this is the same corner, restated for the real window.)
+    const SAG_WANT = 7.0;
+    const SAG_MIN = 2.5;
+    // The hero settle station, in samples — the one the diagnostics quote and
+    // the one `departure` integrates out to. Derived, like the shutters, from
+    // the fitted v(d) instead of a hard-coded 272.
+    const endN = Math.max(4, Math.round(dAt(9.0) / main.ds));
     // The middle of the visible road ahead of the car.
     const aimN = endN + Math.round(22 / main.ds);
     // THE CORNER ITSELF. The car cannot sit at the apex of a 45 m radius at
@@ -2047,12 +2250,20 @@ export function createRoadNetwork(ctx) {
     const CAR_LO = 40, CAR_HI = 300;
     const AIM_LO = 32, AIM_HI = 80;
 
-    const density = (x, z) => {
+    // How much OTHER road there is within 70 m of a station — the "two legs of
+    // the same road in one frame" the reference is built on. Memoised per
+    // station: the shutter band is nine photographs now, and recomputing an
+    // O(n) neighbour count inside each of them turned the spawn search from
+    // half a million operations into four million.
+    const _dens = new Int32Array(n).fill(-1);
+    const density = (i) => {
+      if (_dens[i] >= 0) return _dens[i];
+      const x = S[i].x, z = S[i].z;
       let c = 0;
       for (let k = 0; k < n; k += 3) {
         if (Math.hypot(S[k].x - x, S[k].z - z) < 70) c++;
       }
-      return c;
+      return (_dens[i] = c);
     };
 
     /**
@@ -2163,7 +2374,19 @@ export function createRoadNetwork(ctx) {
      *
      * Returns the worst departure, in metres, over the run up to the shutter.
      */
-    const A_GRIP = 6.4, K_P = 1.2, K_D = 2.2;
+    // CALIBRATION. The model is the right SHAPE — it ranks candidates correctly
+    // — but it is optimistic in magnitude, because it knows nothing about the
+    // autopilot's reaction lag, the scripted flick, or weight transfer. Against
+    // tools/route_probe.mjs, which reads the car's actual distance from the
+    // centreline out of the live scene at settle time:
+    //
+    //     hero_alpine  model 1.1 m -> measured 5.9 m
+    //     wildlife     model 2.3 m -> measured 8.3 m
+    //
+    // Consistently a factor of 3-5, so the prediction is scaled before it is
+    // judged. Without this the gate waves through spawns that put the car in a
+    // field with the road behind it — which is exactly what wildlife shipped.
+    const A_GRIP = 6.4, K_P = 1.2, K_D = 2.2, DEP_CAL = 3.4;
     const departure = (j) => {
       let y = 0, dy = 0, peak = 0;
       for (let k = 0; k <= endN; k++) {
@@ -2180,7 +2403,7 @@ export function createRoadNetwork(ctx) {
         const a = Math.abs(y);
         if (a > peak) peak = a;
       }
-      return peak;
+      return peak * DEP_CAL;
     };
 
     /**
@@ -2202,8 +2425,8 @@ export function createRoadNetwork(ctx) {
       // not a straight line vanishing off one edge. Over the 66 m of ribbon
       // the camera can actually see, 12 m of sagitta is a corner that fills
       // the picture; the frame we shipped last round measured 3.6 m.
-      const shape = clamp((bend.sag - 6) / (SAG_WANT - 6), 0, 1)
-        * clamp(1 - Math.max(0, bend.sag - SAG_WANT * 1.6) / 40, 0, 1);
+      const shape = clamp((bend.sag - SAG_MIN) / (SAG_WANT - SAG_MIN), 0, 1)
+        * clamp(1 - Math.max(0, bend.sag - SAG_WANT * 1.7) / 26, 0, 1);
 
       // THE HERO CORNER, AND THE TURN-IN. What works is a corner that CLOSES UP
       // in front of the car. The car cannot be at the apex of anything tight —
@@ -2221,14 +2444,14 @@ export function createRoadNetwork(ctx) {
 
       // A CHANGE OF DIRECTION INSIDE THE FRAME. If the ribbon leaves its chord
       // on BOTH sides it draws an S across the image instead of one arc.
-      const ess = clamp(bend.ess / 6, 0, 1);
+      const ess = clamp(bend.ess / 3.5, 0, 1);
 
       // THE ROAD FOLDING BACK THROUGH THE FRAME. The reference's top-left is two
       // legs of the same road sixty metres apart with a wall of conifers between
       // them; that is what fills a picture with route. `density` counts every
       // third station within 70 m, so each count is 9 m of road: ~140 m is the
       // car's own stretch and anything past that is a SECOND piece of road.
-      const fold = clamp((density(car.x, car.z) * 9 - 140) / 160, 0, 1);
+      const fold = clamp((density((j + eN) % n) * 9 - 140) / 160, 0, 1);
 
       // A timber bridge over blue water is the hero landmark of half the client
       // references — but only if it is in the photograph, not in the run-up.
@@ -2239,7 +2462,13 @@ export function createRoadNetwork(ctx) {
       const span = clamp((deck * main.ds) / 26, 0, 1)
         * (1 - clamp((deck * main.ds) / 200, 0, 1));
 
-      return shape * 120 + apex * 170 + ess * 90 + fold * 80 + span * 130;
+      // Reweighted now that the window is honest. `shape` is the only term that
+      // has been checked against the photograph — a spawn scoring 7.8 on it
+      // measured 11.6 m of sagitta in the captured frame — so it leads. `fold`
+      // is raised because the reference puts 35% of its pixels on road against
+      // our 26%, and the only way to get there at this camera height is a
+      // second leg of the same road inside the frame.
+      return shape * 175 + apex * 135 + ess * 90 + fold * 120 + span * 130;
     };
 
     let best = -1, bestScore = -Infinity, pool = 0;
@@ -2312,7 +2541,7 @@ export function createRoadNetwork(ctx) {
       sag: +bendOf(best + endN - frameBack).sag.toFixed(1),
       ess: +bendOf(best + endN - frameBack).ess.toFixed(1),
       comp: SHUTTERS.map((sh) => Math.round(frameScore(best, sh.m))),
-      fold: +clamp((density(S[(best + endN) % n].x, S[(best + endN) % n].z) * 9 - 140) / 160, 0, 1).toFixed(2),
+      fold: +clamp((density((best + endN) % n) * 9 - 140) / 160, 0, 1).toFixed(2),
     };
     // Project convention (see entities/vehicle.js): forward = (cos h, 0, -sin h).
     // So a tangent (tx, tz) maps to atan2(-tz, tx), NOT atan2(tz, tx) — the
