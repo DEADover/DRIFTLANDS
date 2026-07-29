@@ -36,7 +36,7 @@ export const PRESETS = {
     label: 'Alpine drift — full slide, dust, skid marks',
     biome: 'alpine',
     seed: 1337,
-    warmup: 12.0,
+    warmup: 10.0,
     tape: [
       drive(4.0, { throttle: 1 }),
       drive(4.8, { throttle: 0.5, steer: 1, handbrake: 1 }),

@@ -448,11 +448,49 @@ export class Game {
     while (err < -Math.PI) err += Math.PI * 2;
 
     const aggression = opts.aggression ?? 1;
-    const steer = THREE.MathUtils.clamp(err * 1.9 * aggression - v.yawRate * 0.22, -1, 1);
+
+    // Counter-steer. A plain heading-error controller cannot hold a slide: the
+    // car is pointing one way and travelling another, so chasing the heading
+    // error alone sends it further sideways until it leaves the road. Steer
+    // toward where the car is actually GOING (its slip angle) on top of the
+    // path term, scaled by how sideways it is. This is what a driver does.
+    const slip = v.slipAngle ?? 0;
+    const slideness = Math.min(1, Math.abs(slip) / 0.45);
+    const counter = -slip * 1.35 * slideness;
+
+    const steer = THREE.MathUtils.clamp(
+      err * 1.9 * aggression + counter - v.yawRate * (0.22 + 0.5 * slideness),
+      -1, 1
+    );
+
+    // ---- speed control ----------------------------------------------------
+    // Holding full throttle into a hairpin at 130 km/h puts the car in the
+    // trees every time, which is why captures kept ending up off-road. Read the
+    // corner ahead and slow for it the way a driver would: compare the heading
+    // of a near and a far look-ahead point, turn that into a corner radius, and
+    // cap the speed at what the surface can hold.
+    const near = this.roads.lookAhead?.(v.position.x, v.position.z, lead);
+    const far = this.roads.lookAhead?.(v.position.x, v.position.z, lead + 55);
+    let throttle = opts.throttle ?? 1;
+    let brake = opts.brake ?? 0;
+
+    if (near && far && brake === 0) {
+      let turn = far.heading - near.heading;
+      while (turn > Math.PI) turn -= Math.PI * 2;
+      while (turn < -Math.PI) turn += Math.PI * 2;
+
+      // radius = arc length / angle, floored so a straight does not divide by ~0
+      const radius = 55 / Math.max(Math.abs(turn), 0.02);
+      const grip = (this.surface?.grip ?? 0.85) * 9.81 * 2.8;
+      const vMax = Math.sqrt(Math.max(4, grip * radius));
+
+      if (speed > vMax * 1.06) { throttle = 0; brake = Math.min(1, (speed / vMax - 1) * 2.2); }
+      else if (speed > vMax * 0.94) { throttle *= 0.35; }
+    }
 
     return {
-      throttle: opts.throttle ?? 1,
-      brake: opts.brake ?? 0,
+      throttle,
+      brake,
       steer,
       handbrake: opts.handbrake ?? 0,
       reset: false,
