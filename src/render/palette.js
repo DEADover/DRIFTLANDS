@@ -76,24 +76,36 @@
 // Legacy `ground` is kept in sync with `terrain.ramp` — some systems (dust
 // colour, prop tinting) still read it.
 //
-// ALPINE, measured off ref/target_01_alpine_meadow.png.
-//   * The meadow there is NOT a cool forest green. It is a high-chroma
-//     YELLOW-green: hue 66-70, saturation 90-99%, HSV value 50-60%
-//     (#7f9001 in sun, #738403 in shade). Our v2 ramp sat at hue 96-100 with
-//     42-60% saturation — 30 degrees too blue at half the chroma — which is
-//     precisely why the ground read "pale and desaturated".
-//   * Look at the blue channel: reference grass runs B = 0-12 out of 255. Ours
-//     ran B = 55-87, and that blue is what a blue sky ambient turns to grey.
-//     Keep it on the floor.
-//   * Hue drifts 95 (shaded hollows) -> 63 (sunlit crests) up the ramp, the same
-//     drift the reference shows between #143117 and #7f9001. Index 3 IS the
-//     measured reference meadow colour.
-//   * Authored ~14% below the target value, because the pipeline (KEY, contrast
-//     1.12, bloom) hands back about +8 points of HSV value.
-//   * Nothing in it is grey and nothing is white. Alpine's landform no longer
-//     reaches snow altitude, so index 5 is a rim-hill green, slightly duller so
-//     it sits back in the distance. Grey belongs to boulders and cliff faces.
-const ALPINE_RAMP = [0x1d3a10, 0x33540f, 0x5f7607, 0x7c8305, 0x8c920e, 0x808a30];
+// ALPINE, measured off ref/target_01_alpine_meadow.png at 20 levels/channel.
+//
+// The v3 note below this one said "reference grass runs B = 0-12, keep blue on
+// the floor". That was measured on SUNLIT grass only and then applied to the
+// whole ramp, and it is what turned the frame olive. Re-measured across the
+// whole reference the picture is completely different:
+//
+//   dominant greens  #0d261a #1a331a #26401a #334d1a #59660d #66730d #73800d
+//                    #808c0d #808c00
+//   i.e. B = 26,26,26,26,13,13,13,13,0 as the green gets lighter.
+//
+// So blue is NOT a floor, it is a RAMP THAT RUNS THE OTHER WAY to value. The
+// reference's shaded greens are deep blue-greens at hue 120-150 carrying B ~ R
+// and only ~50-60% saturation; its sunlit greens are hue 62-70 yellow-greens at
+// 85-100% saturation with almost no blue. Ours had B = 0 at BOTH ends — every
+// dominant bin ended in 00 — which is the literal definition of olive, and it
+// also pinned our mean saturation at 0.88 against the reference's 0.77, because
+// a zero channel forces S = 1 no matter what the other two do.
+//
+// Hence, low -> high:
+//   * 0-1  deep cool heath green, hue 145 -> 105, S 0.55-0.60. These are the
+//          hollows, the shore draws and the shaded side of every swell.
+//   * 2-4  the meadow proper, swinging 80 -> 64 in hue and 0.72 -> 0.80 in
+//          saturation as it climbs. Index 3 is the reference's sunlit sward.
+//   * 5    rim hill: same hue, chroma pulled back so distance sits behind.
+// The luminance span is deliberately much wider than v3's (0.15 -> 0.58 against
+// 0.20 -> 0.53): the reference's green pixels spread from L 0.12 at the 5th
+// percentile to 0.55 at the 95th, ours only 0.17 -> 0.45, and a compressed ramp
+// is half of why.
+const ALPINE_RAMP = [0x16311f, 0x2c4a20, 0x566d1f, 0x7e8f20, 0xa6af2e, 0x929d45];
 const AUTUMN_RAMP = [0x3b4c28, 0x5a682e, 0x83803a, 0xac974a, 0xccb466, 0xe6d59a];
 const DESERT_RAMP = [0xe8d5a4, 0xdcb476, 0xcf8546, 0xbc5730, 0xa33c27, 0xc9713c];
 const COAST_RAMP = [0x104a46, 0x0f6f4c, 0x1e924c, 0x54a548, 0x9c9a56, 0xcfc084];
@@ -108,6 +120,18 @@ export const PALETTES = {
     skyHorizon: 0xa9d8f5,
     sunColor: 0xfff2d6,
     sunIntensity: 3.7,
+    // DO NOT retune ambient to fix the black holes under the firs. Tried and
+    // measured this round: ground under a fir cluster comes back as rgb(3,14,57)
+    // at four separate sample points — a NAVY pit with four times more blue in
+    // it than green, where the reference's tree shadows are plainly GREEN
+    // (#0d261a, #1a331a) at L 0.15-0.20. Raising ambientIntensity 1.10 -> 1.34
+    // moved the frame by 0.001 luma and left those pixels bit-identical,
+    // because renderer.js derives its shadow floor from the sun/ambient SHARE
+    // and then normalises the rig, so a bigger ambient just buys a slightly
+    // shallower step, not a lighter shadow. The colour comes from post.js's AO
+    // tint (which eats red) stacked with grade.js's `lift: [0, 0.030, 0.195]`
+    // (which adds blue and no red, ramped as (1-col)^4 so it only bites on
+    // pixels that are already near black). Both live outside this file.
     ambientSky: 0xa8d4f2,
     ambientGround: 0x86a05c,
     ambientIntensity: 1.1,
@@ -116,10 +140,14 @@ export const PALETTES = {
     ground: ALPINE_RAMP,
     terrain: {
       ramp: ALPINE_RAMP,
-      lowland: 0x1e3d14,     // damp draws and tarn shores
-      patchA: 0x8e991c,      // sun-bleached alp grass — brighter and YELLOWER,
-                             // not the pale khaki that used to wash the meadow
-      patchB: 0x274a12,      // dark heath / bilberry scrub — the deep note
+      // patchA and patchB are no longer a mild tint on top of the ramp — they
+      // ARE the tonal spread. colorAt lerps between them on a 260 m / 90 m / 25 m
+      // noise stack, so the meadow has to be able to reach L 0.60 on a sunlit
+      // rise and L 0.19 in a hollow without either end being a different
+      // material. Keep them one hue family apart, not one value apart.
+      lowland: 0x143020,     // damp draws and tarn shores — bluest green here
+      patchA: 0xbfc453,      // sun-bleached alp grass: hue 64, S 0.58, L 0.73
+      patchB: 0x172f20,      // shaded heath / bilberry: hue 140, S 0.53, L 0.16
       scree: 0xa9a596,       // pale limestone — cliff faces ONLY, never meadow
       cliff: 0x6a6055,       // warm grey rock (ref boulders read #605753)
       soil: 0x8a6236,
@@ -129,15 +157,46 @@ export const PALETTES = {
       grain: 0.34,
       bands: 0,
     },
-    foliage: [0x276e33, 0x31833a, 0x1c5b2b, 0x3d9440],
+    // FIRS. props.js builds each conifer's tier ramp by offsetting these in
+    // LINEAR HSL, and because a green this dark sits near l = 0.02 there, its
+    // `dir` heuristic pushes the upper tiers BRIGHTER — up to +0.125 linear,
+    // which on a 0x3d9440 base landed the crowns on mint. The reference has no
+    // mint in it: its firs are the darkest thing in the frame (#0d261a,
+    // #1a331a) and read as deep blue-greens at hue 130-155. So the base set is
+    // darker AND bluer, which leaves room for the tier brightening to become
+    // the lit/shade separation it was meant to be instead of a blow-out.
+    // Hue matters as much as value: at hue 150+ a dark green reads TEAL, and
+    // the first pass at this put a spruce-blue wood in the frame. The
+    // reference's firs measure hue 100-135 (#26401a lit through #1a331a to
+    // #0d261a in the shade), so these sit at 127-133 — unmistakably green,
+    // just deep and slightly cool.
+    // ...and DARKENING THE BASE IS NOT THE LEVER for the bright tips. Measured:
+    // taking this set down 18% moved the fir crowns by nothing and pushed luma
+    // bucket 0 from 2.9% to 3.7% against the reference's 0.9%. The reason is
+    // that props.js adds its tier offsets to LINEAR lightness — `leafPale` is
+    // base + 0.10 + 0.105 — so on a green sitting at linear l ~ 0.02 the base
+    // contributes almost nothing to the top tier and everything to the bottom
+    // one. What the base DOES still control at the top is hue and chroma, so
+    // the fix for a mint crown is to take the chroma out: S ~ 0.49 across the
+    // set, matching the reference's own firs (#1a331a is S 0.49, #0d261a is
+    // 0.66), with the darkest variant lifted back to L 0.20 so its underside
+    // stops falling into the black hole the AO and the grade lift make of it.
+    foliage: [0x25492f, 0x2e5b39, 0x1e3b28, 0x35673d],
     trunk: 0x6b4a30,
     rock: 0x7d7268,
     rockShadow: 0x4e463f,
     water: 0x1179bd,
     waterDeep: 0x0a4f8c,
     waterFoam: 0xeaf7ff,
-    road: 0xc79a4e,          // warm ochre — ref road is #c99844 / #eebe5c
-    roadEdge: 0xdcb877,
+    // ROAD, pulled down a stop. MEASURED: our road surface renders at
+    // rgb(209,162,70), luma 0.65, and it is ~10% of the frame, which is why our
+    // luma bucket 6 (0.6-0.7) held 9.9% of the picture against the reference's
+    // 5.0% while bucket 5 held 10.2% against its 17.5%. Sampled at two points
+    // the reference road is rgb(203,160,73) and rgb(184,141,74) — the same
+    // R/G ratio of 1.27-1.30 as ours, just a stop lower and far more varied.
+    // So the hue was already right; only the level was wrong.
+    road: 0xb38a46,
+    roadEdge: 0xc9a76b,
     accents: [0xef4d4d, 0xffd23f, 0xff8fbf, 0xffffff],
     sunAzimuth: 2.35,
     // 34 deg. ART_DIRECTION calls for shadows ~1-1.5x object height; 0.50 rad

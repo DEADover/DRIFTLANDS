@@ -222,27 +222,76 @@ export const BIOMES = {
 
     colorAt(c, K, h, slope, x, z, seed) {
       rampAt(c, K.ramp, h, ALPINE_STOPS);
-      patches(c, K, x, z, seed, 0.0088, 0.24, 0.36, 0.04, 0.32);
 
-      // MEADOW TEXTURE. Measured, the reference's most common colour occupies
-      // 0.03% of its pixels — the grass there is never twice the same value.
-      // Ours peaked at 0.6% in one bin: big flat fields of a single green. So:
-      // three soft bands (110 m sweeps, 40 m draws, 20 m tufts) pushing hue,
-      // chroma and value TOGETHER, so a lighter area is also a warmer, yellower
-      // area — grass drying in the sun — rather than the same colour with the
-      // gain turned up. The finest band is what stops a frame that happens to
-      // sit inside one sweep coming out as a single flat acid-green field, which
-      // is exactly what the wildlife shot used to do.
-      const t = fbm(x * 0.0092, z * 0.0092, { octaves: 2, seed: seed + 211 }) * 0.56
-        + fbm(x * 0.026, z * 0.026, { octaves: 2, seed: seed + 213 }) * 0.28
-        + fbm(x * 0.055, z * 0.055, { octaves: 1, seed: seed + 217 }) * 0.20;
-      c.offsetHSL(t * -0.026, t * 0.040, t * 0.044 - 0.012);
-      // The reference's shaded grass is not a darker copy of its lit grass — it
-      // is thirty degrees GREENER (hue 93-127 against 67). So the dark half of
-      // the texture pulls toward deep heath green instead of merely losing
-      // value. That hue swing between sun and shade is most of what makes the
-      // grass look painted rather than tinted.
-      if (t < 0) c.lerp(K.patchB, Math.min(-t, 1) * 0.45);
+      // MEADOW VALUE FIELD — the single biggest fix of this round.
+      //
+      // Measured, our luma histogram was a spike: 57% of the frame sat in two
+      // adjacent buckets while the reference spreads evenly across five, and
+      // our green pixels ran L 0.17-0.45 against the reference's 0.12-0.55.
+      // The old code tried to fix that with an offsetHSL of +/-0.022 lightness,
+      // which is nothing — a rounding error on a value of 0.35.
+      //
+      // So value variation is no longer a tint on top of the ramp; it is a LERP
+      // ACROSS THE WHOLE GROUND RANGE, from the deep blue-green heath in the
+      // hollows (L 0.20) to sun-bleached alp grass on the rises (L 0.66). Three
+      // octaves, and the coarse one dominates on purpose: the camera only sees
+      // ~130 m of ground, so a 290 m band is what puts a genuinely lit slope on
+      // one side of the frame and a genuinely shaded one on the other. Finer
+      // bands alone just make speckle, which averages back to flat.
+      //
+      // SCALE IS EVERYTHING HERE and the first attempt got it wrong. A 290 m
+      // band is not "large scale" at this camera, it is CONSTANT: the frame
+      // only spans ~200 m of ground, so all a 290 m band does is decide how
+      // bright the whole shot is (measured: albedo median 0.40 at the origin
+      // against 0.58 at (300,-200), with the in-frame p10-p90 spread still only
+      // 0.14 in both). The band that reads as a lit slope on one side of the
+      // frame and a shaded hollow on the other is 130-140 m — a bit under one
+      // frame width — with a 50 m band inside it for draws and hummocks.
+      // ...and the band cannot be too coarse EITHER, which is the trap on the
+      // other side. At 140 m the hero frame looked right but the wildlife
+      // preset — a much closer camera seeing maybe 70 m of ground — landed
+      // entirely inside one bright lobe and came back at mean luma 0.484
+      // against the reference's 0.379, a chartreuse field with no shade in it
+      // at all. The band has to be short enough that the CLOSEST camera still
+      // contains a full light-dark cycle: ~87 m, which is about a third of the
+      // hero frame and a full cycle of the wildlife one. That also matches the
+      // reference, whose meadow sweeps measure 40-70 m across.
+      const big = fbm(x * 0.0088, z * 0.0088, { octaves: 2, seed: seed + 205 });
+      const mid = fbm(x * 0.021, z * 0.021, { octaves: 2, seed: seed + 213 });
+      const fine = fbm(x * 0.058, z * 0.058, { octaves: 1, seed: seed + 217 });
+      // A COOL BIAS on this field was tried (-0.10) and reverted: it bought
+      // 0.009 of mean saturation and cost 0.009 of mean luma and 2.4 points out
+      // of luma bucket 5, which is the bucket we are shortest on. The chroma
+      // has to come off the shaded half specifically, not off the whole field.
+      const t = clamp((big * 0.44 + mid * 0.34 + fine * 0.20) * 1.8 - 0.16, -1, 1);
+      // Asymmetric on purpose. THREE.Color.lerp mixes in LINEAR space, where a
+      // 50% mix toward a dark green is nowhere near 50% of the way down in
+      // perceived value — the bright end always wins. The dark lerp has to be
+      // pushed harder to buy the same number of stops.
+      // The shade lerp is CURVED, not linear. Sampled against the reference,
+      // our mid-tones (L 0.36) came back rgb(78,104,20) — R/G 0.75 — where the
+      // reference's mid-tones at the same value are rgb(84,89,42) and
+      // rgb(82,96,27), R/G 0.85-0.94. A straight lerp from a hue-70 yellow-green
+      // to a hue-136 heath passes through pure hue-100 green at the halfway
+      // point, and halfway is exactly where most of the meadow sits. Raising the
+      // exponent keeps the mid-tones on the warm side of the path and only lets
+      // the cool blue-green arrive in the genuinely deep hollows, which is what
+      // the reference does.
+      if (t > 0) c.lerp(K.patchA, t * 0.82);
+      else c.lerp(K.patchB, Math.pow(-t, 1.22) * 1.0);
+      // Hue and chroma ride WITH the value, they do not float free: a lit rise
+      // is warmer AND yellower AND more saturated (grass drying in the sun),
+      // a hollow is cooler AND greener AND duller. The reference shows a 60-80
+      // degree hue swing between its lit and shaded greens, and that swing —
+      // not chroma — is what makes it look painted. It also pulls mean
+      // saturation down, because the dull half is a big share of the frame.
+      // Asymmetric, and the asymmetry is measured: the reference's lightest
+      // greens run 90-100% saturation and its darkest run 50-66%, so chroma
+      // FALLS with value far faster than it rises. A symmetric +/-0.035 left our
+      // shaded grass at S 0.80 where the reference has 0.55, which is most of
+      // the 0.02 we are still over on frame mean saturation.
+      if (t > 0) c.offsetHSL(t * -0.022, t * 0.028, 0);
+      else c.offsetHSL(-t * 0.030, t * 0.065, 0);
 
       // Damp, darker grass in the hollows and along the tarn shores.
       const wet = smoothstep(6, -16, h);
