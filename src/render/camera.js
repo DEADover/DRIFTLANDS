@@ -61,7 +61,7 @@ export class ChaseCamera {
     // the faster you go, the further the frame slides ahead and the more of the
     // coming corner you can read.
     this.lookAhead = 0.75;        // at a standstill / low speed
-    this.lookAheadFast = 4.20;    // fully applied at `leadFullSpeed`
+    this.lookAheadFast = 1.75;    // fully applied at `leadFullSpeed`
     this.leadFullSpeed = 34;      // m/s at which the fast lead is reached
     this.leadSmooth = 1.5;        // how lazily the lead itself responds
     // Back to 3.4 deliberately. A softer focus spring lags the target more the
