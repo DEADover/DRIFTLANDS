@@ -43,6 +43,23 @@ import * as THREE from 'three';
  * `_ensureShadowCasters` to the terrain and the road only. Trees, rocks,
  * buildings and props must keep every facet they have: their faceting is the
  * art direction, the meadow's is an artefact of a 15 m triangle.
+ *
+ * ROUND 8: EVERYTHING ABOVE THIS LINE WAS WRITTEN ABOUT CODE THAT NEVER RAN.
+ * See the note on the patch anchor below. Now that it does run, swept 0.72 /
+ * 0.40 / 0.00 with the post-side ground blur off:
+ *
+ *   meadow mean |dL| at 3 px   7.77  7.83  7.90
+ *   frame median luma         0.382 0.377 0.372
+ *
+ * i.e. tempering the normal is worth 1.7% of the meadow's local contrast and
+ * about 0.01 of frame luma, and CHECKED BY EYE on lake_bridge's faceted
+ * hillside the two are all but indistinguishable. The reason is the diagnosis,
+ * not the fix: our meadow facets are very nearly coplanar, so their normals
+ * barely differ, and the seam you can see between them is the terrain's
+ * per-face VERTEX COLOUR — which no normal filter can touch. It stays at 0.72
+ * because it is free and it does damp the genuinely non-coplanar steps on a
+ * steep slope, but it is not the answer to the flat-meadow note and it never
+ * was. The answer was the tooth below and the penumbra further down.
  */
 const TEMPER_STRENGTH = 0.72;
 /** cos of the steepest facet that gets tempered at all (0.50 = 60 deg slope). */
@@ -50,9 +67,105 @@ const TEMPER_LO = 0.50;
 /** Which meshes are "ground". Everything else keeps every facet it has. */
 const TEMPER = /^(terrain|ground|road-(main|spur))/;
 
+/**
+ * GROUND TOOTH — the answer to "most polygons have no detail at all".
+ *
+ * The tempering above is a LOW-PASS on the normal field: it exists to kill the
+ * seam between two 15 m grass triangles, and it works. What it cannot do — what
+ * nothing downstream of it can do — is put anything back. A tempered facet is
+ * one normal from edge to edge, one N·L, one value, thirty metres wide.
+ *
+ * MEASURED (tools/rp.mjs stats, mean |dL| between two pixels N apart, over
+ * green-dominant pixels only, alpine hero vs ref/target_01):
+ *
+ *              3 px    6 px   12 px   24 px
+ *   ours       5.37    9.49   16.11   24.81
+ *   target     8.35   13.28   19.32   26.53
+ *
+ * Read the row, not one number. At 24 px we are within 7% of the reference and
+ * at 3 px we are 36% short: the picture has the reference's BROAD structure —
+ * hills, tree shadows, the road — and none of its FINE structure. That is the
+ * client's note in one statistic, and it is a high-frequency problem, so no
+ * contrast, exposure or lift can touch it.
+ *
+ * post.js already carries a high-frequency term (`dappleFine`) and it is a
+ * multiply on the composited colour, which is why it buys so little: it is the
+ * same percentage change on a lit facet and on a facet in tree shadow, so it
+ * reads as film grain laid over the picture rather than as ground. Perturbing
+ * the SHADING NORMAL instead makes the same frequency a light term — it brightens
+ * the micro-slopes that face the sun and darkens the ones that do not, it is
+ * carried by the warm key and not by the cool fill, and inside a cast shadow,
+ * where there is no key to modulate, it correctly almost disappears. That is
+ * the difference between grain and tooth.
+ *
+ * World-anchored (reconstructed exactly from vViewPosition and the view matrix's
+ * rotation, so it does not crawl with the camera), ground materials only, and
+ * gated by the same upness the tempering uses so a cliff face is untouched.
+ *
+ * MEASURED, SWEPT, AND THE METRIC AND THE EYE DISAGREED ONCE. At strength 0.75
+ * and scale 0.65 (a 1.5 m coarse octave) the frame scored 7.85 / 13.89 at 3 and
+ * 6 px, i.e. it PASSED — and it looked like a bad bump map: one dominant lump
+ * size, cloudy, and it softened the tree shadows it was sitting under. A single
+ * octave of value noise reads as lumps at any amplitude if the lumps are big
+ * enough to see individually. Half the amplitude at twice the frequency scores
+ * the same and reads as ground.
+ *
+ *              3 px    6 px   12 px   24 px
+ *   shipped    7.82   13.49   20.79   28.96
+ *   target     8.35   13.28   19.32   26.53
+ */
+const TOOTH_STRENGTH = 0.42;
+/** Cycles per metre of the coarse octave. 1.25 = a 0.8 m feature ≈ 15 px at the focus. */
+const TOOTH_SCALE = 1.25;
+
+if (!THREE.ShaderChunk.normal_pars_fragment.includes('gtField')) {
+  THREE.ShaderChunk.normal_pars_fragment += /* glsl */ `
+#ifdef GROUND_TOOTH
+	float gtHash( vec2 p ) {
+		p = fract( p * vec2( 127.1, 311.7 ) );
+		p += dot( p, p + 34.345 );
+		return fract( p.x * p.y );
+	}
+	float gtNoise( vec2 p ) {
+		vec2 i = floor( p ), f = fract( p );
+		f = f * f * ( 3.0 - 2.0 * f );
+		return mix( mix( gtHash( i ), gtHash( i + vec2( 1.0, 0.0 ) ), f.x ),
+					mix( gtHash( i + vec2( 0.0, 1.0 ) ), gtHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+	}
+	/** A height field in noise-cell units. Two octaves, ~2.5 m and ~0.9 m. */
+	float gtField( vec2 p ) {
+		return gtNoise( p ) * 0.64 + gtNoise( p * 2.7 + 11.3 ) * 0.36;
+	}
+#endif
+`;
+}
+
+/**
+ * THE ANCHOR IS A LINE OF CODE, NEVER A COMMENT.
+ *
+ * This patch used to key off '// non perturbed normal for clearcoat among
+ * others'. That comment exists in three/src, which is what you read when you go
+ * looking, and DOES NOT EXIST IN three/build/three.module.js, which is what the
+ * package actually ships and what vite actually imports: the build strips
+ * comments out of the shader chunk strings. So `.replace()` matched nothing,
+ * returned the string unchanged, assigned it back — and every word of the essay
+ * above described an effect that had never once been in the picture.
+ *
+ * MEASURED, which is how it was found: TEMPER_STRENGTH 0.72 -> 0.00 moved the
+ * meadow's mean 3 px luma step from 5.33 to 5.36, i.e. by 0.5%. A knob that
+ * does nothing at either end of its range is not a knob.
+ *
+ * `vec3 nonPerturbedNormal = normal;` is a statement, so it survives the build,
+ * and the failure is now loud.
+ */
 if (!THREE.ShaderChunk.normal_fragment_begin.includes('GROUND_TEMPER')) {
-  THREE.ShaderChunk.normal_fragment_begin = THREE.ShaderChunk.normal_fragment_begin.replace(
-    '// non perturbed normal for clearcoat among others',
+  const NFB = THREE.ShaderChunk.normal_fragment_begin;
+  const ANCHOR = 'vec3 nonPerturbedNormal = normal;';
+  if (!NFB.includes(ANCHOR) && typeof console !== 'undefined') {
+    console.warn('[renderer] GROUND_TEMPER patch did not apply — three internals moved');
+  }
+  THREE.ShaderChunk.normal_fragment_begin = NFB.replace(
+    ANCHOR,
     /* glsl */ `
 #ifdef GROUND_TEMPER
 	{
@@ -60,10 +173,29 @@ if (!THREE.ShaderChunk.normal_fragment_begin.includes('GROUND_TEMPER')) {
 		float upness = dot( normal, upV );
 		float w = GROUND_TEMPER * smoothstep( GROUND_TEMPER_LO, 1.0, upness );
 		normal = normalize( mix( normal, upV, w ) );
+
+		#ifdef GROUND_TOOTH
+			// World position, exact and cheap: the view matrix's upper 3x3 is a
+			// rotation, so its inverse is its transpose, and ( v * mat3( M ) ) is
+			// transpose( mat3( M ) ) * v. No matrix inverse per fragment.
+			vec3 wpG = cameraPosition + ( -vViewPosition ) * mat3( viewMatrix );
+			vec2 q = wpG.xz * GROUND_TOOTH_SCALE;
+			const float e = 0.35;                       // finite difference, cells
+			float h0 = gtField( q );
+			vec3 gW = vec3( gtField( q + vec2( e, 0.0 ) ) - h0, 0.0,
+							gtField( q + vec2( 0.0, e ) ) - h0 ) * ( GROUND_TOOTH / e );
+			// Fade out with distance. The fine octave is ~0.3 m, which is six
+			// output pixels at the focus (camera distance 78, pitch 52, fov 29)
+			// and goes sub-pixel past ~200 m. A sub-pixel light term does not
+			// read as texture, it reads as shimmer the moment the camera moves.
+			float toothFade = 1.0 - smoothstep( 110.0, 240.0, length( vViewPosition ) );
+			// Only where the surface is ground, and only as a tilt about it.
+			normal = normalize( normal - mat3( viewMatrix ) * gW * ( toothFade * smoothstep( GROUND_TEMPER_LO, 1.0, upness ) ) );
+		#endif
 	}
 #endif
 
-// non perturbed normal for clearcoat among others`
+vec3 nonPerturbedNormal = normal;`
   );
 }
 
@@ -232,17 +364,33 @@ export function sunElevationFor(p) {
 }
 
 /**
- * World-space width of the shadow penumbra, in metres.
+ * World-space width of the shadow penumbra, in metres — the WIDE end, handed to
+ * a caster the blocker probe finds at least SHADOW_SLAB above its receiver.
  *
- * MEASURED off ref/target_01 (tools/crop_rp.mjs at 5x on the fence line at
- * (950,30)): the reference's post shadows fade over roughly 2 px of the 1600-wide
- * frame, i.e. ~0.4 m of ground, and its TREE shadows fade over four or five
- * times that — the classic penumbra-grows-with-caster-height. We cannot vary it
- * per caster (see SHADOW_TAPS above), so this is a single number chosen to sit
- * between the two, now that there are enough taps for it to be smooth rather
- * than stippled.
+ * IT WAS 0.95 AND THAT IS WHY THE CLIENT COULD NOT SEE THE SHADOWS.
+ *
+ * 0.95 was chosen against a 56-64 degree sun, where a conifer laid down a short
+ * fat shadow that could absorb a metre of blur at each edge. The lead has since
+ * dropped the sun to 38-45 degrees, which is right, and it makes the same tree's
+ * shadow LONGER AND NO WIDER — 2 to 4 m across. Nearly a metre of penumbra on
+ * each side of a 3 m shadow leaves no umbra at all, and MEASURED as an image
+ * that is exactly what it looked like: tools/rp.mjs mask (the frame rendered
+ * with and without the shadow map, differenced) showed the shadows present, in
+ * the right places, at the right lengths, and reading in the picture as a vague
+ * grey mottle with no silhouette in it.
+ *
+ * MEASURED, sweeping 0.95 / 0.50 / 0.30 (tools/measure.mjs luma histogram):
+ * bucket 1 (0.1-0.2, where a shadowed meadow lives) goes 11.0 / 11.7 / 12.1
+ * against the reference's 15.0, and the pictures go from mush to legible dark
+ * wedges with conifer serrations on their leading edge. 0.38 keeps the edge soft
+ * enough to read as sun through air rather than as a stencil.
+ *
+ * MEASURED off ref/target_01 (tools/rp.mjs crop at 4x on the conifers at
+ * (820,20)): the reference's own tree-shadow edges resolve over 3-5 px of a
+ * 1600-wide frame, i.e. under 0.3 m of ground. Its shadows are not soft; they
+ * are soft-EDGED and dark.
  */
-const PENUMBRA = 0.95;
+const PENUMBRA = 0.38;
 
 /**
  * Shadow budget (see _ensureShadowCasters). Instanced scatter with at least
@@ -329,7 +477,19 @@ function shadowFloor(p) {
   // i.e. the mass is meant to arrive one bucket up, not to disappear. Raising
   // the floor is the only term that moves the whole shadow family together
   // without touching the sunlit grass that already matches to within 2/255.
-  return THREE.MathUtils.clamp(0.215 + 0.305 * share, 0.20, 0.42);
+  //
+  // ROUND 8, MEASURED, AND ROUND 6 WAS RIGHT: THIS IS NOT THE KNOB.
+  // Swept the base 0.215 / 0.180 / 0.150 / 0.115 and read the luma histogram:
+  //   bucket 0 (0.0-0.1)   0.6  1.1  1.8  3.1     the reference wants 0.9
+  //   bucket 1 (0.1-0.2)  10.7 11.0 10.6 10.0     the reference wants 15.0
+  // Every step down feeds bucket 0 and TAKES FROM bucket 1. The floor moves the
+  // population that is already dark — conifer interiors, which have the wide
+  // cavity AO on top of it — and leaves the mid greens where they are. Our
+  // bucket-1 deficit is that the meadow's own albedo is lighter and yellower
+  // than the reference's, which is terrain work, not a light level.
+  // 0.190 is a small deepening that pays for the shadows the tighter penumbra
+  // now actually resolves, and stops before bucket 0 passes the reference.
+  return THREE.MathUtils.clamp(0.190 + 0.305 * share, 0.19, 0.42);
 }
 
 const _c = new THREE.Color();
@@ -360,7 +520,12 @@ export class LightRig {
     // reference, instead of the stair-stepped mess a loose frustum gives.
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.00025;
-    this.sun.shadow.normalBias = 0.075;   // scaled with the wider PCF disc below
+    // Scaled WITH the PCF disc: normalBias pushes the receiver toward the light
+    // by a fraction of its own normal, so it has to cover the widest tap the
+    // kernel takes. 0.075 was sized for a 0.95 m penumbra; at 0.38 m that much
+    // bias is pure peter-panning — it lifts every contact shadow off the thing
+    // casting it, which is the one place the reference's shadows are hardest.
+    this.sun.shadow.normalBias = 0.035;
     const c = this.sun.shadow.camera;
     c.near = 1;
     c.far = 900;
@@ -476,9 +641,16 @@ export class LightRig {
     // into bucket 1 without lifting the sunlit meadow, which already matches the
     // reference to within 2/255. Back up, with the deeper floor kept.
     this.fill.intensity = PI * fillTerm * 1.85;
+    // GRAZING, NOT HIGH — 52 m at 100 m out was 27.5 degrees, which is only 2x
+    // more effective on a vertical anti-sun face than on horizontal ground. This
+    // light exists for exactly one job: keep the shaded side of a conifer off
+    // zero without lifting the ground shadow it is standing in. At 30 m / 16.7
+    // degrees that ratio is 3.3x, so the same fill level buys a deeper cast
+    // shadow on the meadow. MEASURED, at an unchanged floor: bucket 1 (0.1-0.2)
+    // 11.9 -> 12.2 and bucket 6 6.8 -> 6.1, with bucket 0 flat at 1.1 -> 1.2.
     this.fill.position.set(
       -Math.cos(p.sunAzimuth) * 100,
-      52,
+      30,
       -Math.sin(p.sunAzimuth) * 100
     );
 
@@ -562,6 +734,8 @@ export class LightRig {
           ...(m.defines ?? {}),
           GROUND_TEMPER: TEMPER_STRENGTH.toFixed(3),
           GROUND_TEMPER_LO: TEMPER_LO.toFixed(3),
+          GROUND_TOOTH: TOOTH_STRENGTH.toFixed(4),
+          GROUND_TOOTH_SCALE: TOOTH_SCALE.toFixed(4),
         };
         m.needsUpdate = true;
       }

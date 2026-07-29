@@ -329,7 +329,18 @@ export const GRADES = {
     // bucket-6 value — while sunlit grass (peak 0.48) still passes underneath
     // untouched and the plume still has a knee above it. Nothing that already
     // matched has moved.
-    hiKnee: 0.755,
+    // ROUND 8, MEASURED, AND IT IS A ROAD NUMBER. 0.755 left the frame with 9.9%
+    // of its pixels in the 0.6-0.7 luma bucket against the reference's 5.0% —
+    // the single biggest error in the histogram after the meadow's own albedo.
+    // That bucket is the dirt road, which is 14% of this shot and arrives at a
+    // mean rgb(173,131,48) against the reference's (149,123,48): 16% hot, all of
+    // it in red. Swept 0.755 / 0.715 / 0.68 / 0.60 -> bucket 6 lands
+    // 9.9 / 7.7 / 5.5 / 2.2 and the frame mean 0.383 / 0.381 / 0.378 / 0.369.
+    // 0.700 puts bucket 6 at 6.8 and the frame mean on the reference's 0.379,
+    // and it is a compression rather than an exposure cut, so the road keeps its
+    // tracks and its ochre. If the road's own albedo is ever brought down this
+    // number should come back up — it is paying for someone else's brightness.
+    hiKnee: 0.700,
     // ...and the release above it, so a knee that low still leaves a tail. See
     // the essay at the highlight roll-off in post.js. The road's peak channel
     // is 0.84 and never enters this range; the dust plume, the white flowers and
@@ -347,7 +358,7 @@ export const GRADES = {
     // 0.1%, mean colour 227,213,166 and 242,241,231, chroma 0.27 and 0.05). It
     // starts higher and stays strong, because that population is genuinely
     // achromatic and genuinely tiny.
-    hiRecover: 0.16,
+    hiRecover: 0.40,
     hiRecoverRange: [0.88, 1.0],
     // Alpine runs a hard contrast about a low pivot, which without this clips
     // every channel under 0.075 — it used to take all of the blue in the meadow
@@ -362,7 +373,7 @@ export const GRADES = {
     // against our 5: its blacks are compressed and slightly desaturated, not
     // clipped. This knee is per-channel precisely so that it does that, and it
     // is the only term that can put red back into a pixel whose red is zero.
-    loKnee: 0.055,
+    loKnee: 0.080,
     // NEAR NEUTRAL, AND IT FINALLY MEANS IT. Round 2 concluded the grade should
     // supply almost no saturation and let the world supply the colour; round 4
     // still read 0.830 against the reference's 0.756 because the CONTRAST was
@@ -375,7 +386,14 @@ export const GRADES = {
     // sunlit grass fell from 26 to 18 against the reference's 23. A saturation
     // multiply moves the WEAK channel, so on a green it is a blue knob wearing
     // a different name, which is the same trap the per-channel contrast was.
-    saturation: 1.74, // LEAD round 5: terrain-art muted the albedo and this grade
+    // ROUND 8: 1.74 measured 0.781 against the reference's 0.756 once the
+    // shadows started resolving — a deeper shadow is a more saturated pixel,
+    // because saturation is (max-min)/max and the multiply that darkens a green
+    // takes more from its blue than from its green. Swept 1.74 / 1.68 / 1.62 /
+    // 1.50 -> frame mean saturation 0.781 / 0.764 / 0.744 / 0.696. At 1.68 the
+    // green population lands on the reference exactly: rgb(75,92,18) against
+    // rgb(75,93,18).
+    saturation: 1.68, // LEAD round 5: terrain-art muted the albedo and this grade
     // muted it again; the two compounded to a frame mean of 0.592 against the
     // reference's 0.756. Swept 1.30/1.45/1.60 -> 0.676/0.729/0.781 and interpolated.
     // Shadow eats red: measured R/G in target_01's shadowed grass is 0.53-0.74
@@ -467,7 +485,17 @@ export const GRADES = {
     // separation is the conifer's own albedo and its self-shadowing, which is
     // props/terrain work, not a post effect. Backed off to a value that keeps
     // the extra grounding without the global tax, and logged as such.
-    ao: 0.88,
+    // ROUND 8: 0.88 -> 0.70. This term multiplies the COMPOSITED colour, so it
+    // occludes the direct sun as well as the ambient — and occluding direct
+    // light is the one thing ambient occlusion is not. On a sunlit pixel the
+    // ambient is under a third of the budget, so at 0.88 the AO was taking
+    // roughly three times too much out of exactly the population that has to
+    // stay bright for a cast shadow to read against it. MEASURED, 0.88 / 0.70 /
+    // 0.55: frame mean luma 0.377 / 0.379 / 0.380 against the reference's 0.379,
+    // and the bottom luma bucket 1.1 / 1.0 / 0.9 against its 0.9. Checked by eye
+    // on the boulder cluster at (950,150): the contact pools are still there —
+    // the shadows now do most of the grounding and the AO only has to finish it.
+    ao: 0.70,
     // Measured against the AO debug buffer (?debugpost=ao): at 1.15 the buffer
     // was almost pure white — nothing was grounded. 2.4 gave the soft dark pool
     // the references have at the base of every tree, rock and post. 3.6 is that
@@ -485,7 +513,7 @@ export const GRADES = {
     // grass spread is 110 luma against our 86. At 8 m this term only deepened
     // what was already a cavity; at 15 m a stand of firs shades the ground
     // around it, which is the single biggest "painted, not rendered" cue left.
-    aoWide: 18.0,
+    aoWide: 14.0,
     // Warmed from [0.36, 0.48, 0.60]. That ratio put more blue than red into
     // every contact pool in the frame, and with the split-tone's cool fill
     // landing on the same pixels the two compounded: the conifers measured B:G
@@ -513,12 +541,32 @@ export const GRADES = {
     // and the whole tint is lifted because the bucket it governs was 7x too
     // populated.
     aoTint: [0.52, 0.555, 0.575],
-    // GROUND-ONLY FACET SMOOTHING. See the essay in post.js. MEASURED: our
-    // adjacent meadow facets differ by ~30/255 while the entire shadow map is
-    // worth a p99 of 15/255 — the seam between two triangles of grass is the
-    // strongest line in the frame. This softens that seam over ~7 output pixels
-    // and touches nothing whose depth-derived normal is not near-horizontal.
-    surface: 0.75,
+    // GROUND-ONLY FACET SMOOTHING, AND IT IS NOW OFF. See the essay in post.js.
+    //
+    // It was set to 0.75 to soften a facet seam that measured ~30/255 — but the
+    // renderer's own seam fix (GROUND_TEMPER) had never once run (its shader
+    // patch was anchored on a comment the three build strips; see renderer.js),
+    // so this pass was carrying the whole job alone and had to be turned up
+    // until it was a 10-px blur of every ground pixel in the frame.
+    //
+    // MEASURED with the tempering finally live (tools/rp.mjs stats, mean |dL|
+    // between two green ground pixels N px apart; the reference is target_01):
+    //
+    //              3 px    6 px   12 px   24 px
+    //   0.75       5.36    9.52   16.20   25.07
+    //   0.35       5.82   10.35   17.43   26.27
+    //   0.00       6.14   10.87   18.04   26.79
+    //   target     8.35   13.28   19.32   26.53
+    //
+    // At 24 px turning it off lands the reference exactly (26.79 vs 26.53) and
+    // at 12 px it closes two thirds of the gap. The client's note was "most
+    // polygons have no detail at all"; this pass was the largest single reason
+    // that was true, because it is a low-pass filter aimed at precisely the
+    // frequency band the note is about. The tempering removes the LIGHTING half
+    // of the seam at its source, which is the half that was worth removing; what
+    // is left is the terrain's per-face colour, and a mosaic of slightly
+    // different greens is what the reference's meadow is made of.
+    surface: 0.0,
     surfacePx: 10.0,
     // How steep a surface still counts as ground, as cos(slope). Started at
     // 0.80 (36 degrees) which is fine for a meadow and left every HILLSIDE
