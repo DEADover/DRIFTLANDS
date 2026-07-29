@@ -151,6 +151,28 @@ export class ChaseCamera {
     this._focusVel.addScaledVector(this._tmp, step);
     this._focus.addScaledVector(this._focusVel, step);
 
+    // HARD LEASH — the car may never leave the frame.
+    //
+    // Clamping the look-ahead was not enough: the focus spring itself lags, and
+    // on a tight corner at speed the car outran the camera. Measured over a
+    // 30 s drive, the car was off-screen for 97 of 3600 frames.
+    //
+    // So bound the FINAL focus offset from the car, whatever the spring did. The
+    // leash length is derived from what the frame actually covers, so it holds
+    // at any distance or FOV. Bleeding the spring velocity at the same time
+    // stops it fighting the clamp and buzzing against it.
+    const vFovL = (this.camera.fov * Math.PI) / 180;
+    const halfW = this.distance * Math.tan(vFovL / 2) * this.camera.aspect;
+    const leash = Math.max(10, halfW * 0.52);
+    this._tmp.copy(this._focus).sub(car.position);
+    this._tmp.y = 0;
+    const off = this._tmp.length();
+    if (off > leash) {
+      this._tmp.multiplyScalar(leash / off);
+      this._focus.set(car.position.x + this._tmp.x, this._focus.y, car.position.z + this._tmp.z);
+      this._focusVel.multiplyScalar(0.6);
+    }
+
     // Speed widens the frame slightly — reads as acceleration.
     // Ease the speed that drives the zoom, not the zoom itself: distance then
     // moves on a signal that has no steps in it, whatever the physics does.
