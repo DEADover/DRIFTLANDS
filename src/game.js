@@ -355,6 +355,8 @@ export class Game {
       }
     }
 
+    this._stepBarriers(dt);
+
     const lim = this.biome.size / 2 - 40;
     v.position.x = THREE.MathUtils.clamp(v.position.x, -lim, lim);
     v.position.z = THREE.MathUtils.clamp(v.position.z, -lim, lim);
@@ -373,6 +375,72 @@ export class Game {
     this._wasDrifting = v.isDrifting;
 
     this.simTime += dt;
+  }
+
+  /**
+   * BARRIER COLLISION.
+   *
+   * Two kinds, and the difference is the point:
+   *   'fence' — timber. A solid hit smashes the bay: the rails are knocked out,
+   *             splinters fly, and the car carries on through, poorer for it.
+   *             A gentle brush just scrapes and holds.
+   *   'guard' — steel. Never breaks. The car is deflected ALONG the beam and
+   *             kept on the stage, which is why these sit on bridges and the
+   *             outside of fast corners.
+   */
+  _stepBarriers(dt) {
+    const B = this.roads.barriers;
+    if (!B?.segments?.length) return;
+    const v = this.vehicle;
+    const CAR_R = 1.5;
+
+    for (const s of B.segments) {
+      if (s.broken) continue;
+      // Cheap reject before the segment test.
+      const dxc = v.position.x - s.x, dzc = v.position.z - s.z;
+      const reach = s.half + CAR_R;
+      if (dxc * dxc + dzc * dzc > reach * reach + 4) continue;
+
+      // Closest point on the segment to the car.
+      const t = THREE.MathUtils.clamp(dxc * s.dx + dzc * s.dz, -s.half, s.half);
+      const px = s.x + s.dx * t, pz = s.z + s.dz * t;
+      const ox = v.position.x - px, oz = v.position.z - pz;
+      const dist = Math.hypot(ox, oz);
+      if (dist > CAR_R || dist < 1e-5) continue;
+
+      // Normal component of the approach: a graze is not a crash.
+      const nx = ox / dist, nz = oz / dist;
+      const closing = -(v.velocity.x * nx + v.velocity.z * nz);
+      const speed = v.velocity.length();
+
+      if (s.kind === 'fence' && closing > 0 && B.hit(s.id, closing)) {
+        // Smashed through: keep going, pay for it.
+        v.velocity.multiplyScalar(0.75);
+        v.yawRate *= 0.85;
+        this.feel.event('impact', { speed: closing, kind: 'fence' });
+        this.audio.event('impact', { speed: closing, kind: 'fence' });
+        this.camera.addShake(Math.min(0.5, closing * 0.028));
+        continue;
+      }
+
+      // Held: push out of the barrier and slide along it.
+      v.position.x += nx * (CAR_R - dist);
+      v.position.z += nz * (CAR_R - dist);
+      if (closing > 0) {
+        const restitution = s.kind === 'guard' ? 0.18 : 0.10;
+        // Remove the into-the-wall component, keep (most of) the along-wall one.
+        v.velocity.x += nx * closing * (1 + restitution);
+        v.velocity.z += nz * closing * (1 + restitution);
+        const along = s.kind === 'guard' ? 0.94 : 0.86;
+        v.velocity.multiplyScalar(along);
+        v.yawRate *= 0.72;
+        if (closing > 4) {
+          this.feel.event('impact', { speed: closing, kind: s.kind });
+          this.audio.event('impact', { speed: closing, kind: s.kind });
+          this.camera.addShake(Math.min(0.7, closing * 0.03));
+        }
+      }
+    }
   }
 
   emitFx(dt) {
@@ -428,6 +496,7 @@ export class Game {
     this.particles.update(scaled);
     this.water.update(scaled);
     this.animals.update(scaled, { position: v.position, speed: v.speed });
+    this.roads.barriers?.update?.(scaled);   // tumbling fence debris
 
     this.feel.update(scaled, {
       vehicle: v, camera: this.camera, surface: this.surface,
