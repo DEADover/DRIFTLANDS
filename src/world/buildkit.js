@@ -543,7 +543,7 @@ export function firFrond(r, hUp, drop, seg, o = {}, rng) {
    * shrinks to a few small triangles at the axis, and what you see is rows of
    * pads with dark creases between them — the reference's structure.
    */
-  const inner = o.inner ?? 0.44;   // shoulder ring, as a fraction of r
+  const inner = o.inner ?? 0.50;   // shoulder ring, as a fraction of r
   /**
    * THE NOTCH RADIUS IS NOT A FREE PARAMETER — it is solved.
    *

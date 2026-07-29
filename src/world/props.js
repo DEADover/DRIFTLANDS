@@ -98,10 +98,12 @@ function fir(rng, K, o = {}) {
    *     half 4 (seg 8)  -> inner 0.41      half 6 (seg 12) -> inner 0.50
    *     half 5 (seg 10) -> inner 0.46      half 7 (seg 14) -> inner 0.54
    *
-   * and inner has to stay under ~0.50 or the crown fan becomes the exposed pale
-   * plateau. So FEWER, BROADER flaps per tier and MORE tiers, which is also what
-   * the reference has — and it is cheaper: 10 tiers at seg 8 is 178 triangles
-   * against 8 tiers at seg 14's 242.
+   * So FEWER, BROADER flaps per tier and MORE tiers — which is also what the
+   * reference has, and it is cheaper: 10 tiers at seg 8 is 178 triangles against
+   * 8 tiers at seg 14's 242. Swept a step PAST equilateral (inner 0.50 at seg 8,
+   * i.e. pads wider than they are long) and that read denser and blunter again;
+   * it only avoids the exposed-plateau failure because `crownK` came down with
+   * it — a shallow crown of 0.22r has almost no vertical extent to show.
    */
   const seg = o.seg ?? 8;
   // Radius ladder first, because both the trunk length and the tier spacing are
@@ -221,7 +223,7 @@ function fir(rng, K, o = {}) {
     const litc = K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.25 + 0.75 * t);
     b.push(0, y, 0, rng.float(0, Math.PI * 2));
     b.rawLit(
-      firFrond(r, r * (o.crownK ?? 0.31), dropK * r * tall, seg,
+      firFrond(r, r * (o.crownK ?? 0.22), dropK * r * tall, seg,
         { inner: o.inner, notch: o.notch, notchK: o.notchK }, rng),
       body, litc,
       /**
@@ -948,7 +950,7 @@ const MAKERS = {
   // fuller fir" of the reference frame. Fewer tiers, but each one deeper.
   firOld: (r, K) => fir(r, K, {
     tall: 0.90, wide: 1.28, tiers: 9, seg: 10,
-    dropK: 0.52, stepK: 0.40, profE: 0.42, bareK: 0.16, inner: 0.46,
+    dropK: 0.52, stepK: 0.40, profE: 0.42, bareK: 0.16, inner: 0.52,
   }),
   // TALL NARROW SPIRE. Not a needle: at wide 0.72 with six tiers this once came
   // out as a 22 m green spike three metres across, which read as litter. The
@@ -956,7 +958,7 @@ const MAKERS = {
   // from a thin base, so the bottom of the tree still has a skirt on it.
   firSpire: (r, K) => fir(r, K, {
     tall: 1.02, wide: 0.86, tiers: 12, seg: 8,
-    dropK: 0.34, stepK: 0.50, profE: 0.74, crownK: 0.34, inner: 0.42,
+    dropK: 0.34, stepK: 0.50, profE: 0.74, crownK: 0.26, inner: 0.48,
   }),
   // SQUAT AND FULL — the fourth silhouette, and the one the reference frame has
   // that we did not: a shoulder-high conifer wider than it is tall at the skirt,
@@ -967,18 +969,18 @@ const MAKERS = {
   // the most out-of-place object in that shot).
   firBushy: (r, K) => fir(r, K, {
     tall: 0.52, wide: 1.05, tiers: 7, seg: 10,
-    dropK: 0.62, stepK: 0.46, profE: 0.34, bareK: 0.03, inner: 0.48, crownK: 0.26,
+    dropK: 0.62, stepK: 0.46, profE: 0.34, bareK: 0.03, inner: 0.54, crownK: 0.18,
   }),
   firYoung: (r, K) => fir(r, K, {
     tall: 0.74, wide: 0.72, tiers: 7, seg: 8,
-    dropK: 0.46, stepK: 0.50, profE: 0.52, bareK: 0.07, inner: 0.44,
+    dropK: 0.46, stepK: 0.50, profE: 0.52, bareK: 0.07, inner: 0.50,
   }),
   // The bottom of the size ladder. The reference is full of knee-to-waist-high
   // conifers filling the gaps between the hero trees; without them the meadow
   // reads as mown. Cheapest member: 5 tiers at seg 6 is 60 triangles of skirt.
   firSapling: (r, K) => fir(r, K, {
     tall: 0.80, wide: 0.38, tiers: 5, seg: 6,
-    dropK: 0.48, stepK: 0.52, profE: 0.56, bareK: 0.05, inner: 0.42,
+    dropK: 0.48, stepK: 0.52, profE: 0.56, bareK: 0.05, inner: 0.48,
   }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
   firSnowOld: (r, K) => fir(r, K, {
