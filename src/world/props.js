@@ -159,12 +159,16 @@ function fir(rng, K, o = {}) {
   // pole under a fir is closer to an eighth of the whole tree and you can read
   // grass under the skirt on every one of them.
   const trunkH = drop0 + (o.bareK ?? 0.13) * (rise + leaderH);
-  const tr = rng.float(0.17, 0.235) * wide * (1 + tiers * 0.018);
+  // ...and SLIMMER. At rBot = 1.7*tr the pole was 0.8 m across on a 13.6 m tree,
+  // 6% of its height against the reference's 3-4%, and a six-sided pole that wide
+  // shows two or three faces at this camera — so it read as a brown WEDGE rather
+  // than as a trunk.
+  const tr = rng.float(0.13, 0.175) * wide * (1 + tiers * 0.018);
   // Open-ended and six-sided: the top is inside the canopy and the bottom is in
   // the turf, so both caps are pure waste. It runs up past the second tier's
   // shoulder so no gap can open between bark and needles.
   const trunkLen = trunkH + r0 * 1.1;
-  b.raw(new THREE.CylinderGeometry(tr * 0.66, tr * 1.7, trunkLen, 6, 1, true)
+  b.raw(new THREE.CylinderGeometry(tr * 0.70, tr * 1.28, trunkLen, 6, 1, true)
     .translate(0, trunkLen / 2, 0), K.trunkBark);
 
   let y = trunkH;
@@ -1724,7 +1728,17 @@ export class PropScatter {
        * brown taken slightly DOWN instead: a fir's trunk in target_01 is darker
        * than its ground, not lighter.
        */
-      trunkBark: D.trunk.clone().multiplyScalar(0.82),
+      trunkBark: (() => {
+        // 0.82 shot ORANGE. Zoomed 5x on the hero frame the trunks came back as
+        // roughly rgb(150,90,70) wedges against the reference's rgb(95,62,45):
+        // the hue was close (R/G 1.67 against 1.53) and the VALUE was 60% too
+        // high, which on a warm brown under a warm key prints as terracotta. The
+        // frame's grade adds another 5% of red on top, so red comes off a little
+        // as well.
+        const c = D.trunk.clone().multiplyScalar(0.40);
+        c.r *= 0.90;
+        return c;
+      })(),
       meadow: shade(new THREE.Color(p.ground[1]), -0.05, 0.07),
       // Grass tufts were derived from the CANOPY green and from ground[1], the
       // darkest rung of the terrain ramp. Both are far darker than the meadow
