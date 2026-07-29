@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Rng, fbm } from '../core/rng.js';
-import { GeoBuilder, rockGeom, slabGeom, blockGeom, firTier, derivePalette } from './buildkit.js';
+import { GeoBuilder, rockGeom, slabGeom, blockGeom, firTier, firFrond, derivePalette } from './buildkit.js';
 
 /**
  * VEGETATION & GROUND COVER.
@@ -53,158 +53,110 @@ function fir(rng, K, o = {}) {
   const b = new GeoBuilder();
   const tall = o.tall ?? 1;
   const wide = o.wide ?? 1;
-  // A REAL FRINGE STACK, not three cones on a stick.
+
+  // ---- WHAT THIS TREE IS, AND THE FOUR THINGS THAT WERE WRONG WITH IT ------
   //
-  // Cropping target_01 at 2x next to our own frame made this the clearest
-  // remaining silhouette difference, and it is not size at all. Its conifers
-  // are seven to nine THIN skirts, each barely wider than the one above and
-  // heavily overlapped, so the tree reads as a soft layered spire whose edge is
-  // a row of little points. Ours were three to five FAT cones, and from a
-  // camera this high a fat cone shows its whole top face — which is why our
-  // stands read as a heap of green pyramids and the reference's read as trees.
-  // ---- ROUND 8: THE SILHOUETTE, CROPPED SIDE BY SIDE AT 3.4x ---------------
+  // Cropping target_01's fir at 6x beside ours settled a question three rounds
+  // of proportion tuning could not: the difference is not size, it is that a
+  // reference tier is a RING OF DROOPING TWO-FACET FLAPS and ours was a cone
+  // with a jagged hem. See `firFrond` in buildkit for the measurement that
+  // proves one rim ring cannot produce a value range — mirror facets share
+  // normal.y to within 2%, so the whole tier renders as one green whatever the
+  // jitter does. That is why round 8 widened the jitter to +/-30% and shot a
+  // flat tree anyway.
   //
-  // Everything above is a record of tuning the PROPORTIONS of a stack of plain
-  // cones, and the proportions were never the problem. Cropping one reference
-  // fir next to one of ours at 3.4x, three things separate them and none of
-  // them is size:
+  // Held from earlier rounds, as negative results worth not repeating:
   //
-  //   1. A BARE BROWN TRUNK. The reference's fir stands on a clean pole for the
-  //      bottom sixth of its height and you can see grass under the skirt.
-  //      Ours started its lowest tier 1.2 m off the ground and the skirt, being
-  //      2.3 m across, covered it — so our tree grew straight out of the turf
-  //      like a bush.
-  //   2. STEPS. The reference has four or five tiers with a clear notch between
-  //      each pair — you can count them. Ours advanced only 0.42-0.52 of a
-  //      tier's height per tier and shrank 10% per tier, which is a CONTINUOUS
-  //      cone by construction: seven overlapping skirts with no step anywhere.
-  //      A smooth green cone is what the client means by "no detail".
-  //   3. A LIT SIDE AND A DARK SIDE. Every side facet of a `ConeGeometry` has
-  //      the same normal.y, so the vertex ramp in `mergeColored` cannot tell
-  //      the top of a skirt from its underside and every tier came out one
-  //      flat green. `firTier` (buildkit) exists precisely for this and had
-  //      never been called, because its winding was inside out — fixed now.
-  //      Its rim alternates long-and-drooping with short-and-level, so half of
-  //      each tier's facets face up-and-out and half down-and-out, and the
-  //      three-stop ramp gives them a real value separation that survives the
-  //      random per-instance yaw.
+  //   * FOUR TO SIX WIDELY SPACED TIERS is not what the reference has; that
+  //     came back as a stack of paper triangles with sky between each pair.
+  //     Its fir is eight or nine skirts with heavy overlap, and you read the
+  //     tiers as ROWS OF DROOPING POINTS, not as gaps.
+  //   * A trunk of 2.6-4.0 m read as a brown POLE with a conifer balanced on
+  //     top. What shows below the skirt is a STUB — enough to plant the tree
+  //     and put a slot of grass under it. Here it is derived: the bare part is
+  //     ~7.5% of the tree's height, measured off the reference, and the trunk
+  //     is then extended by the bottom tier's own droop so the skirt cannot
+  //     swallow it (which is what hid it before: the tier started 1.2 m up and
+  //     its 2.3 m skirt covered everything below).
+  //   * Proportions land near 1:3 width:height. Under our camera, which is
+  //     steeper than the reference's, height foreshortens and skirt does not,
+  //     so a solid measuring 1:2 in metres renders as a green umbrella.
   //
-  // ...and the correction, shot the same round. Four to six WIDELY SPACED
-  // tiers is not what target_01 has either — that came back as a stack of
-  // paper triangles with a gap of sky between each pair. Its fir is seven to
-  // nine skirts with heavy overlap, and you read the tiers not as gaps but as
-  // ROWS OF DROOPING POINTS: each skirt's long spurs hang below the rim of the
-  // one under it. So the tier count and the overlap go back near where they
-  // were, and the whole legibility gain comes from the per-facet mosaic in
-  // `firTier` plus the deeper droop.
-  const tiers = o.tiers ?? rng.int(7, 9);
-  // A sixth of the tree, and never less than a car's height, so the trunk still
-  // shows at the smallest instance scale in the ladder.
-  // ...and shot at 2.6-4.0 m the trees came back as brown POLES with a small
-  // conifer balanced on top — the trunk was reading as a third of the object.
-  // In target_01 what shows below the skirt is a stub: enough to plant the tree
-  // and put a slot of grass under it, never enough to be a shape of its own.
-  const trunkH = rng.float(1.5, 2.5) * tall;
-  const tr = rng.float(0.17, 0.25) * wide;
-  // Open-ended: the trunk's top disappears inside the lowest tier and its
-  // bottom is in the turf, so both caps are ten triangles of nothing. Same
-  // reasoning for the tier cones below. Across ~30k conifers this is worth
-  // about a million triangles, which is what pays for the extra trees.
-  b.cyl(tr * 0.7, tr * 1.9, trunkH + 1.0, 5, K.bark, { y: (trunkH + 1.0) / 2, open: true });
+  // Triangle budget: 4 per rim vertex pair, i.e. 2*seg per tier. A `fir` at
+  // seg 12 and 8 tiers is ~210 triangles against the old 80. Across ~37 000
+  // conifers that is about +4.6 M, spent on the subject of the frame.
+  const tiers = o.tiers ?? rng.int(8, 9);
+  const seg = o.seg ?? 12;
+  // Radius ladder first, because both the trunk length and the tier spacing are
+  // derived from it — the old code advanced by a jittered fraction of the TIER
+  // height, which made total height a random walk and is why "6-9 tiers" once
+  // grew a 30 m mast.
+  const taper = o.taper ?? rng.float(0.875, 0.903);
+  const dropK = o.dropK ?? rng.float(0.56, 0.68);
+  // `stepK` is the tier advance as a fraction of the tier's OWN radius, and it
+  // has to stay a little above `dropK` or the tips of one skirt hang below the
+  // shoulder of the next one down and the stack closes into a smooth cone. The
+  // ratio that reads as "rows of drooping points" is about 1.15.
+  const stepK = o.stepK ?? rng.float(0.68, 0.78);
+  const rad = [];
+  let rr = rng.float(2.20, 2.70) * wide;
+  for (let i = 0; i < tiers; i++) { rad.push(rr); rr *= taper * rng.float(0.985, 1.015); }
+  const step = rad.map((v) => stepK * v * tall);
+  const rise = step.reduce((a, c) => a + c, 0);
+  const leaderH = rad[tiers - 1] * 1.35 * tall;
+  const drop0 = dropK * rad[0] * tall;
+  // The bare pole, as a fraction of the whole tree. 0.075 is read off the
+  // reference: you see grass under the skirt and a stub of bark, never a leg.
+  const trunkH = drop0 + (o.bareK ?? 0.075) * (rise + leaderH);
+  const tr = rng.float(0.15, 0.21) * wide * (1 + tiers * 0.022);
+  // Open-ended and six-sided: the top is inside the canopy and the bottom is in
+  // the turf, so both caps are pure waste. It runs up past the second tier's
+  // shoulder so no gap can open between bark and needles.
+  const trunkLen = trunkH + rad[0] * 1.1;
+  b.raw(new THREE.CylinderGeometry(tr * 0.66, tr * 1.7, trunkLen, 6, 1, true)
+    .translate(0, trunkLen / 2, 0), K.trunkBark);
+
   let y = trunkH;
-  // Broader skirt, slightly shorter tiers than v1. Measured off target_01: the
-  // conifers there are about a third as wide as they are tall, with the lowest
-  // tier clearly the widest. Ours were nearer a fifth, which read as spikes.
-  //
-  // ROUND 5 SIZE — and the round's most useful negative result.
-  //
-  // Measured against the ROAD (11 m wide, near-vertical in both frames, so
-  // tree/road is a scale-free ratio that survives the two cameras being at
-  // different heights, which a pixel count of the car does not):
-  //
-  //                       skirt / road     height / road    skirt / height
-  //     target_01              0.42            0.88             0.48
-  //     ours r04               0.53            0.92             0.58
-  //
-  // The r04 number is a LIE and it cost two shoots to find out. What was
-  // measured as a 0.53-wide tree was two or three conifers of a 34-member copse
-  // overlapping into one silhouette; an individual r04 fir is 0.44. Cutting the
-  // skirt 26% on that evidence produced a frame of green needles, and cutting
-  // the height with it produced scrub.
-  //
-  // The tree was never the problem — the STAND was. Proportions go back to
-  // roughly where they were (a 6% trim, which the reference does support), and
-  // the whole fix lives in `clump` and in the raised density instead: many
-  // small groups you can see between, not four big ones you cannot.
-  //
-  // Overall height is held where it was: with `tiers` now 6-9 and each skirt
-  // advancing only ~0.46 of its own height, the per-tier height has to come
-  // down by the same factor or a fir turns into a 30 m mast.
-  // ROUND 6 — THE SILHOUETTE, cropped at 2.2x side by side with target_01.
-  //
-  // Under OUR camera (steeper than the reference's) a conifer's height is
-  // foreshortened and its skirt is not, so the same solid that measures 1:2.5
-  // in metres renders about 1:1 on screen — an octagonal green umbrella, which
-  // is what our meadow was full of. The reference's conifers render about 1:3,
-  // a narrow spire with a row of points down each side and a visible trunk.
-  //
-  // The tree is therefore narrowed 23% and lengthened 11%. This is not the
-  // "cut the skirt" experiment that failed in round 5: that one cut the HEIGHT
-  // with it and did it while the stands were still fused, so it produced
-  // needles inside a mass. With the stands separated, a narrower tree shows
-  // its shape instead of its neighbour's.
-  let r = rng.float(2.05, 2.70) * wide;
   const NR = K.leafRamp.length;
   for (let i = 0; i < tiers; i++) {
-    const h = rng.float(2.30, 3.00) * tall * (1 - i * 0.04);
-    // Dark at the skirt, lighter at the tip. The reference's conifers all read
-    // this way — a deep shadowed core with sunlit new growth on top — and it is
-    // what stops a stand of firs from being one flat green mass.
-    const ci = Math.min(NR - 1, Math.floor((i / Math.max(1, tiers - 1)) * NR));
-    const body = K.leafRamp[ci];
-    // The mosaic uses the WHOLE ramp inside every tier, not the two rungs
-    // either side of the tier's own. Measured on target_01's fir at 8x, one
-    // skirt spans #2a4d22 to #86b054 — a factor of three in luminance. Two
-    // adjacent rungs of `leafRamp` are a factor of 1.1 apart, which renders as
-    // a flat green whatever the geometry does.
-    const litc = K.leafRamp[NR - 1];
-    // ...and the shadow rung goes back to the bottom of the ramp. Measured on
-    // the frame after the silhouette landed: luma bucket 1 (L 0.10-0.20) held
-    // 9.7% of our pixels against the reference's 15.0%, and bucket 6 held 9.3%
-    // against its 5.0% — i.e. our wood is a stop too bright all the way down
-    // its dark side. `l0` stays at -0.22, so only facets that genuinely point
-    // at the ground reach the bottom rung and the "soot" failure of round 6
-    // (6.1% in the BOTTOM bucket) cannot come back.
-    const darkc = K.leafRamp[0];
-    // 8 segments, and it must stay EVEN: the scallop alternates long/short
-    // around the rim, so an odd count puts two long spurs side by side and the
-    // star loses a point.
+    const r = rad[i];
+    // Dark at the skirt, lighter toward the tip: the reference's conifers are a
+    // deep shadowed core with sunlit new growth on top, and that gradient is
+    // what stops a stand of firs from being one flat green mass. The BODY rung
+    // climbs; the lit rung is always the top of the ramp, because the mosaic
+    // wants the whole ramp inside every tier, not the two rungs either side of
+    // the tier's own. Measured on target_01's fir at 8x, one skirt spans
+    // #2a4d22 to #86b054 — a factor of three in luminance.
+    const t = tiers > 1 ? i / (tiers - 1) : 1;
+    const ci = Math.min(NR - 2, Math.floor(t * (NR - 1) * 0.82));
     b.push(0, y, 0, rng.float(0, Math.PI * 2));
-    // droop 0.34h: the spurs have to hang far enough to show BELOW the rim of
-    // the tier under them, because that overhang is what the reference reads as
-    // a tier boundary once the skirts overlap.
-    b.rawLit(firTier(r, h, 8, h * 0.34, 0.58, rng), body, litc,
-      { t0: 0.16, t1: 0.56, low: darkc, l0: -0.24 });
+    b.rawLit(
+      firFrond(r, r * (o.crownK ?? 0.31), dropK * r * tall, seg,
+        { inner: o.inner, notch: o.notch, notchK: o.notchK }, rng),
+      K.leafRamp[ci], K.leafRamp[NR - 1],
+      // The ramp is WIDE now and it has to be: `firFrond` hands it normal.y in
+      // three clean bands (crown 0.86, flap 0.44, notch wall -0.01) and a
+      // narrow 0.16-0.56 window put all three at the top of the ramp, which is
+      // the flat green the client is looking at. t1 0.80 keeps the full lit
+      // rung for the crown facets only.
+      { t0: 0.06, t1: 0.80, low: K.leafRamp[0], l0: -0.26 },
+    );
     b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.
-    if (o.snow && i >= tiers - 2) {
-      b.cone(r * 0.60, h * 0.28, 6, K.snow, { y: y + h * 0.80 });
+    if (o.snow && i >= tiers - 3) {
+      b.cone(r * 0.52, r * 0.62, 6, K.snow, { y: y + r * 0.30 });
     }
-    // A CLEAR STEP between tiers. 0.62-0.74 of a tier's height per advance
-    // leaves the top third of each skirt uncovered, so the silhouette is a
-    // staircase of four or five points instead of one smooth cone — which is
-    // the single feature that made the reference's firs read as trees and ours
-    // read as green pyramids.
-    y += h * rng.float(0.44, 0.56);
-    r *= rng.float(0.865, 0.915);
+    y += step[i];
   }
-  // Crown spike: the reference's firs all finish in a thin leader above the
-  // last full skirt, and without it the stack ends bluntly.
+  // The leader: a thin spire above the last full skirt. A `firFrond` is wrong
+  // here — its crown facets would go steep and dark — so this stays a star cone
+  // in the lit rung, which is what the reference's tip is.
   b.push(0, y, 0, rng.float(0, Math.PI * 2));
-  b.rawLit(firTier(r * 0.62, r * 1.7, 6, r * 0.10, 0.70, rng),
-    K.leafRamp[NR - 1], K.leafRamp[NR - 1], { t0: 0.10, t1: 0.72, low: K.leafRamp[1], l0: -0.22 });
+  b.rawLit(firTier(rad[tiers - 1] * 0.66, leaderH, 6, leaderH * 0.13, 0.66, rng),
+    K.leafRamp[NR - 2], K.leafRamp[NR - 1],
+    { t0: 0.05, t1: 0.72, low: K.leafRamp[1], l0: -0.22 });
   b.pop();
-  return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y + r * 1.5 };
+  return { geo: b.build(), trunkR: Math.max(0.75, tr * 2.4), height: y + leaderH };
 }
 
 function scotsPine(rng, K) {
@@ -844,19 +796,45 @@ function blockStone(rng, K, o = {}) {
 }
 
 const MAKERS = {
+  // ---- THE CONIFER LADDER, AS FIVE SILHOUETTES RATHER THAN FIVE SCALES ----
+  //
+  // "All one shape at different scales" was the client's fourth note and it was
+  // literally true: every entry here differed only in `tall`, `wide` and tier
+  // count, which is a scale change plus a stretch. target_01 puts tall narrow
+  // spires, short full firs, half-grown ones and saplings in ONE view, and what
+  // separates them is the shape of the tier: a spire's frills are short and its
+  // taper is fast, an old fir's frills are long and its trunk is bare a long way
+  // up. Those are `dropK`, `taper`, `stepK` and `bareK`, so they cost nothing.
   fir,
-  firOld: (r, K) => fir(r, K, { tall: 1.24, wide: 1.10, tiers: 5 }),
-  firYoung: (r, K) => fir(r, K, { tall: 0.62, wide: 0.72, tiers: 3 }),
+  // Short, full, heavy skirts, a slow taper and a wide crown — the "shorter
+  // fuller fir" of the reference frame. Fewer tiers, but each one deeper.
+  firOld: (r, K) => fir(r, K, {
+    tall: 0.94, wide: 1.30, tiers: 7, seg: 14,
+    dropK: 0.76, stepK: 0.60, taper: 0.925, bareK: 0.10, inner: 0.58,
+  }),
+  // TALL NARROW SPIRE. Not a needle: at wide 0.72 with six tiers this once came
+  // out as a 22 m green spike three metres across, which read as litter. The
+  // narrowness now comes from a FAST taper and SHORT frills instead of from a
+  // thin base, so the bottom of the tree still has a skirt on it.
+  firSpire: (r, K) => fir(r, K, {
+    tall: 1.0, wide: 0.80, tiers: 10, seg: 10,
+    dropK: 0.42, stepK: 0.98, taper: 0.860, crownK: 0.38,
+  }),
+  firYoung: (r, K) => fir(r, K, {
+    tall: 0.72, wide: 0.68, tiers: 6, seg: 10,
+    dropK: 0.62, stepK: 0.74, taper: 0.88, bareK: 0.05,
+  }),
   // The bottom of the size ladder. The reference is full of knee-to-waist-high
   // conifers filling the gaps between the hero trees; without them the meadow
-  // reads as mown.
-  firSapling: (r, K) => fir(r, K, { tall: 0.30, wide: 0.42, tiers: 3 }),
-  // Tall and slightly slim — NOT a needle. At wide: 0.72 with six tiers this
-  // came out as a 22 m green spike about three metres across, which read as
-  // litter rather than as a tree.
-  firSpire: (r, K) => fir(r, K, { tall: 1.08, wide: 0.80, tiers: 5 }),
+  // reads as mown. Cheapest member: 4 tiers at seg 8 is 64 triangles of skirt.
+  firSapling: (r, K) => fir(r, K, {
+    tall: 0.78, wide: 0.34, tiers: 4, seg: 8,
+    dropK: 0.60, stepK: 0.80, taper: 0.87, bareK: 0.05,
+  }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
-  firSnowOld: (r, K) => fir(r, K, { snow: true, tall: 1.3, wide: 1.2, tiers: 5 }),
+  firSnowOld: (r, K) => fir(r, K, {
+    snow: true, tall: 1.2, wide: 1.2, tiers: 7, seg: 12, dropK: 0.76, taper: 0.92,
+  }),
   scotsPine, broadleaf, birch, maple, snag, stump,
   saguaro, barrelCactus, ocotillo, scrub, windPine,
   bushDark: (r, K) => bush(r, K, K.bushDark),
@@ -1491,6 +1469,19 @@ export class PropScatter {
       leaf,
       leafRamp,
       leafPale: leaf.map((c) => shade(c, 0.10, -0.05)),
+      /**
+       * CONIFER BARK, and why it is not `bark`.
+       *
+       * `derivePalette.bark` is `offsetHSL(trunk, 0.01, -0.04, +0.05)`, and
+       * THREE.Color is LINEAR: the palette's trunk #6b4a30 measures l = 0.09
+       * there, so +0.05 is not a nudge, it more than doubles the value. Rendered
+       * on the tree sheet that came out a pale pinkish tan, and the frame's grade
+       * runs a 1.05 red gain on top — so the one part of the tree the client
+       * asked to be able to SEE was printing salmon. This is the palette's own
+       * brown taken slightly DOWN instead: a fir's trunk in target_01 is darker
+       * than its ground, not lighter.
+       */
+      trunkBark: D.trunk.clone().multiplyScalar(0.82),
       meadow: shade(new THREE.Color(p.ground[1]), -0.05, 0.07),
       // Grass tufts were derived from the CANOPY green and from ground[1], the
       // darkest rung of the terrain ramp. Both are far darker than the meadow

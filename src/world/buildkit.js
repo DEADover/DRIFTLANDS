@@ -477,6 +477,117 @@ export function firTier(r, h, seg, droop, notch, rng) {
   return g;
 }
 
+/**
+ * ONE TIER OF A CONIFER, TAKE THREE — a ring of drooping two-facet FLAPS over a
+ * shallow bright crown. This is the shape target_01 actually has, and the only
+ * way to see it was to crop its fir at 6x (scratch/ref_trunk.png): a tier is not
+ * a cone and not a star, it is six or seven little hanging TENTS. Each tent has
+ * a ridge running from the tier's hub out and DOWN to its tip, so it shows two
+ * facets that tilt in opposite directions round the trunk — a light half and a
+ * dark half — and between two neighbouring tents there is a near-vertical wall
+ * that reads as the shadowed interior of the tree.
+ *
+ * ---- WHY `firTier` COULD NOT PRODUCE THIS, MEASURED ------------------------
+ *
+ * `firTier` (kept below, still used for the leader) is an apex plus ONE rim ring
+ * with alternating long/short vertices. Round 8 widened its jitter a long way
+ * trying to make each facet its own value and it stayed flat, and the reason is
+ * arithmetic, not tuning. Take a tier r = 1, apex 1.0 up, long rim at (1.0,
+ * -0.55), short rim at (0.55, +0.10) and compute the two facets either side of a
+ * long spur:
+ *
+ *     long-then-short   ny 0.519      short-then-long   ny 0.500
+ *
+ * They are MIRROR IMAGES, so their normal.y agrees to two percent however far
+ * apart their radii are pushed — and `mergeColored`'s ramp keys off normal.y.
+ * One ring can only ever give one value. Their AZIMUTHS also came out 19.6° and
+ * 19.2°, i.e. both facets face the same way round the trunk, so the directional
+ * key could not separate them either. A one-ring tier is a cone with a jagged
+ * hem, and that is exactly what our firs read as.
+ *
+ * ---- WHAT TWO RINGS BUY, SAME MEASUREMENT ---------------------------------
+ *
+ * With an inner shoulder ring at 0.58r and the notch vertices tucked INSIDE it
+ * at 0.50r, the four triangles of one flap-pair come out:
+ *
+ *     crown fan        ny  0.86     azimuth 30°    -> full lit rung
+ *     flap west half   ny  0.445    azimuth 49°    -> mid
+ *     flap east half   ny  0.445    azimuth 11°    -> mid, 39° round from its twin
+ *     notch wall       ny -0.01     azimuth 30°    -> body (darkest) rung
+ *
+ * Three clean bands of normal.y for the albedo ramp to separate, and a 39°
+ * azimuth split inside each flap for the key light to separate — which is the
+ * "clearly lit side and shaded side within one tier" note. It costs 2 triangles
+ * per rim vertex, i.e. `4 * (seg/2)` per tier.
+ *
+ * The notch vertex being tucked inside the shoulder ring also deepens the
+ * silhouette: the outline zigzags between r and 0.50r instead of between r and
+ * 0.9r, so the serrated edge survives being 40 px tall on screen.
+ *
+ * @param r     outer radius of the flap tips
+ * @param hUp   height of the crown apex above the shoulder ring (keep SHALLOW,
+ *              ~0.3r — that is what makes the crown facets bright)
+ * @param drop  how far a flap tip hangs below the shoulder ring
+ * @param seg   rim vertices; must be EVEN. seg/2 flaps.
+ */
+export function firFrond(r, hUp, drop, seg, o = {}, rng) {
+  const f = rng ? (a, b) => rng.float(a, b) : (a, b) => (a + b) / 2;
+  const half = Math.max(3, Math.round(seg / 2));
+  const S = half * 2;
+  const inner = o.inner ?? 0.62;   // shoulder ring, as a fraction of r
+  /**
+   * THE NOTCH RADIUS IS NOT A FREE PARAMETER — it is solved.
+   *
+   * The notch wall is the triangle (I[j], I[j+1], O[notch]), and it is vertical
+   * (normal.y = 0, i.e. as dark as the ramp goes) exactly when the notch vertex
+   * sits on the CHORD between the two shoulder vertices either side of it. That
+   * chord's distance from the axis is `inner * cos(PI/half)`, which depends on
+   * how many flaps the tier has — so a fixed 0.50 that gave a vertical wall at
+   * seg 12 gave a 21-degree outward-leaning one at seg 8, and the darkest note
+   * in the tier quietly went missing on the small species. `notchK` nudges it
+   * either side of vertical; below 1 the wall overhangs and gets culled at this
+   * camera, which is wasted geometry, so it stays at or just above 1.
+   */
+  const notch = o.notch ?? inner * Math.cos(Math.PI / half) * (o.notchK ?? 1.02);
+  const spin = o.spin ?? 0;
+  const A = [0, hUp, 0];
+  const I = [], O = [];
+  for (let j = 0; j < half; j++) {
+    const a = (j / half) * Math.PI * 2 + spin;
+    const rr = r * inner * f(0.90, 1.10);
+    I.push([Math.cos(a) * rr, r * f(-0.045, 0.045), Math.sin(a) * rr]);
+  }
+  for (let i = 0; i < S; i++) {
+    const a = (i / S) * Math.PI * 2 + spin;
+    const long = i % 2 === 0;
+    // Long tips get most of the jitter: an uneven hem is most of what stops a
+    // stand of instanced firs from reading as one repeated object.
+    const rr = long ? r * f(0.88, 1.10) : r * notch * f(0.86, 1.14);
+    const y = long ? -drop * f(0.80, 1.28) : -drop * f(0.22, 0.50);
+    O.push([Math.cos(a) * rr, y, Math.sin(a) * rr]);
+  }
+  const v = [];
+  const T = (p, q, s) => {
+    v.push(p[0], p[1], p[2], q[0], q[1], q[2], s[0], s[1], s[2]);
+  };
+  // WINDING. With the rim running (cos a, sin a) in (x, z) and +Y up, a triangle
+  // is OUTWARD-facing as (upper-inner, lower[i+1], lower[i]) — the same
+  // convention `firTier` had to be corrected to. Getting this backwards is what
+  // left `firTier` unused for three rounds.
+  for (let j = 0; j < half; j++) {
+    const j1 = (j + 1) % half;
+    const i0 = j * 2, i1 = i0 + 1, i2 = (i0 + 2) % S;
+    T(A, I[j1], I[j]);        // crown fan   — shallow, brightest
+    T(I[j], O[i1], O[i0]);    // flap, west half
+    T(I[j], I[j1], O[i1]);    // notch wall  — near vertical, darkest
+    T(I[j1], O[i2], O[i1]);   // flap, east half
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3));
+  g.computeVertexNormals();
+  return g;
+}
+
 // ---------------------------------------------------------------------------
 // Palette derivation. Landmarks and props need more materials than the Palette
 // declares (plaster, roof tile, rusted metal...). Rather than invent hexes we
