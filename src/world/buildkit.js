@@ -180,8 +180,10 @@ export class GeoBuilder {
     return this.raw(place(g, o), color);
   }
 
+  /** `o.open` drops the base cap — halves the triangle count on anything whose
+   *  underside is buried in grass (flower heads, stems, tufts). */
   cone(r, h, seg, color, o = {}) {
-    const g = new THREE.ConeGeometry(r, h, seg, 1);
+    const g = new THREE.ConeGeometry(r, h, seg, 1, o.open ?? false);
     return this.raw(place(g, o), color);
   }
 
@@ -209,19 +211,51 @@ function place(g, o) {
   return g;
 }
 
-/** Randomised faceted rock. Deterministic given the rng. */
-export function rockGeom(rng, opts = {}) {
-  const g = new THREE.IcosahedronGeometry(1, opts.detail ?? 0).toNonIndexed();
-  const pos = g.attributes.position;
-  const jx = opts.jitter ?? 0.34;
+/**
+ * Per-CORNER displacement table for a polyhedron.
+ *
+ * THREE's IcosahedronGeometry (PolyhedronGeometry) is NON-INDEXED: each of the
+ * twelve corners appears five times, once per adjacent face, as five separate
+ * vertices at the same position. Jittering `pos` vertex-by-vertex therefore
+ * pulls the five copies of a corner in five different directions, which tears
+ * the solid open into folded, self-intersecting sheets whose recomputed normals
+ * point every which way. That — not a scale bug — is what produced the large
+ * pale angular "scraps of paper" scattered through the alpine meadow: a rock
+ * with +/-42% independent corner jitter is not a rock, it is confetti.
+ *
+ * So: hash the ORIGINAL position, and hand every copy of a corner the SAME
+ * displacement. The result stays a closed convex-ish solid with clean facets.
+ */
+function cornerTable(rng, pos, make) {
+  const table = new Map();
+  const key = (x, y, z) =>
+    `${Math.round(x * 512)},${Math.round(y * 512)},${Math.round(z * 512)}`;
+  const out = [];
   for (let i = 0; i < pos.count; i++) {
-    const k = 1 + Math.sin(pos.getX(i) * 3.1 + pos.getZ(i) * 2.3) * jx * 0.35;
-    pos.setXYZ(
-      i,
-      pos.getX(i) * k * rng.float(1 - jx, 1 + jx),
-      pos.getY(i) * rng.float(0.42, 0.92),
-      pos.getZ(i) * k * rng.float(1 - jx, 1 + jx)
-    );
+    const k = key(pos.getX(i), pos.getY(i), pos.getZ(i));
+    let v = table.get(k);
+    if (!v) table.set(k, (v = make()));
+    out.push(v);
+  }
+  return out;
+}
+
+/** Randomised faceted rock — a chunky closed solid, never a folded sheet. */
+export function rockGeom(rng, opts = {}) {
+  const g = new THREE.IcosahedronGeometry(1, opts.detail ?? 0);
+  const pos = g.attributes.position;
+  const jx = opts.jitter ?? 0.30;
+  const J = cornerTable(rng, pos, () => ({
+    kx: rng.float(1 - jx, 1 + jx),
+    ky: rng.float(0.62, 1.02),
+    kz: rng.float(1 - jx, 1 + jx),
+  }));
+  for (let i = 0; i < pos.count; i++) {
+    const j = J[i];
+    const x0 = pos.getX(i), y0 = pos.getY(i), z0 = pos.getZ(i);
+    // A gentle coherent swell so the facets are not all the same size.
+    const k = 1 + Math.sin(x0 * 3.1 + z0 * 2.3) * jx * 0.30;
+    pos.setXYZ(i, x0 * k * j.kx, y0 * j.ky, z0 * k * j.kz);
   }
   g.computeVertexNormals();
   return g;
@@ -235,21 +269,32 @@ export function rockGeom(rng, opts = {}) {
  * irregular where it meets the grass.
  */
 export function slabGeom(rng, opts = {}) {
-  const g = new THREE.IcosahedronGeometry(1, opts.detail ?? 0).toNonIndexed();
+  const g = new THREE.IcosahedronGeometry(1, opts.detail ?? 0);
   const pos = g.attributes.position;
-  const jx = opts.jitter ?? 0.40;
-  const top = opts.top ?? 0.45;      // height at which the plane starts
-  const squash = opts.squash ?? 0.22; // how much of the peak survives
+  const jx = opts.jitter ?? 0.24;
+  const top = opts.top ?? 0.66;      // height at which the plane starts
+  const squash = opts.squash ?? 0.45; // how much of the peak survives
+  // Same corner-coherent jitter as rockGeom. The old per-vertex version at
+  // jitter 0.42 was the single worst-looking thing in the alpine frame.
+  const J = cornerTable(rng, pos, () => ({
+    kx: rng.float(1 - jx, 1 + jx),
+    ky: rng.float(0.86, 1.14),
+    kz: rng.float(1 - jx, 1 + jx),
+  }));
   for (let i = 0; i < pos.count; i++) {
-    let x = pos.getX(i) * rng.float(1 - jx, 1 + jx);
-    // Asymmetric about y=0 on purpose: the mass sits BELOW the origin so the
-    // caller can drop the rock at ground level and get a half-buried block,
-    // and the visible part above ground is still a full metre or two.
-    let y = pos.getY(i) * rng.float(0.75, 1.15);
-    let z = pos.getZ(i) * rng.float(1 - jx, 1 + jx);
+    const j = J[i];
+    // The old shape ran y from -1.15 to +0.60 and was then dropped with its
+    // origin 0.11 BELOW the ground, so five sixths of the rock was buried and
+    // what showed was a 2.4-wide, 0.45-tall wafer: a chunky boulder rendered as
+    // a beer mat. The mass is lifted so roughly the top 60% stands proud, and
+    // the horizontal is pulled in, giving a block about twice as wide as it is
+    // tall — which is what the reference's meadow boulders measure.
+    let x = pos.getX(i) * j.kx * 0.88;
+    let y = pos.getY(i) * j.ky * 0.86 + 0.16;
+    let z = pos.getZ(i) * j.kz * 0.88;
     if (y > top) y = top + (y - top) * squash;
     // Flare the base outward so the rock looks bedded into the ground.
-    if (y < 0) { const k = 1 + (-y) * 0.30; x *= k; z *= k; }
+    if (y < 0) { const k = 1 + (-y) * 0.16; x *= k; z *= k; }
     pos.setXYZ(i, x, y, z);
   }
   g.computeVertexNormals();

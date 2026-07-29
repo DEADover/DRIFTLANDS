@@ -56,7 +56,11 @@ function fir(rng, K, o = {}) {
   const tiers = o.tiers ?? rng.int(3, 5);
   const trunkH = rng.float(1.3, 2.4) * tall;
   const tr = rng.float(0.26, 0.38) * wide;
-  b.cyl(tr * 0.8, tr * 1.5, trunkH + 1.6, 5, K.bark, { y: (trunkH + 1.6) / 2 });
+  // Open-ended: the trunk's top disappears inside the lowest tier and its
+  // bottom is in the turf, so both caps are ten triangles of nothing. Same
+  // reasoning for the tier cones below. Across ~30k conifers this is worth
+  // about a million triangles, which is what pays for the extra trees.
+  b.cyl(tr * 0.8, tr * 1.5, trunkH + 1.6, 5, K.bark, { y: (trunkH + 1.6) / 2, open: true });
   let y = trunkH;
   // Broader skirt, slightly shorter tiers than v1. Measured off target_01: the
   // conifers there are about a third as wide as they are tall, with the lowest
@@ -68,7 +72,7 @@ function fir(rng, K, o = {}) {
     // this way — a deep shadowed core with sunlit new growth on top — and it is
     // what stops a stand of firs from being one flat green mass.
     const c = K.leafRamp[Math.min(K.leafRamp.length - 1, Math.floor((i / Math.max(1, tiers - 1)) * K.leafRamp.length))];
-    b.cone(r, h, rng.int(5, 7), c, { y: y + h / 2, ry: rng.float(0, 1.2) });
+    b.cone(r, h, rng.int(5, 7), c, { y: y + h / 2, ry: rng.float(0, 1.2), open: true });
     // Snow only settles on the upper tiers — a white cap, not white frosting.
     if (o.snow && i >= tiers - 2) {
       b.cone(r * 0.62, h * 0.26, rng.int(5, 6), K.snow, { y: y + h * 0.84 });
@@ -278,30 +282,44 @@ function flowerPatch(rng, K, colIdx, o = {}) {
   //      -wide daisy, ~14 px at the hero camera. In target_01 a bloom is 2-3 px.
   //      They are now ~10 cm, and there are a third as many, spread over the
   //      same footprint so the patch is a scatter rather than a blob.
+  //
+  // ROUND 4: the cut went too far. Two rounds ago the meadow was confetti; last
+  // round a hero frame contained about a dozen white specks in total and the
+  // grass read as mown. target_01 has a STEADY sprinkle — you are never more
+  // than a few metres from a bloom, but they never form a coloured mat. So the
+  // patch keeps its loose even-area scatter and gets half again as many heads,
+  // and the weights in the mix below carry the rest of the difference.
+  //
+  // The heads and stems are open-ended cones now (no base cap, which is buried
+  // in grass anyway), so a 12-bloom patch costs FEWER triangles than the old
+  // 7-bloom one.
   const b = new GeoBuilder();
-  const R = rng.float(1.8, 3.2) * (o.spread ?? 1);
+  // Tighter footprint. At 1.8-3.2 m a drift of a dozen blooms was spread over
+  // 30 m² and read as isolated specks; in target_01 a drift is a handful of
+  // flowers you could cover with a doormat, with clear grass all round it.
+  const R = rng.float(1.25, 2.30) * (o.spread ?? 1);
   const c = o.color ?? K.accents[colIdx % K.accents.length];
-  const n = rng.int(5, 9);
+  const n = rng.int(8, 14);
   for (let i = 0; i < n; i++) {
     // Even-area scatter (sqrt), not a dense core. The old 0.62 exponent piled
     // most of the blooms into the middle, which is what made a patch read as
     // one coloured object instead of as individual flowers in grass.
     const a = rng.float(0, Math.PI * 2);
     const d = Math.sqrt(rng.float(0.06, 1)) * R;
-    const s = rng.float(0.085, 0.145);
+    const s = rng.float(0.10, 0.17);
     const x = Math.cos(a) * d, z = Math.sin(a) * d;
-    // A bloom is 2-3 px on screen; a 5-sided squat cone (10 tris) is
-    // indistinguishable from an icosahedron there and a third of the cost.
-    b.cone(s, s * 1.5, 5, c, { x, z, y: 0.30 });
+    // A bloom is 3-5 px on screen; a 5-sided squat cone is indistinguishable
+    // from an icosahedron there and a fraction of the cost.
+    b.cone(s, s * 1.5, 5, c, { x, z, y: 0.32, open: true });
     // A hair-thin green stem. Without it a white speck floats; with it the
     // flower is planted in the grass, which is the reference's read.
-    b.cone(0.035, 0.30, 4, K.grass[0], { x, z, y: 0.15 });
+    b.cone(0.035, 0.32, 4, K.grass[0], { x, z, y: 0.16, open: true });
   }
   // Two taller stems break the flat top of the drift. More than that and the
   // patch costs more triangles than a whole fir.
   for (let i = 0; i < 2; i++) {
     const a = rng.float(0, Math.PI * 2), d = rng.float(0, R * 0.8);
-    b.cone(0.09, 0.60, 4, K.grass[1], { x: Math.cos(a) * d, z: Math.sin(a) * d, y: 0.30 });
+    b.cone(0.09, 0.60, 4, K.grass[1], { x: Math.cos(a) * d, z: Math.sin(a) * d, y: 0.30, open: true });
   }
   return { geo: b.build(), trunkR: 0, height: 0.7 };
 }
@@ -329,7 +347,7 @@ function tussock(rng, K) {
     const a = rng.float(0, Math.PI * 2), d = rng.float(0, 1.1);
     const h = rng.float(0.55, 1.05);
     b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.3, 0.3));
-    b.cone(rng.float(0.5, 0.85), h, 5, K.grass[i % K.grass.length], { y: h / 2, sz: 0.7 });
+    b.cone(rng.float(0.5, 0.85), h, 5, K.grass[i % K.grass.length], { y: h / 2, sz: 0.7, open: true });
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1.0 };
@@ -343,7 +361,7 @@ function screePatch(rng, K) {
     const s = rng.float(0.28, 0.72);
     b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28),
       rng.float(-0.3, 0.3), rng.float(-0.3, 0.3), s);
-    b.raw(rockGeom(rng, { jitter: 0.5 }), i % 3 === 0 ? K.scree : K.rockDark);
+    b.raw(rockGeom(rng, { jitter: 0.34 }), i % 3 === 0 ? K.scree : K.rockDark);
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1 };
@@ -363,16 +381,23 @@ function slab(rng, K, o = {}) {
   // Warm pale grey, from the palette's own road-edge tone. The reference's
   // boulders are a warm stone, not the cool blue-grey of the cliff colour, and
   // that warmth is what separates them from the meadow shadows.
-  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.0, 0.28)).lerp(K.plasterWarm, 0.30);
-  b.raw(slabGeom(rng, { jitter: 0.42 }), body);
+  // Pale, but not paper. At 0.30 toward plasterWarm the meadow boulders came
+  // out a milky tan that read lighter than the road; the reference's stones are
+  // a warm mid-grey that still sits a clear step above the grass.
+  // Landed at 0.20 after shooting 0.30 (milky tan, lighter than the road) and
+  // 0.14 (a muddy mid-grey that sank into the meadow shadows). target_01's
+  // meadow blocks are a pale WARM grey whose sunlit top is the brightest thing
+  // in the grass without ever competing with the gravel.
+  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.0, 0.18)).lerp(K.plasterWarm, 0.20);
+  b.raw(slabGeom(rng, { jitter: 0.24 }), body);
   const n = rng.int(1, 3);
   for (let i = 0; i < n; i++) {
-    const s = rng.float(0.32, 0.66);
-    const a = rng.float(0, Math.PI * 2), d = rng.float(0.7, 1.3);
-    b.pushTilt(Math.cos(a) * d, -0.15, Math.sin(a) * d, rng.float(0, 6.28),
-      rng.float(-0.2, 0.2), rng.float(-0.2, 0.2), s);
-    b.raw(slabGeom(rng, { jitter: 0.46 }),
-      K.rockDark.clone().lerp(K.rock, rng.float(0.3, 0.8)).lerp(K.plasterWarm, 0.20));
+    const s = rng.float(0.34, 0.62);
+    const a = rng.float(0, Math.PI * 2), d = rng.float(0.85, 1.35);
+    b.pushTilt(Math.cos(a) * d, -0.06, Math.sin(a) * d, rng.float(0, 6.28),
+      rng.float(-0.16, 0.16), rng.float(-0.16, 0.16), s);
+    b.raw(slabGeom(rng, { jitter: 0.26 }),
+      K.rockDark.clone().lerp(K.rock, rng.float(0.35, 0.85)).lerp(K.plasterWarm, 0.10));
     b.pop();
   }
   if (o.snow) {
@@ -386,10 +411,10 @@ function slab(rng, K, o = {}) {
 
 function boulder(rng, K, o = {}) {
   const b = new GeoBuilder();
-  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.25, 0.75));
-  b.raw(rockGeom(rng, { jitter: 0.36 }), body);
+  const body = K.rock.clone().lerp(K.rockDark, rng.float(0.25, 0.70));
+  b.raw(rockGeom(rng, { jitter: 0.28 }), body);
   if (rng.bool(0.5)) {
-    const lump = rockGeom(rng, { jitter: 0.4 });
+    const lump = rockGeom(rng, { jitter: 0.30 });
     lump.scale(0.55, 0.5, 0.55);
     lump.translate(rng.float(-0.9, 0.9), 0.1, rng.float(-0.9, 0.9));
     b.raw(lump, K.rockDark);
@@ -470,7 +495,18 @@ const MIXES = {
     // WHOLE drivable band is wooded meadow — no more bald stretches where the
     // road happens to climb — and the far ridges still go bare, which is where
     // the frame gets its distance.
-    canopyTarget: 21000, coverTarget: 15000, pebbleTarget: 9000, heroes: 340, singles: 3300, moistScale: 90,
+    // ROUND 4. Counted off target_01: a ~77 x 43 m frame there holds about 85
+    // conifers, i.e. ~25 000/km². We were placing 20 500 over a 2.89 km² map —
+    // 7 100/km², a QUARTER of the reference — and the shortfall is why a hero
+    // frame can look like mown lawn while a frame 200 m away looks like forest.
+    // 32 000 lands at ~11 000/km²; the rest of the gap is closed by `singles`
+    // and by the copse floor below rather than by piling more into the stands.
+        // Tried 50 000 / 11 000 to close the last of the density gap to target_01
+    // and had to back it out: drift_alpine finished at 90 km/h instead of 131,
+    // i.e. the car was clipping trunks all the way round. Past this point more
+    // conifers cost the DRIVE, and this is a playable demo before it is a
+    // screenshot. 44 000 / 7 400 is where the two curves cross.
+    canopyTarget: 44000, coverTarget: 32000, pebbleTarget: 9000, heroes: 430, singles: 7400, moistScale: 90,
     // macro/meso are the WAVELENGTHS of the two noise scales that decide where
     // wood wants to be. At macro 0.0016 the pattern repeated every ~620 m —
     // wider than the whole visible frame — so any single shot landed entirely
@@ -478,7 +514,12 @@ const MIXES = {
     // the pattern turns over every ~290 m and ~87 m, so a 300 m frame always
     // contains both thick clumps and open ground, which is the reference's
     // rhythm. `contrast` is flattened for the same reason.
-    forest: { macro: 0.0034, meso: 0.0115, rich: 0.42, bare: 0.02, spacing: 7.4, contrast: 0.26, coverBare: 0.04 },
+    // `contrast` dropped again (0.26 -> 0.14). It is the exponent on the density
+    // field, and every notch of it is a notch of "wood on one side of the frame,
+    // meadow on the other" — the exact regression this round is meant to kill.
+    // target_01 has conifers in all four quadrants; what varies between them is
+    // how CLOSE TOGETHER they are, not whether there are any.
+    forest: { macro: 0.0034, meso: 0.0115, rich: 0.42, bare: 0.02, spacing: 7.4, contrast: 0.14, coverBare: 0.04 },
     // `sep` is the metres between copse CENTRES, and it alone decides whether a
     // clump is a wood or a bush. Round 2 ran sep 26 with an 84 m footprint: the
     // copses overlapped into a continuous forest edge. Dropping sep to 18 went
@@ -489,7 +530,14 @@ const MIXES = {
     // put roughly a dozen stands in a hero frame and the shot could fall in a
     // gap, 18 made pimples. 30 gives ~1100 stands of 15-30, so any frame holds
     // six or eight clumps AND the meadow between them.
-    clump: { tries: 26000, sep: 30, radius: [10, 31], maxMembers: 34, base: 0.66, kMax: 3.2 },
+    // `base` is the floor probability that a copse centre is accepted where the
+    // field says "open". At 0.66 a third of the acceptance still came from the
+    // field, and the field is smooth over ~290 m — wider than the frame — so
+    // whole shots landed on its low side. At 0.86 the field only decides how
+    // BIG a stand is, never whether the quadrant gets one. `sep` down from 30
+    // to 25 and `radius` widened at the bottom end so the size ladder runs from
+    // three-tree groups to proper stands rather than clones of one footprint.
+    clump: { tries: 34000, sep: 25, radius: [7, 33], maxMembers: 34, base: 0.86, kMax: 3.4 },
     canopy: [
       // Sizes calibrated against target_01: the hero conifers there stand about
       // 20 m and 7-8 m across the skirt, roughly five car lengths tall. Our
@@ -502,11 +550,24 @@ const MIXES = {
       // Weighted toward FULL-SIZE trees. At 2.6 / 2.2 the young and sapling
       // firs were a third of the canopy and the open half of the frame filled
       // with knee-high green lumps that read as scrub, not as woodland.
-      { id: 'fir', w: 6.4, alt: [1, 5, 135, 195], wet: [0, 0.12, 0.95, 1.15], flat: 0.74, size: [0.88, 1.68] },
-      { id: 'firOld', w: 2.6, alt: [2, 8, 118, 168], wet: [0, 0.15, 0.95, 1.15], flat: 0.77, size: [1.00, 1.55] },
-      { id: 'firSpire', w: 2.2, alt: [2, 7, 135, 195], wet: [0, 0.12, 0.95, 1.15], flat: 0.76, size: [0.92, 1.58] },
-      { id: 'firYoung', w: 1.9, alt: [1, 5, 145, 210], wet: [0, 0.08, 1.0, 1.2], flat: 0.72, size: [1.0, 2.2] },
-      { id: 'firSapling', w: 1.1, alt: [1, 4, 155, 235], wet: [0, 0.05, 1.05, 1.25], flat: 0.68, size: [1.0, 2.6] },
+      // ROUND 4 sizes. Measured on target_01 with the car as the ruler: the tall
+      // conifers there are ~4.2 m across the skirt and ~12 m to the tip. Ours
+      // were 6.3 m by 15 m — a third oversized — and an oversized tree is not
+      // just a big tree, it is a tree you can only afford a third as many of.
+      // Smaller trees, many more of them: that trade is the whole difference
+      // between our meadow and the reference's.
+      // `flat` is a MINIMUM terrain normal.y, and it was the hidden cause of the
+      // "trees all on one side" regression. Probing the hero frame: the ground
+      // west of the road rolls down toward the tarn at normal.y 0.70-0.74, just
+      // under the fir gate, so that whole hillside could grow bushes and nothing
+      // else — a bald slope beside a wooded one, in every frame that contained
+      // a slope. 0.62 is still a 52 degree limit; conifers manage far worse, and
+      // the reference has them standing on visibly tilted ground throughout.
+      { id: 'fir', w: 6.4, alt: [1, 5, 135, 195], wet: [0, 0.12, 0.95, 1.15], flat: 0.62, size: [0.70, 1.32] },
+      { id: 'firOld', w: 2.6, alt: [2, 8, 118, 168], wet: [0, 0.15, 0.95, 1.15], flat: 0.66, size: [0.82, 1.24] },
+      { id: 'firSpire', w: 2.2, alt: [2, 7, 135, 195], wet: [0, 0.12, 0.95, 1.15], flat: 0.64, size: [0.75, 1.26] },
+      { id: 'firYoung', w: 1.9, alt: [1, 5, 145, 210], wet: [0, 0.08, 1.0, 1.2], flat: 0.58, size: [0.85, 1.80] },
+      { id: 'firSapling', w: 1.1, alt: [1, 4, 155, 235], wet: [0, 0.05, 1.05, 1.25], flat: 0.52, size: [0.9, 2.1] },
       // Kept deliberately low: target_01 is a conifer meadow. Round canopies
       // are the accent, not the crop.
       // A copse picks ONE dominant species and then keeps it for three quarters
@@ -515,8 +576,8 @@ const MIXES = {
       // and a whole blob-canopy grove landed in the right of the hero frame.
       // target_01 has no round canopies at all. These stay only as a rare
       // single-tree note in damp hollows.
-      { id: 'broadleaf', w: 0.30, alt: [1, 5, 30, 46], wet: [0.35, 0.60, 1.05, 1.2], flat: 0.80, size: [0.9, 1.4] },
-      { id: 'birch', w: 0.22, alt: [2, 8, 38, 58], wet: [0.30, 0.55, 1.0, 1.2], flat: 0.80, size: [0.9, 1.3] },
+      { id: 'broadleaf', w: 0.30, accent: true, alt: [1, 5, 30, 46], wet: [0.35, 0.60, 1.05, 1.2], flat: 0.70, size: [0.9, 1.4] },
+      { id: 'birch', w: 0.22, accent: true, alt: [2, 8, 38, 58], wet: [0.30, 0.55, 1.0, 1.2], flat: 0.70, size: [0.9, 1.3] },
       // No snags in alpine. A dead pole reads from 200 m up as a two-tone stub
       // — bright sunlit face, near-black shadow face — and the copse pass will
       // happily make one the dominant species of a whole stand, which put
@@ -524,27 +585,33 @@ const MIXES = {
     ],
     heroSpecies: ['firOld', 'firSpire', 'fir'],
     cover: [
-      { id: 'bushDark', w: 1.7, alt: [1, 4, 150, 230], wet: [0, 0.08, 1.05, 1.2], flat: 0.74, size: [0.7, 1.4] },
-      { id: 'bushLight', w: 0.8, alt: [1, 4, 120, 180], wet: [0.05, 0.22, 1.05, 1.2], flat: 0.74, size: [0.7, 1.3] },
+      { id: 'bushDark', w: 1.7, alt: [1, 4, 150, 230], wet: [0, 0.08, 1.05, 1.2], flat: 0.60, size: [0.7, 1.4] },
+      { id: 'bushLight', w: 0.8, alt: [1, 4, 120, 180], wet: [0.05, 0.22, 1.05, 1.2], flat: 0.60, size: [0.7, 1.3] },
       // Flowers are an ACCENT, not a crop. At w 4.4 / 1.7 / 1.0 they were 45%
       // of all ground cover and the meadow came out as confetti. In target_01
       // you can count the drifts in a frame on two hands. The weight that used
       // to go to blooms goes to tussock instead — grass, which is what the
       // reference actually fills its meadow with.
-      { id: 'flowersWhite', w: 1.5, alt: [1, 4, 120, 180], wet: [0, 0.12, 1.05, 1.2], flat: 0.86, size: [0.8, 1.3] },
-      { id: 'flowersCream', w: 0.42, alt: [2, 5, 110, 160], wet: [0.05, 0.2, 1.05, 1.2], flat: 0.86, size: [0.8, 1.2] },
-      { id: 'flowersRed', w: 0.30, alt: [2, 5, 95, 140], wet: [0.1, 0.3, 1.05, 1.2], flat: 0.88, size: [0.8, 1.2] },
-      { id: 'tussock', w: 7.4, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.72, size: [0.8, 1.7] },
+      // ROUND 4 recalibration. At 1.5 / 0.42 / 0.30 out of a 13.3 total the
+      // blooms were 16% of ground cover and a hero frame held about a dozen
+      // white specks — the reference holds well over a hundred. White is the
+      // dominant note by a wide margin, cream is the quiet second, and red is
+      // the rare one you notice twice a frame. `flat` relaxed from 0.86 so
+      // drifts also take the gentle rolls, not only the billiard-flat shelves.
+      { id: 'flowersWhite', w: 4.4, alt: [1, 4, 120, 180], wet: [0, 0.12, 1.05, 1.2], flat: 0.80, size: [0.85, 1.35] },
+      { id: 'flowersCream', w: 1.05, alt: [2, 5, 110, 160], wet: [0.05, 0.2, 1.05, 1.2], flat: 0.82, size: [0.8, 1.25] },
+      { id: 'flowersRed', w: 0.72, alt: [2, 5, 95, 140], wet: [0.1, 0.3, 1.05, 1.2], flat: 0.84, size: [0.8, 1.2] },
+      { id: 'tussock', w: 6.8, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.60, size: [0.9, 1.9] },
       { id: 'screePatch', w: 1.2, alt: [120, 190, 300, 430], wet: [0, 0, 0.6, 0.9], flat: 0.0, flatMax: 0.88, size: [0.7, 1.3] },
     ],
     shore: { id: 'reeds', size: [0.8, 1.5] },
     boulder: 'boulder',
     slab: 'slab',
     verge: {
-      count: 3000, width: 11,
+      count: 4200, width: 13,
       mix: [
-        { id: 'flowersWhite', w: 0.15 },
-        { id: 'tussock', w: 0.25 },
+        { id: 'flowersWhite', w: 0.22 },
+        { id: 'tussock', w: 0.20 },
         // A few real trees on the verge, not just saplings. In target_01 the
         // wood closes to within a couple of metres of the gravel in places and
         // that is what stops the road looking drawn on rather than cut through.
@@ -553,13 +620,13 @@ const MIXES = {
         // metres of the gravel every hundred metres or so, and it is the single
         // clearest scale cue the frame has — bigger share than the flowers.
         { id: 'slab', w: 0.17 },
-        { id: 'flowersCream', w: 0.05 },
+        { id: 'flowersCream', w: 0.06 },
         { id: 'bushDark', w: 0.10 },
         // Young conifers crowding the verge: in the reference the wood comes
         // right down to the fence line, and the road's keep-out band is the
         // only reason ours does not.
         { id: 'firSapling', w: 0.17 },
-        { id: 'flowersRed', w: 0.03 },
+        { id: 'flowersRed', w: 0.05 },
       ],
     },
   },
@@ -738,12 +805,21 @@ export class PropScatter {
       leafRamp,
       leafPale: leaf.map((c) => shade(c, 0.10, -0.05)),
       meadow: shade(new THREE.Color(p.ground[1]), -0.05, 0.07),
-      // Same linear-space caution as leafRamp: on a palette green whose HSL
-      // lightness is ~0.13, a +0.06 nudge is a 45% jump and turns grass tufts
-      // and flower stems into pale near-white sticks. Keep the steps small.
+      // Grass tufts were derived from the CANOPY green and from ground[1], the
+      // darkest rung of the terrain ramp. Both are far darker than the meadow
+      // the tufts actually stand in, so a tussock rendered as a black fleck and
+      // 15 000 of them peppered the alpine meadow with soot. The meadow the
+      // camera sees is ramp indices 2-3, so the tufts are derived from THOSE —
+      // one step down and one step up, barely distinct from the grass, which is
+      // exactly how the reference's tufts read.
+      // ...but not so close that they vanish. First pass at this landed the
+      // tufts ON the meadow colour and the grass went smooth: target_01's tufts
+      // are a clearly DARKER, greener clump than the yellow-green sward around
+      // them, and that speckle is a lot of the reference's ground texture.
+      // Halfway down the ramp from the meadow toward the dark rung.
       grass: [
-        shade(leaf[0], 0.022, -0.04),
-        shade(new THREE.Color(p.ground[1]), -0.022, 0.04),
+        new THREE.Color(p.ground[2]).lerp(new THREE.Color(p.ground[1]), 0.55),
+        new THREE.Color(p.ground[2]).lerp(new THREE.Color(p.ground[3]), 0.50),
       ],
       reed: shade(leaf[0], -0.02, 0.05),
       reedTip: shade(new THREE.Color(p.ground[3]), -0.02, 0.04),
@@ -946,7 +1022,13 @@ export class PropScatter {
         if (clash) continue;
         const e = envAt(cx, cz);
         if (!e) continue;
-        const dom = pickSpecies(list, e, rng);
+        // Species marked `accent` may appear INSIDE a stand but may never be
+        // its dominant. Without this, a 0.30-weight broadleaf still lands as
+        // the dominant of one copse in eight, and because a copse keeps its
+        // dominant for three quarters of its members that is a whole grove of
+        // round canopies — which target_01 does not contain anywhere.
+        const domList = list.filter((sp) => !sp.accent);
+        const dom = pickSpecies(domList.length ? domList : list, e, rng);
         if (!dom) continue;
 
         // Stretch the copse along the local contour so it follows the valley.
@@ -1044,9 +1126,15 @@ export class PropScatter {
       radius: CL.radius ?? [12, 84], spacing: F.spacing,
       maxMembers: CL.maxMembers ?? 190, kMax: CL.kMax,
     });
+    // Ground cover gets a HIGH probability floor. The canopy pass wants a
+    // "copse, gap, copse" rhythm; ground cover does not — in the reference the
+    // grass and the flower drifts are everywhere, thicker in places, and the
+    // only thing a density field should do to them is vary how thick. With the
+    // default 0.30 floor the drifts collected into the top quarter of the cover
+    // mask and whole frames (hero_alpine) came out with a bare lawn.
     placeClusters(mix.cover, mix.coverTarget, {
-      density: coverDensity, contrast: 1.0,
-      tries: 16000, sep: 15, radius: [6, 26], spacing: 4.2, maxMembers: 60,
+      density: coverDensity, contrast: 1.0, base: 0.70,
+      tries: 24000, sep: 13, radius: [5, 21], spacing: 4.2, maxMembers: 42,
     });
 
     // ---- ROAD VERGE DRESSING --------------------------------------------
@@ -1072,7 +1160,7 @@ export class PropScatter {
         // In target_01 the blocks sitting a metre off the gravel are car-sized
         // or bigger — that is the whole reason they read as a scale cue — and
         // at 0.75-1.45 ours were pebbles you had to hunt for.
-        const s = id === mix.slab ? rng.float(1.4, 2.9) : rng.float(0.75, 1.45);
+        const s = id === mix.slab ? rng.float(1.1, 2.3) : rng.float(0.75, 1.45);
         emit(id, v, {
           x: p.x, y: e.h - (id === mix.slab ? s * 0.12 : 0.12), z: p.z, s,
           r: rng.float(0, Math.PI * 2),
@@ -1100,7 +1188,7 @@ export class PropScatter {
       // bottomed out — which is why every hero tree ended up on the same side.
       if (forestDensity(x, z) > 0.62) continue;
       const e = envAt(x, z);
-      if (!e || e.ny < 0.88) continue;
+      if (!e || e.ny < 0.82) continue;
       if (isBlocked(x, z) || nearSpawn(x, z)) continue;
       const id = rng.pick(mix.heroSpecies);
       const spec = mix.canopy.find((s) => s.id === id) ?? mix.canopy[0];
@@ -1108,7 +1196,10 @@ export class PropScatter {
       const v = rng.int(0, VARIANTS - 1);
       // A hero is the biggest thing in its part of the frame — the lone tree in
       // the meadow that gives the whole shot its scale. ~25-30 m.
-      const s = rng.float(1.45, 1.80);
+      // Heroes shrank with everyone else. Now that a normal fir tops out at
+      // ~1.3, a 1.5 hero was twice the height of its neighbours and read as a
+      // mistake rather than as a landmark. Half again as tall is enough.
+      const s = rng.float(1.16, 1.40);
       emit(id, v, { x, y: e.h - 0.15, z, s, r: rng.float(0, Math.PI * 2), tx: 0, tz: 0 });
       const entry = lib.get(`${id}#${v}`);
       if (entry.trunkR >= 0.6) this.colliders.push({ x, z, r: entry.trunkR * s * 0.55 });
@@ -1128,7 +1219,7 @@ export class PropScatter {
       const x = rng.float(-half, half), z = rng.float(-half, half);
       if (rng.float(0, 1) > 1 - forestDensity(x, z) * 0.80) continue;
       const e = envAt(x, z);
-      if (!e || e.ny < 0.80) continue;
+      if (!e || e.ny < 0.66) continue;
       if (isBlocked(x, z) || nearSpawn(x, z)) continue;
       const spec = pickSpecies(mix.canopy, e, rng);
       if (!spec) continue;
@@ -1196,16 +1287,15 @@ export class PropScatter {
       if (isBlocked(x, z)) return false;
       if (s > 1.6 && nearSpawn(x, z)) return false;
       const v = rng.int(0, VARIANTS - 1);
-      // Half-buried, but only half. The slab geometry already carries most of
-      // its mass below the origin, so sinking it by the same amount as a round
-      // boulder puts the whole rock underground — which is exactly what the
-      // first version did, and why 6700 boulders were invisible.
+      // Half-buried, but only half. slabGeom now carries its mass ABOVE the
+      // origin (see buildkit), so it only needs bedding in by a hand's depth;
+      // rockGeom is still centred and wants a real third of itself sunk.
       const flat = id === mix.slab;
       emit(id, v, {
-        x, y: h - s * (flat ? rng.float(0.06, 0.16) : rng.float(0.26, 0.42)), z, s,
+        x, y: h - s * (flat ? rng.float(0.10, 0.22) : rng.float(0.26, 0.42)), z, s,
         r: rng.float(0, Math.PI * 2),
-        tx: rng.gauss(0, 0.07), tz: rng.gauss(0, 0.07),
-        sy: flat ? rng.float(0.75, 1.10) : rng.float(0.55, 0.95),
+        tx: rng.gauss(0, 0.05), tz: rng.gauss(0, 0.05),
+        sy: flat ? rng.float(0.86, 1.18) : rng.float(0.62, 1.00),
       });
       if (s > 2.4) this.colliders.push({ x, z, r: s * 0.42 });
       rocks++;
@@ -1234,7 +1324,7 @@ export class PropScatter {
       // One anchor block, then a train of smaller ones around it. The anchor is
       // deliberately car-sized or bigger: a boulder that is not clearly larger
       // than the car gives the frame no sense of scale at all.
-      const big = lerp(2.0, 4.6, Math.pow(rng.float(0, 1), 1.5)) * (1 + rocky * 0.3);
+      const big = lerp(1.7, 3.8, Math.pow(rng.float(0, 1), 1.5)) * (1 + rocky * 0.3);
       dropRock(cx, cz, big, rockId) && grouped++;
       const n2 = rng.int(2, 5);
       for (let k = 0; k < n2 && grouped < groupTarget; k++) {
@@ -1269,6 +1359,19 @@ export class PropScatter {
       const inst = new THREE.InstancedMesh(entry.geo, mat, list.length);
       const instColors = new Float32Array(list.length * 3);
       const cr = new Rng((strHash(key) ^ 0x5bd1) >>> 0);
+      // Blooms keep a tight, warm-neutral multiplier. The general 0.84-1.14 with
+      // a colour-temperature twist is right for foliage and stone, but on a
+      // 4 px white flower it produced grey and pale-blue specks — the reference
+      // reads clean white throughout, and a grey daisy just looks like grit.
+      const bloom = key.startsWith('flowers');
+      // Canopy gets a tighter, downward-skewed range. At 1.14 the brightest
+      // instances came out mint against target_01's deep, fairly uniform
+      // conifer greens — a wood should hold three or four greens, not a
+      // highlight that outshines the meadow.
+      const canopy = /^(fir|scotsPine|broadleaf|birch|maple|windPine)/.test(key);
+      const kLo = bloom ? 0.94 : canopy ? 0.86 : 0.84;
+      const kHi = bloom ? 1.10 : canopy ? 1.055 : 1.14;
+      const wAmp = bloom ? 0.012 : 0.055;
       for (let i = 0; i < list.length; i++) {
         const t = list[i];
         dummy.position.set(t.x, t.y, t.z);
@@ -1277,8 +1380,8 @@ export class PropScatter {
         dummy.updateMatrix();
         inst.setMatrixAt(i, dummy.matrix);
         // Near-white multiplier: value plus a touch of colour temperature.
-        const k = cr.float(0.84, 1.14);
-        const w = cr.float(-0.055, 0.055);
+        const k = cr.float(kLo, kHi);
+        const w = cr.float(-wAmp, wAmp);
         col.setRGB(k * (1 + w), k, k * (1 - w));
         instColors[i * 3] = col.r; instColors[i * 3 + 1] = col.g; instColors[i * 3 + 2] = col.b;
       }
@@ -1295,6 +1398,9 @@ export class PropScatter {
       instances: Object.values(this.counts).reduce((a, b) => a + b, 0),
       tris, kinds: buckets.size,
     };
+    // Tuning aid, same shape as landmarks' `window.__LM`: what actually got
+    // placed, per species. Density arguments are unwinnable without it.
+    if (typeof window !== 'undefined') window.__PROPS = { ...this.stats, counts: this.counts };
     return this.group;
   }
 }

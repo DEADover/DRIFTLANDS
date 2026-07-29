@@ -45,38 +45,87 @@ const clamp = THREE.MathUtils.clamp;
  */
 function chalet(rng, K, o = {}) {
   const b = new GeoBuilder();
-  // Measured against the car in shots/mine: at W 8.5-11 the chalet came out
-  // ~13 m across and three car-lengths wide on screen, which made it the
-  // subject of the frame instead of a note in it. A small alpine farmhouse is
-  // 7-8 m on the ridge. The whole point of the building is SCALE — it has to
-  // be readable as a house and then get out of the way.
-  const W = o.w ?? rng.float(6.6, 8.2);       // along X (ridge direction)
-  const D = o.d ?? rng.float(5.2, 6.4);       // across Z
+  // ROUND 4. Two complaints, both fair: the house dominated the hero frame, and
+  // its roof was a bare maroon slab — 12 triangles of flat colour occupying an
+  // eighth of the screen. At a 50 degree camera the roof IS the building, so
+  // either it carries detail or the building has none.
+  //
+  // Smaller (a real alpine farmhouse is 6-7 m on the ridge, not 8), and the
+  // roof now has courses, a fascia, a ridge beam and purlin ends, so the plane
+  // breaks into four values instead of one.
+  const W = o.w ?? rng.float(5.8, 7.0);       // along X (ridge direction)
+  const D = o.d ?? rng.float(4.6, 5.6);       // across Z
   const plinth = rng.float(0.6, 1.0);
-  const h1 = rng.float(2.6, 3.0);
-  const h2 = rng.float(2.0, 2.4);
+  const h1 = rng.float(2.5, 2.9);
+  const h2 = rng.float(1.9, 2.3);
 
   // Plinth — deliberately oversized and sunk, so a chalet on a slight slope
   // never shows daylight under a corner.
   b.box(W * 1.04, plinth + 1.6, D * 1.04, K.stoneDark, { y: (plinth + 1.6) / 2 - 1.6 });
   // Ground floor: pale plaster.
   b.box(W, h1, D, K.plaster, { y: plinth + h1 / 2 });
+  // Door and two shuttered windows on the long face. Small, but they are the
+  // difference between "a house" and "a box with a lid".
+  for (const sz of [1, -1]) {
+    const fz = sz * (D / 2 + 0.02);
+    if (sz > 0) b.box(0.85, 1.7, 0.10, K.woodDark, { x: -W * 0.22, y: plinth + 0.85, z: fz });
+    for (const wx of [W * 0.10, W * 0.34]) {
+      // Deep, nearly unlit glass with a timber surround. `K.glass` neat is the
+      // sky colour and at 6 px it fired off as two cyan pixels per window — the
+      // brightest chroma in the frame, on a building meant to sit back.
+      b.box(0.66, 0.66, 0.10, K.glass.clone().lerp(K.stoneDark, 0.62), { x: sz * wx, y: plinth + h1 * 0.62, z: fz });
+      b.box(0.14, 0.74, 0.09, K.woodDark, { x: sz * wx - 0.40, y: plinth + h1 * 0.62, z: fz + sz * 0.02 });
+      b.box(0.14, 0.74, 0.09, K.woodDark, { x: sz * wx + 0.40, y: plinth + h1 * 0.62, z: fz + sz * 0.02 });
+    }
+  }
   // Upper storey: dark timber, slightly proud of the plaster.
   b.box(W * 1.02, h2, D * 1.03, K.wood, { y: plinth + h1 + h2 / 2 });
-  // Balcony band — one dark stripe under the eaves reads as a balcony rail from
-  // any angle and costs 12 triangles.
-  b.box(W * 1.12, 0.28, D * 1.14, K.woodDark, { y: plinth + h1 + h2 * 0.62 });
-  b.box(W * 1.10, 0.22, D * 1.12, K.woodPale, { y: plinth + h1 + h2 * 0.30 });
+  // Balcony: a deck board, a rail and a row of balusters. From above the deck
+  // and the rail read as two concentric rectangles, which is exactly the note
+  // an alpine chalet gives at this distance.
+  const bY = plinth + h1 + h2 * 0.30;
+  b.box(W * 1.16, 0.16, D * 1.20, K.woodPale, { y: bY });
+  b.box(W * 1.16, 0.14, 0.12, K.woodDark, { y: bY + 0.62, z: D * 0.60 });
+  b.box(W * 1.16, 0.14, 0.12, K.woodDark, { y: bY + 0.62, z: -D * 0.60 });
+  for (let i = 0; i < 7; i++) {
+    const x = (i / 6 - 0.5) * W * 1.10;
+    b.box(0.09, 0.62, 0.09, K.woodDark, { x, y: bY + 0.31, z: D * 0.60 });
+  }
 
   // Roof: wide eaves, shallow-ish pitch, warm tile.
-  const rw = W * 1.20, rd = D * 1.34, rh = rng.float(2.4, 3.2);
+  // Eaves pulled right in (1.16/1.30 -> 1.05/1.12). The old overhang was wider
+  // than the balcony below it, so the deck, the rail and the whole timber upper
+  // storey were hidden and the house read as a roof sitting on a plinth.
+  const rw = W * 1.05, rd = D * 1.12, rh = rng.float(1.9, 2.4);
   const top = plinth + h1 + h2;
   b.gable(rw, rh, rd, K.roofTile, { y: top });
-  // Ridge cap and a darker gable end give the roof plane two values, so it does
-  // not read as one flat lozenge from directly above.
-  b.box(rw * 1.01, 0.22, 0.5, K.roofDark, { y: top + rh - 0.08 });
-  // Chimney.
-  b.box(0.85, 2.0, 0.85, K.stone, { x: W * rng.float(-0.30, 0.30), y: top + rh * 0.55, z: D * 0.16 });
+  const pitch = Math.atan2(rh, rd / 2);
+  // Shingle courses: two darker bands lying across each slope. They sit a few
+  // centimetres proud, so from above the roof reads as a shingled plane with a
+  // repeating rhythm instead of one poster-flat lozenge.
+  for (const side of [1, -1]) {
+    for (const t of [0.34, 0.68]) {
+      b.box(rw * 0.99, 0.09, 0.34, K.roofCourse, {
+        y: top + rh * (1 - t) + 0.07,
+        z: side * (rd / 2) * t,
+        rx: side * pitch,
+      });
+    }
+    // Fascia along the eave — a rim, so the roof has an edge rather than just
+    // stopping. Plus three purlin ends poking out beyond it.
+    // Mid timber, not woodDark. At near-black a 26 cm fascia became a hard
+    // black bar running the width of the house — the heaviest line in the frame.
+    b.box(rw * 1.02, 0.24, 0.16, K.wood, { y: top - 0.12, z: side * rd * 0.5 });
+    for (const f of [-0.32, 0, 0.32]) {
+      b.box(0.16, 0.16, 0.5, K.wood, { x: rw * f, y: top - 0.06, z: side * (rd * 0.5 + 0.16) });
+    }
+  }
+  // Ridge beam, and its two ends projecting past the gables.
+  b.box(rw * 1.06, 0.24, 0.44, K.roofDark, { y: top + rh - 0.09 });
+  // Chimney: stone stack with a pale cap.
+  const cx = W * rng.float(-0.28, 0.28);
+  b.box(0.72, 2.0, 0.72, K.stone, { x: cx, y: top + rh * 0.55, z: D * 0.16 });
+  b.box(0.94, 0.18, 0.94, K.stoneDark, { x: cx, y: top + rh * 0.55 + 1.05, z: D * 0.16 });
 
   return { geo: b.build(), r: Math.max(rw, rd) * 0.45, height: top + rh };
 }
@@ -84,28 +133,50 @@ function chalet(rng, K, o = {}) {
 /** Open-fronted timber woodshed with a stacked log wall. */
 function woodshed(rng, K) {
   const b = new GeoBuilder();
-  const W = rng.float(4.0, 5.4), D = rng.float(2.8, 3.6), H = rng.float(2.2, 2.7);
-  // Deck and back wall in `wood`, not `woodDark`. Seen from a 50 degree camera
-  // the shed is mostly roof and back wall, and in woodDark those two read as
-  // one black rectangle lying in the grass beside a lit chalet.
+  const W = rng.float(3.4, 4.4), D = rng.float(2.4, 3.0), H = rng.float(2.0, 2.4);
+  // ROUND 4. This shed was reading in the hero frame as a ROOF FLOATING IN THE
+  // GRASS: the mono-pitch slab overhung by 16% and 24% on a building whose only
+  // other mass was four 26 cm posts, so from above the roof hid everything that
+  // held it up. The overhang is now a hand's width, the two ends are boarded so
+  // the shed has visible sides, and the log stack fills the opening — the
+  // building reads as a solid object with a lid on it.
   b.box(W, 0.3, D, K.wood, { y: 0.15 });
-  for (const sx of [-1, 1]) b.box(0.26, H, 0.26, K.wood, { x: sx * (W / 2 - 0.2), y: H / 2, z: -D / 2 + 0.2 });
-  for (const sx of [-1, 1]) b.box(0.26, H * 0.86, 0.26, K.wood, { x: sx * (W / 2 - 0.2), y: H * 0.43, z: D / 2 - 0.2 });
-  b.box(W, H * 0.9, 0.3, K.wood, { y: H * 0.45, z: -D / 2 + 0.1 });
-  // Mono-pitch roof, tilted toward the open front.
-  b.box(W * 1.16, 0.22, D * 1.24, K.roofDark, { y: H + 0.1, rx: 0.20 });
+  b.box(W, H * 0.94, 0.26, K.wood, { y: H * 0.47, z: -D / 2 + 0.1 });       // back wall
+  for (const sx of [-1, 1]) {                                               // boarded ends
+    b.box(0.22, H * 0.92, D * 0.96, K.woodPale, { x: sx * (W / 2 - 0.1), y: H * 0.46 });
+  }
+  for (const sx of [-1, 1]) b.box(0.20, H * 0.80, 0.20, K.wood, { x: sx * (W / 2 - 0.3), y: H * 0.40, z: D / 2 - 0.18 });
+  // Mono-pitch roof, tilted toward the open front. Two boards, not one slab.
+  // Weathered GREY shingle, not the chalet's tile. Two maroon lozenges lying in
+  // the same patch of grass was most of why the shed read as a second, floating
+  // roof rather than as an outbuilding.
+  b.box(W * 1.06, 0.20, D * 1.10, K.shedRoof, { y: H + 0.12, rx: 0.20 });
+  // Three battens across the fall of the roof. Without them the mono-pitch is
+  // one unbroken rectangle, which is the shape that read as "floating slab".
+  for (const f of [-0.32, 0, 0.32]) {
+    b.box(W * 1.07, 0.09, 0.20, K.shedRoofDark, { y: H + 0.14 + f * -0.20 * 1.02, z: D * 1.10 * f, rx: 0.20 });
+  }
+  b.box(W * 1.07, 0.10, 0.26, K.wood, { y: H + 0.30, z: -D * 0.34, rx: 0.20 });
+  b.box(W * 1.07, 0.16, 0.16, K.wood, { y: H - 0.02, z: D * 0.56, rx: 0.20 });
   // Log ends — a stack of short cylinders facing out is unmistakable at
   // any distance and sells the building as lived-in.
   const rows = 3, cols = 5;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      b.cyl(0.22, 0.22, D * 0.7, 5, r % 2 ? K.woodPale : K.dead, {
+      b.cyl(0.20, 0.20, D * 0.72, 5, r % 2 ? K.woodPale : K.dead, {
         rx: Math.PI / 2,
-        x: -W * 0.34 + (c / (cols - 1)) * W * 0.68 + rng.float(-0.05, 0.05),
-        y: 0.42 + r * 0.46,
-        z: 0.1,
+        x: -W * 0.32 + (c / (cols - 1)) * W * 0.64 + rng.float(-0.04, 0.04),
+        y: 0.44 + r * 0.42,
+        z: 0.08,
       });
     }
+  }
+  // Two logs rolled out onto the grass. Nothing sells a yard like clutter.
+  for (let i = 0; i < 2; i++) {
+    b.cyl(0.20, 0.22, rng.float(1.2, 1.8), 5, K.dead, {
+      rz: Math.PI / 2, ry: rng.float(0, 3.14),
+      x: rng.float(-W * 0.3, W * 0.3), y: 0.20, z: D * rng.float(0.62, 0.85),
+    });
   }
   return { geo: b.build(), r: Math.max(W, D) * 0.6, height: H + 0.4 };
 }
@@ -178,6 +249,15 @@ export function createLandmarks(ctx) {
     // stoneDark the woodshed's mono-pitch roof read as a black rectangle
     // dropped on the grass.
     roofDark: tile.clone().lerp(P.stoneDark, 0.18),
+    // Outbuildings get weathered grey board, so the yard has two roof
+    // materials rather than two copies of the same lozenge.
+    // Grey, genuinely. Two thirds rock plus a lick of pale timber came out a
+    // warm tan indistinguishable from the walls under it.
+    shedRoof: P.rock.clone().lerp(P.plaster, 0.34),
+    shedRoofDark: P.rockDark.clone().lerp(P.rock, 0.40),
+    // Shingle courses: a step down from the tile, not a black gap. At full
+    // roofDark the two bands read as slots cut through the roof.
+    roofCourse: tile.clone().lerp(P.stoneDark, 0.30),
   };
   const wl = B.waterLevel ?? 0;
   const half = (B.size / 2) * 0.92;
@@ -243,10 +323,11 @@ export function createLandmarks(ctx) {
     const p = pts[i];
     const nx = -p.tz, nz = p.tx;
     for (const side of rng.bool(0.5) ? [1, -1] : [-1, 1]) {
-      // Pulled in from 24-46 m. A chalet 46 m off the road is outside the hero
-      // frame at this camera height; the reference's buildings sit close enough
-      // that the road and the yard share the shot.
-      const off = rng.float(26, 38);
+      // Pushed back out to 34-50 m. At 26-38 the house filled an eighth of the
+      // hero frame and became its subject; the reference's buildings sit IN the
+      // landscape, close enough to share the shot with the road but never
+      // competing with the car for the eye.
+      const off = rng.float(34, 50);
       const x = p.x + nx * side * off;
       const z = p.z + nz * side * off;
       if (Math.abs(x) > half || Math.abs(z) > half) continue;
