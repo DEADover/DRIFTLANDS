@@ -13,6 +13,11 @@ if (shotId) {
   const preset = PRESETS[shotId];
   if (!preset) throw new Error(`Unknown capture preset: ${shotId}`);
 
+  // The title overlay must never appear in a capture: its darkening gradient
+  // lands on every pixel and silently wrecks every measurement taken from the
+  // shot. (It cost one round's readings before this was spotted.)
+  document.getElementById('title')?.remove();
+
   const showHud = params.get('hud') !== '0';
   const game = new Game(container, showHud ? uiRoot : null, { capture: true });
   window.__GAME = game;
