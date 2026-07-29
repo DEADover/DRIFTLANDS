@@ -96,18 +96,24 @@ const FRAG = /* glsl */ `
     if (vA <= 0.002) discard;
     float au = abs(vU);
 
-    // Solid contact patch with soft shoulders — a tyre print, not a stroke.
-    float body = 1.0 - smoothstep(0.64, 1.0, au);
+    // Crisp rut with a hard-ish edge. The old shoulder ran from 0.64 to 1.0 —
+    // over a third of the ribbon was a fade, which is what made these read as
+    // airbrushed stripes rather than tracks scratched into a dirt road.
+    float body = 1.0 - smoothstep(0.74, 1.02, au);
+    // Deepest in the middle of the contact patch, so the rut has a dark spine.
+    float dig = 1.0 - 0.28 * (1.0 - smoothstep(0.0, 0.55, au));
     // Two grooves across the patch.
-    float ribs = 0.86 + 0.14 * cos(vU * 12.566);
+    float ribs = 0.90 + 0.10 * cos(vU * 12.566);
     // Longitudinal grain so the mark is never a flat slab of colour.
-    float grain = 0.93 + 0.07 * sin(vV * 2.3 + vU * 3.0);
-    // Displaced material banked up at the shoulders (dirt / snow).
-    float berm = smoothstep(0.58, 0.90, au) * (1.0 - smoothstep(0.94, 1.06, au));
+    float grain = 0.88 + 0.12 * sin(vV * 2.9 + vU * 3.0);
+    // Displaced material banked up at the shoulder. Confined to a THIN line at
+    // the very edge: a wide pale berm was bleaching the road to a cool grey
+    // stripe, the opposite of disturbed warm soil.
+    float berm = smoothstep(0.80, 0.97, au) * (1.0 - smoothstep(1.00, 1.10, au));
     float bw = clamp(berm * vBermStr, 0.0, 1.0);
 
-    vec3 col = mix(vCore * ribs * grain, vBerm, bw);
-    float a = vA * clamp(body + bw * 0.7, 0.0, 1.0);
+    vec3 col = mix(vCore * dig * ribs * grain, vBerm, bw);
+    float a = vA * clamp(body + bw * 0.5, 0.0, 1.0);
     if (a <= 0.003) discard;
 
     col = mix(col, uFogCol, vFog * 0.9);
@@ -119,6 +125,7 @@ const FRAG = /* glsl */ `
 
 const MIN_STEP = 0.5;      // metres between ribbon segments
 const N_RIBBONS = 4;       // rear-right, rear-left, front-right, front-left
+const NOMARK = false;      // diagnostic: flip to true to shoot a mark-free plate
 
 export class SkidMarks {
   constructor({ maxQuads = 10000 } = {}) {
@@ -242,11 +249,12 @@ export class SkidMarks {
     // Width and opacity both ride slip: the mark fattens into the apex.
     const s0 = (Math.sin(this._dist[idx] * 0.9 + salt * 12.9898) + 1) * 0.5;
     const s1 = (Math.sin(this._dist[idx] * 1.7 + salt * 78.233) + 1) * 0.5;
-    // A tyre is ~0.25 m wide. From 180 m up it needs a little exaggeration to
-    // read at all, but not much — the old width painted a 2 m band per wheel,
-    // which composited into a pale smear longer than the dust plume.
-    const hw = (0.30 + e * 0.30) * widthMul * (0.90 + 0.20 * s0);
-    const alpha = Math.min(0.72, (0.26 + e * 0.50) * alphaMul * (0.86 + 0.28 * s1));
+    // A tyre is ~0.25 m wide. In the reference the ruts on a dirt road are
+    // hairlines — barely wider than the tyre — and they read because they are
+    // DARK and CRISP, not because they are broad. So: narrow and opaque beats
+    // wide and faint. A hard slide still widens the mark, just from a thinner base.
+    const hw = (0.15 + e * 0.16) * widthMul * (0.92 + 0.16 * s0);
+    const alpha = Math.min(0.80, (0.26 + e * 0.50) * alphaMul * (0.86 + 0.28 * s1));
 
     const v0 = this._dist[idx];
     this._dist[idx] += d;
@@ -279,7 +287,7 @@ export class SkidMarks {
     const style = st.surf;
 
     const speedF = THREE.MathUtils.clamp((f.speed - 3.0) / 15, 0, 1);
-    if (speedF <= 0) { this._last.fill(null); return; }
+    if (speedF <= 0 || NOMARK) { this._last.fill(null); return; }
 
     // On loose ground a tyre leaves a track just by rolling; on tarmac only
     // real slip makes rubber.
@@ -308,9 +316,12 @@ export class SkidMarks {
       const src = styleForSurface(s);
       core[s].copy(src.markCore);
       // Nudge the groove toward a darker version of THIS world's ground so a
-      // mark always reads as displaced material, never as imported paint.
+      // mark always reads as displaced material, never as imported paint. Only
+      // a little on loose surfaces: the hemisphere ground colour is green in an
+      // alpine world, and pulling 30% of that into the rut turned a warm brown
+      // track into a cool olive stripe on an ochre road.
       this._c.copy(env.groundColor).multiplyScalar(0.62);
-      core[s].lerp(this._c, s === SURF.TARMAC ? 0.08 : 0.30);
+      core[s].lerp(this._c, s === SURF.TARMAC ? 0.08 : 0.12);
       berm[s].copy(src.markBerm);
       bstr[s] = src.bermStrength;
     }
