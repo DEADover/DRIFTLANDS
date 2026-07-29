@@ -116,7 +116,7 @@ function fir(rng, K, o = {}) {
   // has to stay a little above `dropK` or the tips of one skirt hang below the
   // shoulder of the next one down and the stack closes into a smooth cone. The
   // ratio that reads as "rows of drooping points" is about 1.15.
-  const stepK = o.stepK ?? rng.float(0.48, 0.56);
+  const stepK = o.stepK ?? rng.float(0.44, 0.52);
   const rad = [];
   const r0 = rng.float(2.20, 2.70) * wide;
   for (let i = 0; i < tiers; i++) {
@@ -158,12 +158,28 @@ function fir(rng, K, o = {}) {
     // the tier's own. Measured on target_01's fir at 8x, one skirt spans
     // #2a4d22 to #86b054 — a factor of three in luminance.
     const t = tiers > 1 ? i / (tiers - 1) : 1;
-    const ci = Math.min(NR - 2, Math.floor(t * (NR - 1) * 0.82));
+    /**
+     * THE VERTICAL GRADIENT, and it is the other half of "reads as a lit volume".
+     *
+     * The tier ramp gives a fir its light-and-dark WITHIN a row; this gives it
+     * light and dark DOWN THE TREE, and side by side with target_01 that is the
+     * more obvious of the two. A reference fir's bottom third is almost entirely
+     * #172e17 — the single most common colour in its frame, 9.4% of pixels, and
+     * ours held 4.6% — while its top third carries the yellow-green highlight.
+     * Ours stepped through four rungs of `leafRamp` that span a factor of 1.4 in
+     * total, which is not a gradient, it is a rounding error.
+     *
+     * `t*t` rather than `t`, because the dark part of a reference fir is the
+     * bottom HALF, not the bottom eighth: a linear ramp put the midpoint colour
+     * at mid-height and the skirt never got dark.
+     */
+    const body = K.leafShade.clone().lerp(K.leafRamp[NR - 2], 0.10 + 0.90 * t * t);
+    const litc = K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.25 + 0.75 * t);
     b.push(0, y, 0, rng.float(0, Math.PI * 2));
     b.rawLit(
       firFrond(r, r * (o.crownK ?? 0.31), dropK * r * tall, seg,
         { inner: o.inner, notch: o.notch, notchK: o.notchK }, rng),
-      K.leafRamp[ci], K.leafSun,
+      body, litc,
       /**
        * THE RAMP WINDOW IS SOLVED FROM THE GEOMETRY, not tuned by eye.
        *
@@ -179,7 +195,23 @@ function fir(rng, K, o = {}) {
        * way to the BODY colour, which is why a tier with three geometric bands
        * still rendered as one green: the ramp was reading them all as "up".
        */
-      { t0: 0.20, t1: 0.86, low: K.leafShade, l0: -0.02 },
+      /**
+       * THE WINDOW IS SOLVED FROM AN AREA-WEIGHTED normal.y HISTOGRAM of the
+       * actual geometry (scratch/nyhist.mjs), not tuned by eye. For a `fir`:
+       *
+       *     ny   0.0   0.1   0.2   0.3   0.4   0.5   0.6   0.7   0.8
+       *     %   11.6   3.9   6.9   2.2  10.0  18.5  15.3  26.7   2.5
+       *
+       * i.e. the notch walls sit at 0.0 and nothing at all reaches 0.9 — so a
+       * window ending at t1 0.86 put 29% of the tree's AREA at 83-98% of the way
+       * to the lit rung, and the whole canopy went a stop bright: frame mean luma
+       * 0.380 -> 0.404 against a 0.379 target, and % dark 33.1 -> 24.4. Ending
+       * the ramp at 1.00 (above anything the geometry produces) makes the lit
+       * rung a highlight again, and starting it at 0.35 with l0 at 0 hands the
+       * whole 0.0-0.3 population — 24% of the area — to the shadow rung, which is
+       * where the reference's missing #172e17 lives.
+       */
+      { t0: 0.35, t1: 1.00, low: K.leafShade, l0: 0.0 },
     );
     b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.

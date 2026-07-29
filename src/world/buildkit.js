@@ -558,6 +558,21 @@ export function firFrond(r, hUp, drop, seg, o = {}, rng) {
    * camera, which is wasted geometry, so it stays at or just above 1.
    */
   const notch = o.notch ?? inner * Math.cos(Math.PI / half) * (o.notchK ?? 1.02);
+  /**
+   * NEGATIVE RESULT, KEPT SO IT IS NOT TRIED AGAIN. Solving the notch radius for
+   * a vertical (darkest) wall pins it just inside the shoulder ring, so the
+   * tier's plan outline is a star with points at r and valleys at ~0.31r, and in
+   * the frame that reads as a thin spiky rosette rather than the broad dense cone
+   * the reference has. The obvious fix — an extra "hem" vertex out at 0.86r
+   * between two flap tips, to fill the V — does not work in this topology: the V
+   * between two tips is ALREADY closed by the two flap facets that meet at the
+   * notch vertex, so the hem triangles double-cover the flaps, and being lower
+   * than the notch they wind inward. Shot, that put 7.3% of the frame in the
+   * bottom luma bucket against the reference's 0.9% and printed 5.3% of it as
+   * #171717. Filling the plan outline needs a THIRD RING (shoulder -> mid -> tip)
+   * so the frill curls, which is 4*seg per tier instead of 2*seg — affordable
+   * only if the conifer count comes down with it.
+   */
   const spin = o.spin ?? 0;
   const A = [0, hUp, 0];
   const I = [], O = [];
