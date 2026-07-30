@@ -49,6 +49,7 @@ const report = await page.evaluate(async ({ only, driven }) => {
   const out = {};
   const want = (k) => !only || only === k;
   if (want('sink')) out.sink = P.auditSink(g);
+  if (want('lateral')) out.lateral = P.auditLateral(g);
   if (want('solidity')) out.roadSolidity = P.auditRoadSolidity(g);
   if (want('feet')) out.barrierFeet = P.auditBarrierFeet(g);
   if (want('guards')) out.cornerGuards = P.auditCornerGuards(g);
@@ -100,6 +101,15 @@ if (report.driven) {
   line('DRIVEN — wheel bottom vs drawn surface, along the line the car really takes');
   line(`  samples ${d.samples}   mean ${f(d.all.mean)}   p95 ${f(d.all.p95)}   MAX ${f(d.all.max)}`);
   line(`  over 0.10 m ${f(d.over['0.10'], 1)}%   over 0.25 m ${f(d.over['0.25'], 1)}%`);
+}
+
+if (report.lateral) {
+  line('');
+  line('LATERAL — sink as a function of distance from the centre line');
+  line('    u(m)     n     mean     p95      max   surface-mismatch');
+  for (const r of report.lateral.rows) {
+    line(`  ${String(r.u).padStart(5)} ${String(r.n).padStart(6)}  ${f(r.mean)}  ${f(r.p95)}  ${f(r.max)}   ${f(r.mismatch, 1)}%`);
+  }
 }
 
 if (report.roadSolidity) {

@@ -365,6 +365,48 @@ export function auditRoadSolidity(game, { stations = 500 } = {}) {
 }
 
 /**
+ * ACROSS THE ROAD, NOT ALONG IT.
+ *
+ * The sink audit walks the racing line, so it never leaves the carriageway. But
+ * the specific report was "the car is at the EDGE of the road and it still falls
+ * through", and the edge is where the crown, the verge, the earthworks and the
+ * bare terrain all have to hand over to one another. Each handover is a place
+ * the query and the mesh can part company.
+ *
+ * So: sweep laterally at every station and report the disagreement as a
+ * function of distance from the centre line. A clean road is flat near zero and
+ * stays flat all the way out; a bad handover shows as a spike at one offset.
+ */
+export function auditLateral(game, { stations = 300, out = 20, step = 1.0 } = {}) {
+  const surf = makeRaycastSurface(game.scene);
+  const bins = new Map();
+  for (let i = 0; i < stations; i++) {
+    const s = game.roads.sample(i / stations);
+    if (!s) continue;
+    const rx = Math.sin(s.heading), rz = Math.cos(s.heading);
+    for (let u = -out; u <= out; u += step) {
+      const x = s.x + rx * u, z = s.z + rz * u;
+      const d = surf(x, z);
+      if (!d) continue;
+      const q = game.groundAt(x, z);
+      const key = Math.round(u);
+      if (!bins.has(key)) bins.set(key, []);
+      bins.get(key).push({
+        sink: d.y - q.height, drawn: d.kind,
+        phys: q.onBridge ? 'bridge' : q.onRoad ? 'road' : 'terrain',
+      });
+    }
+  }
+  const rows = [];
+  for (const [u, list] of [...bins.entries()].sort((a, b) => a[0] - b[0])) {
+    const st = stats(list.map((r) => r.sink));
+    const mism = pct(list.filter((r) => r.drawn !== r.phys).length, list.length);
+    rows.push({ u, n: st.n, mean: st.mean, p95: st.p95, max: st.max, mismatch: mism });
+  }
+  return { rows };
+}
+
+/**
  * WHERE ARE THE WHEELS, ACTUALLY?
  *
  * Everything else here measures the height FUNCTIONS. This measures the scene
