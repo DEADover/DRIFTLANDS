@@ -10,6 +10,8 @@
  *   setPlace(name)                       -> plays the title card
  *   update(vehicle, driftScore, ctx)     -> ctx = { surface, feel }
  *   setVisible(on)
+ *   setRace(model)                       -> live lap counter / lap clock
+ *                                           (core/race.js calls it; see below)
  *
  * Everything animates off a DETERMINISTIC clock (game.simTime) rather than
  * wall-clock CSS transitions, so a capture preset renders the exact same frame
@@ -18,6 +20,8 @@
  * Screenshot mode: press H to hide the entire overlay. M toggles the route
  * ribbon. Both are pure view state; nothing else observes them.
  */
+
+import { fmtTime } from './results.js';
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const seg = (t, a, b) => clamp01((t - a) / (b - a));
@@ -81,6 +85,11 @@ export class Hud {
       help: q('[data-help]'),
       traceWrap: q('.traceWrap'),
       odo: q('[data-odo]'),
+      race: q('[data-race]'),
+      rLap: q('[data-rlap]'),
+      rClock: q('[data-rclock]'),
+      rLast: q('[data-rlast]'),
+      rBest: q('[data-rbest]'),
     };
 
     // gear numerals — a ladder of digits reads instantly and stays typographic
@@ -546,6 +555,44 @@ export class Hud {
     this.visible = !!on;
     this.el.hud.style.opacity = this.visible ? '1' : '0';
   }
+
+  // ---------------------------------------------------------------- race clock
+  /**
+   * LAP COUNTER AND LAP CLOCK — pushed by core/race.js, once per frame.
+   *
+   * Additive: it owns one previously empty region of the overlay (top centre,
+   * between the place card and the score stats) and touches nothing else. The
+   * HUD does not know what a lap is and does not count one — it is handed
+   * `race.model()` and prints it.
+   *
+   * Written straight to the DOM with no easing. Everything else here is
+   * animated off game.simTime, but a running clock IS the sim time: smoothing
+   * it would put a number on screen that disagrees with the number the results
+   * table will show, and at a tenth of a second that reads as a bug.
+   */
+  setRace(m) {
+    const el = this.el;
+    if (!el.race || !m) return;
+    el.race.style.opacity = '1';
+
+    const lapTxt = m.state === 'finished'
+      ? 'FINISHED'
+      : m.state === 'staging'
+        ? 'TO THE LINE'
+        : `LAP ${m.lap} / ${m.lapsTotal}`;
+    if (lapTxt !== this._rLapTxt) { this._rLapTxt = lapTxt; el.rLap.textContent = lapTxt; }
+
+    const clock = m.state === 'finished'
+      ? fmtTime(m.totals.time)
+      : fmtTime(m.state === 'staging' ? 0 : m.lapTime);
+    if (clock !== this._rClockTxt) { this._rClockTxt = clock; el.rClock.textContent = clock; }
+
+    const last = m.laps.length ? fmtTime(m.laps[m.laps.length - 1].time) : '—';
+    const bestLap = m.laps.find((l) => l.n === m.totals.best);
+    const best = bestLap ? fmtTime(bestLap.time) : '—';
+    if (last !== this._rLastTxt) { this._rLastTxt = last; el.rLast.textContent = last; }
+    if (best !== this._rBestTxt) { this._rBestTxt = best; el.rBest.textContent = best; }
+  }
 }
 
 /** 1234567 -> 1 234 567. Thin groups read better than commas at display size. */
@@ -658,6 +705,44 @@ const TEMPLATE = `
   .hud .stats .row + .row { margin-top:calc(5px * var(--s)); }
   .hud .stats .row + .row b { font-size:calc(14px * var(--s)); opacity:.72; }
   .hud .stats .row + .row i { opacity:.44; }
+
+  /* ------------------------------------------------------------- race clock */
+  /* Top centre — the one region of the overlay that was empty. Centred on the
+     frame, not on the car, so it never fights the drift number (bottom centre)
+     or the place card (top left). Same label/figure pairing as .stats. */
+  /* NO CSS TRANSITION. The rest of this overlay animates off game.simTime for
+     one reason — a wall-clock fade is caught halfway through by the screenshot
+     harness — and the first draft of this block proved it: the capture at t=3
+     came back with a ghost lap clock at about 15% opacity. Opacity here is
+     written directly, or not at all. */
+  /* Hidden until core/race.js pushes a model. A build with no race wired —
+     every capture preset today — must look exactly as it did before. */
+  .hud .race {
+    position:absolute; left:50%; top:calc(30px * var(--s)); transform:translateX(-50%);
+    text-align:center; opacity:0;
+  }
+  .hud .race i {
+    display:block; font-style:normal;
+    font-size:calc(10px * var(--s)); letter-spacing:calc(4.4px * var(--s));
+    font-weight:700; opacity:.88;
+  }
+  .hud .race b {
+    display:block; margin-top:calc(4px * var(--s));
+    font-size:calc(31px * var(--s)); font-weight:700; line-height:1;
+    letter-spacing:calc(-1px * var(--s)); font-variant-numeric: tabular-nums;
+  }
+  .hud .race .split {
+    display:flex; justify-content:center; gap:calc(16px * var(--s));
+    margin-top:calc(7px * var(--s));
+  }
+  .hud .race .split span {
+    font-size:calc(9.5px * var(--s)); letter-spacing:calc(2.6px * var(--s));
+    font-weight:700; opacity:.5;
+  }
+  .hud .race .split span u {
+    text-decoration:none; opacity:.9; padding-left:calc(7px * var(--s));
+    letter-spacing:calc(.4px * var(--s)); font-variant-numeric: tabular-nums;
+  }
 
   /* ---------------------------------------------------------- route  ribbon */
   .hud .traceWrap {
@@ -773,6 +858,15 @@ const TEMPLATE = `
     <div class="row"><i>BEST</i><b data-best>0</b></div>
   </div>
 
+  <div class="race" data-race>
+    <i data-rlap>LAP 1 / 5</i>
+    <b data-rclock>0.00</b>
+    <div class="split">
+      <span>LAST<u data-rlast>&mdash;</u></span>
+      <span>BEST<u data-rbest>&mdash;</u></span>
+    </div>
+  </div>
+
   <div class="traceWrap">
     <canvas class="trace" data-trace width="300" height="300"></canvas>
     <div class="traceCap"><u>LINE</u><b data-odo>0.0 km</b></div>
@@ -794,7 +888,8 @@ const TEMPLATE = `
   <div class="help" data-help>
     <u>W A S D</u><s>drive</s>&nbsp;&nbsp;&nbsp;<u>SPACE</u><s>handbrake</s><br>
     <u>R</u><s>reset</s>&nbsp;&nbsp;<u>M</u><s>map</s>&nbsp;&nbsp;<u>N</u><s>mute</s>&nbsp;&nbsp;<u>H</u><s>hide</s><br>
-    <u>[ ]</u><s>track</s>&nbsp;&nbsp;<u>P</u><s>pause</s>&nbsp;&nbsp;<u>- =</u><s>volume</s>
+    <u>[ ]</u><s>track</s>&nbsp;&nbsp;<u>P</u><s>pause</s>&nbsp;&nbsp;<u>- =</u><s>volume</s><br>
+    <u>L</u><s>lap times</s>
   </div>
 
   <div class="nowPlaying" data-now></div>

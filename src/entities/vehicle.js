@@ -58,7 +58,14 @@ export const DEFAULT_TUNE = {
   enginePower: 9000,         // N of drive force at full throttle, low speed
   topSpeed: 44,              // m/s (~158 km/h) — reads fast at this camera height
   driveBiasRear: 0.66,       // rear-biased AWD: launches hard, still oversteers
+  // 27000 N is the PEDAL, not the deceleration: it is far above what any
+  // surface can hold (tarmac tops out near 20600 N), so the tyres are always
+  // the limit and the number only has to be "more than enough". Raising it does
+  // nothing — measured, tools/brake-test.mjs. What the brake actually needed
+  // was proportioning; see the § BRAKE PROPORTIONING block in `step`.
   brakeForce: 27000,
+  brakeFrontUse: 1.00,       // front may run to its grip limit: front lock understeers, which is safe
+  brakeRearUse: 0.80,        // rear held off its limit so it keeps 63% of its lateral grip, not 24%
   engineBrake: 2600,         // N of overrun drag with the throttle shut
   reverseFactor: 0.30,
   rollingResist: 210,        // N constant
@@ -87,6 +94,18 @@ export const DEFAULT_TUNE = {
   frontGripBias: 1.05,       // front grippier than rear = friendly oversteer
   rearGripBias: 0.97,
   frictionCircle: 0.94,      // how completely longitudinal use eats lateral grip
+  // The front used to get a 0.8 discount on the friction circle, i.e. a braked
+  // FRONT tyre kept 50% of its lateral grip while a braked rear kept 24%. That
+  // makes the front the grippiest end under braking, which is the textbook
+  // recipe for lift-off oversteer — and it is what turned a brake application
+  // at speed into a spin. MEASURED (tools/brake-test.mjs): 40 m/s, 0.2 of
+  // steer, full brake — peak slip 62 deg tarmac / 46 gravel at 0.75, versus
+  // 46 / 21 with the front on the same circle as the rear. Straight-line
+  // stopping is unchanged (it is a lateral term). Do NOT take this to 1.00:
+  // muFlat then hits exactly zero at full brake and the car cannot turn at all
+  // — measured 4 deg of slip, a cliff, not a curve.
+  frictionCircleFront: 0.94,
+  transferMax: 0.42,         // longitudinal weight transfer ceiling, fraction of W
 
   // --- drift controls ------------------------------------------------------
   handbrakeGripMul: 0.24,    // rear mu multiplier under full handbrake
@@ -180,6 +199,14 @@ export class Vehicle {
 
     this._fwd = new THREE.Vector3();
     this._right = new THREE.Vector3();
+
+    // Longitudinal telemetry (see the block that fills it in `step`).
+    this.brakeDiag = {
+      Fzf: 0, Fzr: 0,
+      fxFrontCmd: 0, frontCap: 0, fxFront: 0,
+      fxRearCmd: 0, rearCap: 0, fxRear: 0,
+      drag: 0,
+    };
   }
 
   reset(x = 0, z = 0, heading = 0) {
@@ -399,10 +426,22 @@ export class Vehicle {
     if (throttle > 0) {
       drive = T.enginePower * throttle * Math.max(0, 1 - sr * sr * sr);
     }
-    let brakeF = 0;
+    // Brake force acts along the wheels' ROLLING direction, and `vx` is
+    // body-frame FORWARD speed — so a car sliding at 88 deg has vx near zero
+    // while travelling at 30 m/s. The old test, `vx > 0.4 ? brake : reverse`,
+    // read that as "stopped" and handed the brake key REVERSE THROTTLE at
+    // speed. MEASURED (tools/brake-test.mjs, baseline): braking out of an 85
+    // deg slide from 30 m/s took 5.63 s at 0.53 g, and a stop from a 15 deg
+    // slide ended with the car accelerating BACKWARDS to 17 m/s with the brake
+    // still held. Fade the brake out with forward roll instead of switching on
+    // it, keep its sign so you can also brake while reversing, and only give
+    // reverse throttle to a car that is genuinely at rest.
+    let brakeF = 0, brakeSign = 1;
     if (brake > 0) {
-      if (vx > 0.4) brakeF = T.brakeForce * brake;
-      else reverse = T.enginePower * T.reverseFactor * brake;
+      const roll = clamp(Math.abs(vx) / 1.6, 0, 1);
+      brakeF = T.brakeForce * brake * roll;
+      brakeSign = vx < 0 ? -1 : 1;
+      if (speed < 1.6) reverse = T.enginePower * T.reverseFactor * brake * (1 - roll);
     }
     // Overrun: lifting off should slow the car noticeably, not coast forever.
     // Without this the only way to shed speed is the brake, which is a large
@@ -426,31 +465,82 @@ export class Vehicle {
     // ---- vertical loads with weight transfer -------------------------------
     const L = T.cgToFront + T.cgToRear;
     const W = T.mass * 9.81;
-    const transfer = clamp((T.mass * this._accX * T.cgHeight) / L, -W * 0.42, W * 0.42);
+    const transfer = clamp((T.mass * this._accX * T.cgHeight) / L,
+      -W * T.transferMax, W * T.transferMax);
     const Fzf = Math.max(W * 0.12, W * (T.cgToRear / L) - transfer);
     const Fzr = Math.max(W * 0.12, W * (T.cgToFront / L) + transfer);
 
-    // ---- rear axle: the friction circle is the drift engine ------------------
+    // ---- tyre capacity, per axle -------------------------------------------
     // Longitudinal force is capped by available grip, so snow cannot put the
     // power down and spins its wheels instead — that is what makes a surface
-    // *felt* rather than just a number.
-    const fxRearCmd = (drive - reverse) * T.driveBiasRear - brakeF * 0.38 - hbF;
+    // *felt* rather than just a number. Both caps are needed BEFORE the brake
+    // is split, so they are computed first.
     let muR = muBase * T.rearGripBias;
     muR *= lerp(1, T.handbrakeGripMul, handbrake);
     muR *= 1 - throttle * T.throttleOversteer * smoothstep(4, 16, speed);
     const rearCap = Math.max(1, muR * Fzr);
+    const muF = muBase * T.frontGripBias;
+    const frontCap = Math.max(1, muF * Fzf);
+
+    /**
+     * BRAKE PROPORTIONING — why "braking is too weak" was never about force.
+     *
+     * MEASURED (tools/brake-test.mjs, baseline): a straight-line stop is 1.73 g
+     * on tarmac and 1.33 g on gravel. That is ABOVE a real car (1.0 / 0.65), so
+     * the brake was never short of force. What was broken was that you could
+     * not USE it. Braking from 40 m/s with only 0.2 of steering held reached
+     * 62 deg of slip on tarmac — a spin — and the largest brake input that kept
+     * the car pointed where it was going was 0.16 of the pedal, worth 0.62 g.
+     * The brake key is binary, so in practice the player had NO usable brake at
+     * speed and lifted off instead: engine braking, 0.33 g. That is the "speed
+     * drops too slowly".
+     *
+     * The cause was a fixed 62/38 split against a dynamic load split of 89/11.
+     * At 1.7 g this chassis (cgHeight 0.62 over a 2.60 m wheelbase) throws 41%
+     * of its weight forward, so the rear axle sits on its W*0.12 floor with a
+     * 2183 N capacity — and was commanded 10260 N, 4.7x over. Everything past
+     * the cap was thrown away, and worse, it drove the rear's friction-circle
+     * use to a hard 1.0, leaving muRlat = mu*sqrt(1-0.94) = 24% of the rear's
+     * lateral grip. The brake pedal WAS a handbrake.
+     *
+     * So: split by the load the axle is actually carrying (this is what EBD
+     * does), and hold the rear off its own limit so it keeps a lateral reserve.
+     * At brakeRearUse 0.80 the rear retains sqrt(1-0.64*0.94) = 63% of its
+     * lateral grip instead of 24%, for 3-5% of straight-line stopping distance.
+     *
+     * The HANDBRAKE is deliberately outside all of this. It is the rotation
+     * tool and it must still weld the rear's use to 1.0 — see `hbF` below,
+     * which is added raw. Foot brake stops the car; lever rotates it.
+     */
+    let bF = 0, bR = 0;
+    if (brakeF > 0) {
+      const share = clamp(Fzf / Math.max(1, Fzf + Fzr), 0.5, 0.95);
+      bF = Math.min(brakeF * share, frontCap * T.brakeFrontUse);
+      bR = Math.min(brakeF * (1 - share), rearCap * T.brakeRearUse);
+    }
+
+    // ---- rear axle: the friction circle is the drift engine ------------------
+    const fxRearCmd = (drive - reverse) * T.driveBiasRear - brakeSign * bR - hbF;
     const demandR = Math.abs(fxRearCmd) / rearCap;
     const useR = Math.min(demandR, 1);
     const fxRear = clamp(fxRearCmd, -rearCap, rearCap);
     const muRlat = muR * Math.sqrt(Math.max(0, 1 - useR * useR * T.frictionCircle));
 
     // ---- front axle ---------------------------------------------------------
-    const fxFrontCmd = (drive - reverse) * (1 - T.driveBiasRear) - brakeF * 0.62;
-    const muF = muBase * T.frontGripBias;
-    const frontCap = Math.max(1, muF * Fzf);
+    const fxFrontCmd = (drive - reverse) * (1 - T.driveBiasRear) - brakeSign * bF;
     const useF = clamp(Math.abs(fxFrontCmd) / frontCap, 0, 1);
     const fxFront = clamp(fxFrontCmd, -frontCap, frontCap);
-    const muFlat = muF * Math.sqrt(Math.max(0, 1 - useF * useF * T.frictionCircle * 0.8));
+    const muFlat = muF * Math.sqrt(Math.max(0, 1 - useF * useF * T.frictionCircleFront));
+
+    // Longitudinal diagnostic, for tools/brake-test.mjs. Preallocated: this
+    // runs every physics step and must not allocate. It is the only honest way
+    // to see whether the brake is force-limited or grip-limited, which is the
+    // whole question behind "braking feels weak".
+    const D = this.brakeDiag;
+    D.Fzf = Fzf; D.Fzr = Fzr;
+    D.fxFrontCmd = fxFrontCmd; D.frontCap = frontCap; D.fxFront = fxFront;
+    D.fxRearCmd = fxRearCmd; D.rearCap = rearCap; D.fxRear = fxRear;
+    D.drag = dragMag;
 
     const vyF = vy - this.yawRate * T.cgToFront;
     const vyR = vy + this.yawRate * T.cgToRear;

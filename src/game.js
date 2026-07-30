@@ -21,6 +21,7 @@ import { createAudio } from './audio/audio.js';
 import { createMusic } from './audio/music.js';
 import { Hud } from './ui/hud.js';
 import { resolveCollisions } from './core/collision.js';
+import { createRace } from './core/race.js';
 
 const FIXED_DT = 1 / 120;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -57,6 +58,9 @@ export class Game {
     this.music = createMusic();
 
     this.hud = uiRoot ? new Hud(uiRoot) : null;
+    // Laps, timing and the results table. Owns its own key and overlay; the
+    // shell only has to honour its pause and let it see the car each step.
+    this.race = createRace();
     this.worldGroup = new THREE.Group();
     this.scene.add(this.worldGroup);
 
@@ -186,6 +190,8 @@ export class Game {
       // collision grid never saw one: the boards a car meets when it runs wide
       // out of a hairpin were scenery you drove straight through.
       ...(this.roads.colliders ?? []),
+      // The start gantry's posts and marker boards.
+      ...(this.race.colliders ?? []),
     ];
     this._buildColliderGrid();
     // The barrier set is rebuilt with the roads, so the collision world has to
@@ -216,6 +222,9 @@ export class Game {
 
     const spawn = this.roads.spawn() ?? this.findSpawn();
     this.vehicle.reset(spawn.x, spawn.z, spawn.heading);
+    // The gate is sited from the route, so it can only be built once the roads
+    // and bridges are up; attach re-sites it and resets the ledger.
+    this.race.attach(this);
     this.driftScore = 0;
     if (this.hud) this.hud.setPlace(biome.label);
     this.currentBiome = id;
@@ -700,6 +709,9 @@ export class Game {
   }
 
   update(dt, input) {
+    // PAUSE STOPS THE SIMULATION, NOT THE RENDERER. render() is called from the
+    // frame loop separately, so the world stays on screen behind the table.
+    if (this.race.paused) return;
     const scaled = dt * (this.feel.timeScale ?? 1);
     this.accumulator += Math.min(scaled, 0.1);
     while (this.accumulator >= FIXED_DT) {
@@ -746,6 +758,7 @@ export class Game {
     this.lights.follow(focus);
     this.sky.follow(this.camera.camera.position);
     if (this.hud) this.hud.update(v, this.driftScore, { surface: this.surface, feel: this.feel });
+    this.race.update(this);
   }
 
   render() {

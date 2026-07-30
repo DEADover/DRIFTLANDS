@@ -32,6 +32,21 @@ import * as THREE from 'three';
  * only framing error was scale. Do not widen the lens to "get more perspective":
  * it would overshoot the reference and turn the diorama into a fisheye.
  *
+ * FRAMING DOCTRINE: the car is not the subject, the road ahead is. The focus
+ * point is bounded in NORMALISED DEVICE COORDINATES rather than in metres (see
+ * `_clampOffset`), so `frameY` and `frameX` say where on screen the car is
+ * allowed to sit and the velocity lead pushes it there. Measured over 90 s of
+ * route autopilot, that took the road inside the frustum at 34 m/s from
+ * 42.8 m ahead / 45.5 m behind to 60.8 / 24.1 — from 0.94:1 to 2.53:1.
+ *
+ * Note what is NOT the lever. Biasing the car DOWN the frame is not the same
+ * request: the frame is world-fixed, so "down the frame" is a fixed compass
+ * direction, and for half the route it points at the road already driven. The
+ * lead is car-relative and always points up the road, which is why it is the
+ * only one of the four candidates that moves the ahead:behind number. Pitch and
+ * distance grow the frame ahead AND behind by the same factor and move the
+ * ratio not at all.
+ *
  * MOTION DOCTRINE: unhurried. The focus point rides a critically-damped spring,
  * not a lerp, so it never snaps and never overshoots; the velocity lead and the
  * drift push are smoothed on their own, slower constants so a flick of the
@@ -79,8 +94,49 @@ export class ChaseCamera {
     // middle and most of the picture was the past. It now grows with speed:
     // the faster you go, the further the frame slides ahead and the more of the
     // coming corner you can read.
+    //
+    // Above about 12 m/s these two are NOT the binding constraint any more —
+    // frameY/frameX below are, because 1.75 s of lead is 60 m and the frame can
+    // only hold ~16 m of it. They still set the framing at walking pace, where
+    // the frame is meant to stay poster-centred, and they set how quickly the
+    // frame slides forward as the car gets going.
     this.lookAhead = 0.75;        // at a standstill / low speed
     this.lookAheadFast = 1.75;    // fully applied at `leadFullSpeed`
+    // WHERE THE CAR SITS IN FRAME — the client's note, as a number.
+    //
+    // MEASURED (tools/camera-test.mjs, 90 s of route autopilot at 1/120):
+    // the baseline put the car at ndcY +0.026, i.e. dead centre, and showed
+    // 42.8 m of road ahead against 45.5 m behind at 34 m/s — a ratio of 0.94,
+    // MORE of the road already driven than of the road to come. That is exactly
+    // what the client wrote down.
+    //
+    // These two bound how far the SPRING'S TARGET may sit from the car, in
+    // normalised device coordinates. At speed the look-ahead saturates them, so
+    // they are the framing: the car settles about 0.42 of a half-frame below
+    // centre when it drives up the frame, and 0.52 of a half-frame to the side
+    // when it drives across it. Result, measured over the same 90 s: at 34 m/s
+    // 63.2 m of road ahead against 20.2 m behind, 3.12:1, from 0.94:1.
+    //
+    // 0.42/0.52 and not more. Pushed to 0.58/0.70 with the old hard clamp the
+    // metres stopped moving entirely (60.6 ahead against 60.8) while the car
+    // went to 86% of the way to the frame edge — past this the extra offset
+    // buys frame the road has already left. 3:1 is also as far as this should
+    // go for a reason that is not measurable: at 4:1 the dust plume, the skid
+    // marks and the corner you just took are all out of shot, and a top-down
+    // rally game where you cannot see what you just did is missing half of it.
+    this.frameY = 0.42;
+    this.frameX = 0.52;
+    // The emergency leash, applied to the spring's OUTPUT. It must stay well
+    // clear of the framing box, because a positional constraint that engages on
+    // ordinary frames sawtooths: MEASURED, the worst frame-to-frame focus
+    // acceleration on shake-free frames is 0.00400 m/frame^2 for the baseline
+    // camera, 0.261 with the framing enforced as a hard clamp, 0.084 with this
+    // box at 0.78/0.86 (still catching normal corners), and 0.00677 here, where
+    // it only ever catches a spin or a shunt. The car still cannot leave the
+    // frame: 0.93 of a half-frame plus the car's ~0.03 of half-width is 0.96,
+    // and the 8-corner test measures 0 clipped frames in 10800.
+    this.reachY = 0.86;
+    this.reachX = 0.93;
     this.leadFullSpeed = 34;      // m/s at which the fast lead is reached
     this.leadSmooth = 1.5;        // how lazily the lead itself responds
     // Back to 3.4 deliberately. A softer focus spring lags the target more the
@@ -104,6 +160,8 @@ export class ChaseCamera {
     this._desiredFocus = new THREE.Vector3();
     this._lead = new THREE.Vector3();
     this._tmp = new THREE.Vector3();
+    this._before = new THREE.Vector3();
+    this._velS = new THREE.Vector3();     // eased velocity, for the lag feed-forward
     this._shake = new THREE.Vector3();
     this._push = 0;
     this.shakeAmount = 0;
@@ -124,6 +182,45 @@ export class ChaseCamera {
   }
 
   /**
+   * Clamp a ground-plane focus offset so that the CAR lands inside a box in
+   * normalised device coordinates. Mutates and returns `off` (y is ignored).
+   *
+   * The camera's ground frame at heading `yaw`: it stands at
+   * focus + (cos yaw, ., sin yaw) * horiz, so the direction AWAY from the
+   * camera — up the screen — is U = (-cos yaw, -sin yaw), and the camera's
+   * right is R = (sin yaw, -cos yaw). Writing the offset as fz along U and fx
+   * along R, and putting the car and the focus at the same ground height (which
+   * is what game.js hands us), the projection is exactly
+   *
+   *     depth = d - fz*cos(pitch)          (view-space depth of the car)
+   *     ndcY  = -fz*sin(pitch) / (depth * ty)
+   *     ndcX  = -fx            / (depth * ty * aspect)      ty = tan(fov/2)
+   *
+   * Inverting ndcY for the limit gives the two bounds on fz — they are NOT
+   * symmetric, because the near edge of the frame is closer to the focus than
+   * the far edge is. fx is then bounded at the depth fz leaves us at.
+   */
+  _clampOffset(off, d, yaw, limY, limX) {
+    const sp = Math.sin(this.pitch), cp = Math.cos(this.pitch);
+    const ty = Math.tan((this.camera.fov * Math.PI) / 360);
+    const ux = -Math.cos(yaw), uz = -Math.sin(yaw);
+    const rx = Math.sin(yaw), rz = -Math.cos(yaw);
+    let fz = off.x * ux + off.z * uz;
+    let fx = off.x * rx + off.z * rz;
+
+    const fzMax = (limY * d * ty) / (sp + limY * ty * cp);          // car pushed DOWN the frame
+    const fzMin = (limY * d * ty) / (limY * ty * cp - sp);          // negative: car pushed UP
+    fz = Math.min(fzMax, Math.max(fzMin, fz));
+
+    const depth = Math.max(1, d - fz * cp);
+    const fxMax = limX * depth * ty * this.camera.aspect;
+    fx = Math.min(fxMax, Math.max(-fxMax, fx));
+
+    off.set(ux * fz + rx * fx, 0, uz * fz + rz * fx);
+    return off;
+  }
+
+  /**
    * @param {{position: THREE.Vector3, velocity: THREE.Vector3, heading: number, lateralSlip: number}} car
    */
   update(dt, car, opts = {}) {
@@ -131,30 +228,62 @@ export class ChaseCamera {
     const step = Math.min(dt, 1 / 30);
     RENDER_CLOCK.t += step;
 
+    // The zoom-out has to be known BEFORE anything is clamped against the frame.
+    // This block used to sit at the bottom, and both clamps below were written
+    // against `this.distance` — the BASE 78 — while the camera at speed is
+    // actually 110 m out. The frame they were protecting was 30% smaller than
+    // the real one, so the look-ahead was cut to 14.4 m at every speed. That
+    // single line is most of why the client sees the car in the middle of the
+    // frame: at 34 m/s the spring's own lag (2v/omega, ~20 m) is larger than
+    // the lead the clamp allowed, so the net offset was about zero.
+    // Ease the speed that drives the zoom, not the zoom itself: distance then
+    // moves on a signal that has no steps in it, whatever the physics does.
+    const sN = Math.min(speed / 42, 1);
+    this._speedEase = this._speedEase === undefined
+      ? sN
+      : this._speedEase + (sN - this._speedEase) * (1 - Math.exp(-this.speedEase * dt));
+    const distance = this.distance * (1 + this._speedEase * this.speedWiden) * (opts.zoom ?? 1);
+    const yaw = this.yaw + this.followYaw * car.heading;
+
     // Lead the car by where it is going — but let the lead itself ease in, so
     // stabs of throttle or a spin do not jolt the frame.
     const leadN = Math.min(speed / this.leadFullSpeed, 1);
     const lead = this.lookAhead + (this.lookAheadFast - this.lookAhead) * (leadN * leadN);
-    // Clamp the lead to a fraction of what the frame actually covers, so a fast
-    // straight or a tight corner can never push the car off the edge.
-    const vFovR = (this.camera.fov * Math.PI) / 180;
-    const halfFrame = this.distance * Math.tan(vFovR / 2) * this.camera.aspect;
-    const leadDist = Math.min(speed * lead, Math.max(8, halfFrame * 0.45));
-    const leadScale = speed > 0.01 ? leadDist / speed : 0;
-    this._tmp.set(car.velocity.x * leadScale, 0, car.velocity.z * leadScale);
+    this._tmp.set(car.velocity.x * lead, 0, car.velocity.z * lead);
     this._lead.lerp(this._tmp, 1 - Math.exp(-this.leadSmooth * step));
 
     // Push the frame sideways when sliding so the drift has room to breathe.
     const slip = THREE.MathUtils.clamp(car.lateralSlip ?? 0, -1, 1);
     this._push += (slip - this._push) * (1 - Math.exp(-this.driftSmooth * step));
 
-    this._desiredFocus.copy(car.position).add(this._lead);
+    this._tmp.copy(this._lead);
     if (this.driftPush) {
       const side = Math.sin(car.heading), fwd = Math.cos(car.heading);
       const push = this._push * this.driftPush * 15;
-      this._desiredFocus.x += fwd * push;
-      this._desiredFocus.z -= side * push;
+      this._tmp.x += fwd * push;
+      this._tmp.z -= side * push;
     }
+    // THE FRAMING, applied to the spring's TARGET rather than to its output.
+    //
+    // Clamping the final focus every frame was tried first and measured: the
+    // constraint went active and inactive on alternate frames and the focus
+    // sawtoothed, taking the worst frame-to-frame acceleration of the focus
+    // point from 0.004 to 0.261 m/frame^2 on shake-free frames — a 65x jerk
+    // regression, invisible in the framing numbers and very visible on screen.
+    // Frame the TARGET instead and the spring keeps doing what it is for.
+    this._clampOffset(this._tmp, distance, yaw, this.frameY, this.frameX);
+    this._desiredFocus.copy(car.position).add(this._tmp);
+
+    // ...and cancel the spring's own lag, or the framing above is a lie.
+    // A critically damped spring tracking a target that moves at V settles a
+    // fixed distance BEHIND it: x'' = 0 and x' = V give w^2*e = 2*w*V, so
+    // e = 2V/w. At 34 m/s and stiffness 3.4 that is 20 m — larger than the
+    // whole offset the frame can hold, which is why the baseline camera framed
+    // the car dead centre no matter what the look-ahead asked for. Feeding the
+    // target forward by exactly 2V/w cancels it, and the eased velocity is used
+    // rather than the raw one so a collision cannot inject a step.
+    this._velS.lerp(car.velocity, 1 - Math.exp(-this.leadSmooth * step));
+    this._desiredFocus.addScaledVector(this._velS, 2 / this.stiffness);
 
     if (!this._initialised) {
       this._focus.copy(this._desiredFocus);
@@ -171,36 +300,50 @@ export class ChaseCamera {
     this._focusVel.addScaledVector(this._tmp, step);
     this._focus.addScaledVector(this._focusVel, step);
 
-    // HARD LEASH — the car may never leave the frame.
+    // THE HARD LEASH — the car may never leave the frame.
     //
-    // Clamping the look-ahead was not enough: the focus spring itself lags, and
-    // on a tight corner at speed the car outran the camera. Measured over a
-    // 30 s drive, the car was off-screen for 97 of 3600 frames.
+    // The old leash was one radius in metres, applied in every direction alike.
+    // That is the wrong shape twice over. The frame's footprint on the ground at
+    // pitch 52 / fov 26 is 86 m across but only 63 m deep, and the two halves of
+    // that depth are not equal either (37 m up-screen, 26 m down). One circle
+    // cannot describe it: it strangles a sideways offset, where there is 43 m of
+    // room, and it does not know that pushing the car DOWN the frame runs out at
+    // 26 m. So do it exactly instead. For a focus offset (fx across, fz up the
+    // frame) at camera distance d, the car projects to
     //
-    // So bound the FINAL focus offset from the car, whatever the spring did. The
-    // leash length is derived from what the frame actually covers, so it holds
-    // at any distance or FOV. Bleeding the spring velocity at the same time
-    // stops it fighting the clamp and buzzing against it.
-    const vFovL = (this.camera.fov * Math.PI) / 180;
-    const halfW = this.distance * Math.tan(vFovL / 2) * this.camera.aspect;
-    const leash = Math.max(10, halfW * 0.52);
+    //     ndcY = -fz*sin(pitch) / ((d - fz*cos(pitch)) * tan(fov/2))
+    //     ndcX = -fx           / ((d - fz*cos(pitch)) * tan(fov/2) * aspect)
+    //
+    // which is exact for a car and a focus at the same ground height — which is
+    // what game.js passes us. Inverting it gives a clamp in the units that
+    // matter: WHERE ON SCREEN THE CAR IS. `frameY` is then not a leash length,
+    // it is a guarantee in the units the guarantee is written in, and it holds
+    // at any distance, FOV, aspect or zoom because a half-frame is a half-frame.
+    //
+    // This is the EMERGENCY box (reachY/reachX), not the framing box. The
+    // framing is already done, above, on the spring's target; this only has to
+    // catch a spin, a collision or a respawn — the case the previous round
+    // measured at 97 off-screen frames in 3600. Keeping it wider than the
+    // framing means it almost never fires, which is what keeps it smooth.
+    //
+    // When it does fire, project out only the velocity component pushing
+    // further out of bounds rather than scaling the whole vector: scaling also
+    // bleeds the velocity ALONG the constraint, which buzzes.
     this._tmp.copy(this._focus).sub(car.position);
     this._tmp.y = 0;
-    const off = this._tmp.length();
-    if (off > leash) {
-      this._tmp.multiplyScalar(leash / off);
+    this._before.copy(this._tmp);
+    this._clampOffset(this._tmp, distance, yaw, this.reachY, this.reachX);
+    if (!this._tmp.equals(this._before)) {
       this._focus.set(car.position.x + this._tmp.x, this._focus.y, car.position.z + this._tmp.z);
-      this._focusVel.multiplyScalar(0.6);
+      // outward direction of the violation; kill only the velocity along it
+      this._before.sub(this._tmp);
+      const n = this._before.length();
+      if (n > 1e-6) {
+        this._before.multiplyScalar(1 / n);
+        const along = this._focusVel.dot(this._before);
+        if (along > 0) this._focusVel.addScaledVector(this._before, -along);
+      }
     }
-
-    // Speed widens the frame slightly — reads as acceleration.
-    // Ease the speed that drives the zoom, not the zoom itself: distance then
-    // moves on a signal that has no steps in it, whatever the physics does.
-    const sN = Math.min(speed / 42, 1);
-    this._speedEase = this._speedEase === undefined
-      ? sN
-      : this._speedEase + (sN - this._speedEase) * (1 - Math.exp(-this.speedEase * dt));
-    const distance = this.distance * (1 + this._speedEase * this.speedWiden) * (opts.zoom ?? 1);
 
     // FOV punch, driven by the feel layer.
     const fovWant = this.baseFov + (opts.fovBoost ?? 0);
@@ -216,7 +359,6 @@ export class ChaseCamera {
       this.camera.updateProjectionMatrix();
     }
 
-    const yaw = this.yaw + this.followYaw * car.heading;
     const horiz = Math.cos(this.pitch) * distance;
     const vert = Math.sin(this.pitch) * distance;
 
@@ -230,7 +372,14 @@ export class ChaseCamera {
     this.shakeAmount = Math.max(0, this.shakeAmount - dt * 1.8);
     const s = this.shakeAmount * this.shakeAmount;
     if (s > 0.0001) {
-      const t = performance.now() * 0.001;
+      // RENDER_CLOCK, not performance.now(). The clock at the top of this file
+      // exists precisely so the render layer has a deterministic time, and the
+      // shake was the one thing in here still reading the wall clock — which
+      // made every screenshot after an impact a different picture, and made the
+      // camera's own smoothness unmeasurable: two identical 10800-frame runs
+      // of tools/camera-test.mjs disagreed on the worst per-frame yaw change by
+      // 0.577 vs 0.686 deg purely because the shake landed on different phases.
+      const t = RENDER_CLOCK.t;
       this._shake.set(
         Math.sin(t * 47.3) * s * 1.6,
         Math.sin(t * 39.1 + 2.1) * s * 1.2,
