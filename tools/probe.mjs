@@ -85,7 +85,7 @@ if (report.wheels) {
   const w = report.wheels;
   line('');
   line('WHEEL SEATING — bottom of each tyre vs the triangle under it (>0 = inside the ground)');
-  line(`  samples ${w.samples}   mean ${f(w.all.mean)}   p95 ${f(w.all.p95)}   MAX ${f(w.all.max)}   min ${f(w.all.min)}   over 0.10 m ${f(w.over['0.10'], 1)}%`);
+  line(`  samples ${w.samples}   mean ${f(w.all.mean)}   MEDIAN ${f(w.all.p50)}   p95 ${f(w.all.p95)}   MAX ${f(w.all.max)}   min ${f(w.all.min)}   over 0.10 m ${f(w.over['0.10'], 1)}%`);
   const row = (label, pack) => {
     const cells = ['FL', 'FR', 'RL', 'RR'].map((n) => `${n} ${f(pack[n]?.mean, 3)}`).join('   ');
     line(`    ${label.padEnd(11)} ${cells}`);

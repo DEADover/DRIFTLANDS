@@ -259,6 +259,32 @@ const clamp = THREE.MathUtils.clamp;
 
 /** Tyre radius — must match the CylinderGeometry used to build the wheels. */
 const WHEEL_R = 0.46;
+
+/**
+ * How deep the deepest wheel is allowed to sit before the seating lift reacts.
+ *
+ * Seating to exactly zero sounds right and is not: the lift is a MAXIMUM over
+ * four wheels, so whichever wheel's ground query reads highest raises the other
+ * three with it. While the height query and the drawn mesh still disagree by
+ * about half a metre at wheel spacing, that overpayment showed up as a median
+ * 0.221 m of FLOAT — half a tyre of daylight under a parked car, with the
+ * shadow visibly detached.
+ *
+ * A tolerance buys some of that back for a penetration nobody can see at this
+ * camera height, and the exchange rate is measured:
+ *
+ *   SEAT_TOL   median float   wheel samples deeper than 0.10 m
+ *     0.00       -0.221 m                13.5%
+ *     0.06       -0.168 m                17.1%
+ *     0.15       -0.098 m                27.4%
+ *
+ * 0.06 because the complaint on the table is sinking, not hovering. This whole
+ * constant is a symptom of the query, not a design choice: when roads and
+ * terrain report the surface they actually draw, the four wheels stop
+ * disagreeing by half a metre, the overpayment disappears, and this should come
+ * down to a couple of centimetres.
+ */
+const SEAT_TOL = 0.06;
 /** Scratch vector for per-wheel ground queries; avoids a per-frame allocation. */
 const _wp = new THREE.Vector3();
 
@@ -285,8 +311,8 @@ export class CarView {
     this.root.add(this.chassis);
 
     this.suspension = this.wheels.map(() => 0);
-    /** Low-passed per-wheel ground-seating offset (see update()). */
-    this._seat = [0, 0, 0, 0];
+    /** Low-passed rigid lift that seats the deepest wheel (see update()). */
+    this._seatLift = 0;
     this.wheelSpin = 0;
     this._roll = 0;
     this._pitch = 0;
@@ -365,7 +391,14 @@ export class CarView {
     const gp = pose?.pitch ?? 0;
     const gr = pose?.roll ?? 0;
     this.chassis.rotation.z = this._pitch + gp;
-    this.chassis.rotation.x = this._roll + gr;
+    // The ground ROLL was mirrored too, and it hid behind the pitch error until
+    // that one was fixed. Same test, same evidence: with `+ gr` the four wheels
+    // showed a clean left-to-right gradient (FL +0.114, FR +0.031, RL -0.078,
+    // RR -0.114) that is the algebraic signature of the draw disagreeing with
+    // the ride-height solve about which side of the car the roll lifts. With
+    // `- gr`: p95 0.817 -> 0.546 m, max 1.835 -> 1.510, deeper than 0.10 m
+    // 45.4% -> 39.6%. Better on every aggregate, so it is not a wash.
+    this.chassis.rotation.x = this._roll - gr;
 
     // Body rides on the springs: dive, squat and terrain bounce.
     this._bodyY += (ride - this._bodyY) * k(20);
@@ -394,11 +427,47 @@ export class CarView {
       this.hubs[i].rotation.z = -this.wheelSpin;
     }
 
-    // NOTE: there is deliberately NO per-wheel ground correction here any more.
-    // The chassis is oriented to the plane through the four contact patches, so
-    // each wheel is on the surface by construction. The old correction pass
-    // sampled the ground under each wheel and dragged it back every frame,
-    // which fought this transform and was the source of the sinking.
+    /**
+     * SEAT THE WHOLE CAR, ONCE, AFTER THE TRANSFORM IS FINAL.
+     *
+     * Game.carPose already solves a ride height at which no wheel is under its
+     * ground — but it can only account for the tilt it knows about, the ground
+     * plane. Everything added here is invisible to it: the weight-transfer lean
+     * (up to ±0.30 rad, which at a 0.93 m half-track is ±0.27 m of wheel travel),
+     * the spring ride height, and the per-corner suspension load. Measured, that
+     * is exactly the residual left after the pitch and roll signs were fixed —
+     * about 0.1 m, in the shape of whichever corner was loaded at the time.
+     *
+     * So ask the finished scene graph where the wheels actually ended up, and
+     * lift the ROOT until the deepest one is on the ground. This is not the old
+     * per-wheel correction pass that had to be removed: that one moved each
+     * wheel independently and so fought the chassis transform every frame. This
+     * is a single rigid translation of the entire car, which cannot fight
+     * anything — it changes no angle and no relative position.
+     *
+     * Lift only, never push down: a wheel hanging in space over a crest or a
+     * verge is correct and must stay hanging. Capped, because one bad ground
+     * sample must not launch the car up the screen.
+     */
+    if (sampleHeight) {
+      this.root.updateMatrixWorld(true);
+      let lift = 0;
+      for (let i = 0; i < 4; i++) {
+        this.wheels[i].getWorldPosition(_wp);
+        const need = sampleHeight(_wp.x, _wp.z) - (_wp.y - WHEEL_R) - SEAT_TOL;
+        if (need > lift) lift = need;
+      }
+      if (lift > 0) {
+        // Smoothed, or facet-to-facet steps in the mesh arrive as a jolt. The
+        // rise is quick because ground can only push, and it is bounded because
+        // this is a correction, not a suspension.
+        this._seatLift += (Math.min(lift, 0.55) - this._seatLift) * k(30);
+        this.root.position.y += this._seatLift;
+      } else {
+        this._seatLift += (0 - this._seatLift) * k(12);
+        this.root.position.y += this._seatLift;
+      }
+    }
 
     // ---- lights ------------------------------------------------------------
     const braking = !!v._braking || (v.speed > 4 && (v.pitchAccel ?? 0) < -5);

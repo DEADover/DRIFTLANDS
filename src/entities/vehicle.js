@@ -309,6 +309,25 @@ export class Vehicle {
   }
 
   /**
+   * `_resolveExternal` above is a SHIM. It exists because the shell used to
+   * resolve contacts by translating us and scaling velocity, with no idea where
+   * the contact was — so we had to reconstruct an impulse from a position
+   * delta. `core/collision.js` now does the job properly, at the real contact
+   * point, with a real lever arm. When it has finished it calls this, which
+   * says "the pose you are holding is the pose I meant": the shim then sees no
+   * unexplained displacement next frame and leaves the result alone.
+   *
+   * Without it the two fight and the shim wins, because it rebuilds velocity
+   * and yaw from the PRE-contact state and overwrites everything the solver
+   * computed.
+   */
+  commitExternalResolve() {
+    this._lastPos.copy(this.position);
+    this._lastVel.copy(this.velocity);
+    this._lastYawRate = this.yawRate;
+  }
+
+  /**
    * @param {number} dt fixed timestep
    * @param {{throttle:number,brake:number,steer:number,handbrake:number}} input
    */

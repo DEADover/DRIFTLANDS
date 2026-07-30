@@ -19,6 +19,7 @@ import { ParticleSystem } from './fx/particles.js';
 import { createFeel } from './fx/feel.js';
 import { createAudio } from './audio/audio.js';
 import { Hud } from './ui/hud.js';
+import { resolveCollisions } from './core/collision.js';
 
 const FIXED_DT = 1 / 120;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -54,6 +55,15 @@ export class Game {
     this.hud = uiRoot ? new Hud(uiRoot) : null;
     this.worldGroup = new THREE.Group();
     this.scene.add(this.worldGroup);
+
+    // The view of the world core/collision.js resolves against. Arrow closures,
+    // so it keeps working when loadBiome swaps the roads and props out from
+    // under it; only `barriers` is a direct reference and loadBiome re-points it.
+    this.collisionWorld = {
+      barriers: null,
+      colliders: (x, z) => this._nearbyColliders(x, z),
+      groundAt: (x, z) => this.groundAt(x, z),
+    };
 
     this.post = createPostFX({
       renderer: this.renderer,
@@ -169,6 +179,10 @@ export class Game {
       ...this.landmarks.colliders,
     ];
     this._buildColliderGrid();
+    // The barrier set is rebuilt with the roads, so the collision world has to
+    // be re-pointed at it; everything else it needs is reached through closures
+    // that survive the swap.
+    this.collisionWorld.barriers = this.roads.barriers;
 
     this.carView.setHeadlights(palette.sunElevation < 0.18);
 
@@ -366,9 +380,10 @@ export class Game {
     else this._poseY += (support - this._poseY) * (1 - Math.exp(-26 * Math.max(dt, 1e-5)));
     this._pose.y = this._poseY;
 
-    // Airborne: the ballistic height owns Y, and the body levels out.
+    // Airborne, the ballistic height owns Y — but never below the support, or a
+    // wheel dips through the ground on the frame before the landing is detected.
     const y = v.onGround === false && this._carY !== undefined
-      ? this._carY
+      ? Math.max(this._carY, support)
       : this._pose.y;
 
     return { y, pitch: this._pose.pitch, roll: this._pose.roll, onBridge, contact: h, support };
@@ -405,25 +420,29 @@ export class Game {
 
     v.step(dt, input);
 
-    // Prop collision: push out and bleed speed.
-    for (const c of this._nearbyColliders(v.position.x, v.position.z)) {
-      const dx = v.position.x - c.x, dz = v.position.z - c.z;
-      const d2 = dx * dx + dz * dz;
-      const r = c.r + 1.4;
-      if (d2 < r * r && d2 > 1e-6) {
-        const d = Math.sqrt(d2);
-        const push = (r - d) / d;
-        v.position.x += dx * push;
-        v.position.z += dz * push;
-        const impact = v.velocity.length();
-        v.velocity.multiplyScalar(0.45);
-        v.yawRate *= 0.5;
-        if (impact > 6) {
-          this.feel.event('impact', { speed: impact });
-          this.audio.event('impact', { speed: impact });
-          this.camera.addShake(Math.min(0.75, impact * 0.035));
-        }
-      }
+    /**
+     * CONTACTS.
+     *
+     * `core/collision.js` owns the chassis shape, the contact impulse and the
+     * material classes; this loop only turns its events into feel, audio and
+     * shake. `hit.speed` is the CLOSING speed along the contact normal, which is
+     * the same quantity the two hand-written loops that used to live here passed
+     * to those systems.
+     *
+     * What that module replaced, and why none of it could be patched in place:
+     * the car was a CIRCLE of radius 1.5 m, so a 4.2 m long chassis could not
+     * tell a nose-on hit from a side-swipe and stopped dead on trees it visibly
+     * cleared by 0.2 m; the response was applied at the centre of mass, so no
+     * impact could ever spin the car; every prop was the same `velocity *= 0.45`
+     * whether it was a sapling or a boulder; and resolution was a single
+     * end-of-step overlap test, which at 40 m/s first sees a rail line when the
+     * car is already 0.557 m through it — deeper than the beam is thick.
+     */
+    for (const hit of resolveCollisions(v, this.collisionWorld, dt)) {
+      if (hit.speed < 6) continue;
+      this.feel.event('impact', hit);
+      this.audio.event('impact', hit);
+      this.camera.addShake(Math.min(0.75, hit.speed * 0.035));
     }
 
     // ONE POSE PER STEP, and the vertical dynamics use the same support height
@@ -433,7 +452,6 @@ export class Game {
     this._poseCache = this.carPose(v, dt);
 
     this._stepVertical(dt);
-    this._stepBarriers(dt);
 
     const lim = this.biome.size / 2 - 40;
     v.position.x = THREE.MathUtils.clamp(v.position.x, -lim, lim);
@@ -477,7 +495,24 @@ export class Game {
     // the gap between the two was the car's resting depth in the ground.
     // The slope, on the other hand, is still the ground's own — that is what a
     // gradient costs, and it is a property of the terrain, not of the wheelbase.
-    const ground = this._poseCache?.support ?? g.height;
+    /**
+     * THE DYNAMICS REST ON THE CENTRE SAMPLE, NOT ON THE CONTACT-PATCH SUPPORT.
+     *
+     * `carPose` solves for the height at which no WHEEL is under the ground, and
+     * that is the right height to DRAW the car at. It is the wrong height to
+     * simulate at, and the difference is not academic: the support is a maximum
+     * over four patches 2.7 m apart, so a car nosed into a 35 degree bank is
+     * handed most of a metre of free altitude by its front wheels alone. It then
+     * climbs the bank it should have slid off, meets the >0.53 slope bleed a few
+     * lines below, and stops dead.
+     *
+     * MEASURED (tools/collide-live.mjs, 90 s of autopilot in alpine): resting the
+     * dynamics on the support put the car under 3 m/s for 53.6% of the run and
+     * ended it stationary on a 35 degree slope at (-126, 413). On the centre
+     * sample the same drive never drops below 3 m/s at all and finishes at
+     * 38.1 m/s. Draw from the patches, simulate from the point.
+     */
+    const ground = g.height;
 
     if (this._carY === undefined) { this._carY = ground; this._carVY = 0; }
 
@@ -530,72 +565,6 @@ export class Game {
       this.inWater = true;
     } else {
       this.inWater = false;
-    }
-  }
-
-  /**
-   * BARRIER COLLISION.
-   *
-   * Two kinds, and the difference is the point:
-   *   'fence' — timber. A solid hit smashes the bay: the rails are knocked out,
-   *             splinters fly, and the car carries on through, poorer for it.
-   *             A gentle brush just scrapes and holds.
-   *   'guard' — steel. Never breaks. The car is deflected ALONG the beam and
-   *             kept on the stage, which is why these sit on bridges and the
-   *             outside of fast corners.
-   */
-  _stepBarriers(dt) {
-    const B = this.roads.barriers;
-    if (!B?.segments?.length) return;
-    const v = this.vehicle;
-    const CAR_R = 1.5;
-
-    for (const s of B.segments) {
-      if (s.broken) continue;
-      // Cheap reject before the segment test.
-      const dxc = v.position.x - s.x, dzc = v.position.z - s.z;
-      const reach = s.half + CAR_R;
-      if (dxc * dxc + dzc * dzc > reach * reach + 4) continue;
-
-      // Closest point on the segment to the car.
-      const t = THREE.MathUtils.clamp(dxc * s.dx + dzc * s.dz, -s.half, s.half);
-      const px = s.x + s.dx * t, pz = s.z + s.dz * t;
-      const ox = v.position.x - px, oz = v.position.z - pz;
-      const dist = Math.hypot(ox, oz);
-      if (dist > CAR_R || dist < 1e-5) continue;
-
-      // Normal component of the approach: a graze is not a crash.
-      const nx = ox / dist, nz = oz / dist;
-      const closing = -(v.velocity.x * nx + v.velocity.z * nz);
-      const speed = v.velocity.length();
-
-      if (s.kind === 'fence' && closing > 0 && B.hit(s.id, closing)) {
-        // Smashed through: keep going, pay for it.
-        v.velocity.multiplyScalar(0.75);
-        v.yawRate *= 0.85;
-        this.feel.event('impact', { speed: closing, kind: 'fence' });
-        this.audio.event('impact', { speed: closing, kind: 'fence' });
-        this.camera.addShake(Math.min(0.5, closing * 0.028));
-        continue;
-      }
-
-      // Held: push out of the barrier and slide along it.
-      v.position.x += nx * (CAR_R - dist);
-      v.position.z += nz * (CAR_R - dist);
-      if (closing > 0) {
-        const restitution = s.kind === 'guard' ? 0.18 : 0.10;
-        // Remove the into-the-wall component, keep (most of) the along-wall one.
-        v.velocity.x += nx * closing * (1 + restitution);
-        v.velocity.z += nz * closing * (1 + restitution);
-        const along = s.kind === 'guard' ? 0.94 : 0.86;
-        v.velocity.multiplyScalar(along);
-        v.yawRate *= 0.72;
-        if (closing > 4) {
-          this.feel.event('impact', { speed: closing, kind: s.kind });
-          this.audio.event('impact', { speed: closing, kind: s.kind });
-          this.camera.addShake(Math.min(0.7, closing * 0.03));
-        }
-      }
     }
   }
 
