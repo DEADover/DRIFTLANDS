@@ -228,9 +228,21 @@ export function auditBarrierFeet(game, { cell = 2.0 } = {}) {
     // A cell that holds only rail (no post reaching down) is not evidence of a
     // floating post — a post is at least 0.5 m of vertical extent.
     if (b.hi - b.lo < 0.45) continue;
+    // A post at the lip of an embankment is HELD UP BY THE EMBANKMENT even when
+    // a ray dropped at its exact centre misses the batter by a few centimetres
+    // and lands on the hillside ten metres below. Judging it against that ray
+    // manufactures a floating post out of nothing, so take the highest drawn
+    // surface the post's own footprint covers: a post is ~0.2 m thick and stands
+    // in ground that is not a knife edge.
     const d = surf(b.x, b.z);
     if (!d) continue;
-    const row = { x: b.x, z: b.z, foot: b.lo, drawn: d.y, gap: b.lo - d.y, kind: d.kind };
+    let best = d;
+    for (const [ox, oz] of [[0.35, 0], [-0.35, 0], [0, 0.35], [0, -0.35],
+                            [0.25, 0.25], [-0.25, 0.25], [0.25, -0.25], [-0.25, -0.25]]) {
+      const q = surf(b.x + ox, b.z + oz);
+      if (q && q.y > best.y) best = q;
+    }
+    const row = { x: b.x, z: b.z, foot: b.lo, drawn: best.y, gap: b.lo - best.y, kind: best.kind };
     // A rail on a bridge is BOLTED TO THE DECK and is supposed to overhang the
     // void. Judging it against the valley floor 11 m below is meaningless, so it
     // is counted separately: near a span, the question is only whether the rail
