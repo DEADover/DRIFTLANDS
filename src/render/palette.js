@@ -253,7 +253,91 @@
 // boundary, and printed #747400 and #5d5d00 again — the exact two bins the brief
 // names. Red is what fixes R/G; the blue cut was collateral and only index 1
 // needed it.
-const ALPINE_RAMP = [0x182c17, 0x384617, 0x646e1e, 0x9aa132, 0xa6b23a, 0x96a33a];
+// CYCLE 3 — THE RAMP IS THE ACID, AND IT REACHES THE FRAME BY TWO DOORS.
+//
+// Every round since r06 has hunted the acid in the meadow VALUE FIELD in
+// biomes.js — patchA/patchB, the bias, the lobe exponents — and every round has
+// reported that its measured moves were tiny. Cycle 2 of this round measured why.
+// props.js `derivePalette` builds the 259k-instance detail blanket like this:
+//
+//     grass:    [ ground[2].lerp(ground[1], 0.55), ground[2].lerp(ground[3], 0.50) ]
+//     grassLit:   ground[3].lerp(ground[4], 0.34)
+//     meadow:     shade(ground[1], -0.05, 0.07)
+//
+// `ground` IS this array. So the tussocks, blades, drifts and verge cover — a
+// quarter of the meadow's pixels — take their colour STRAIGHT off these rungs and
+// never see colorAt, the value field, patchA or patchB at all. Measured: cycle 2
+// replaced the shade lerp with a saturating knee that pulls half the meadow mesh
+// onto patchB, and the rendered grass mean went the WRONG WAY, (82,97,22) ->
+// (84,100,25). The field only paints the mesh; the blanket on top of it is
+// painted from here. That is the whole reason this defect has survived seven
+// rounds of work in the other file.
+//
+// AND THE DEFECT IN THE RUNGS IS BLUE, WHICH IS A CONSTANT AND NOT A FRACTION.
+// The reference's dominant green ladder, straight out of measure.mjs's own bins:
+//
+//     (23,46,23)  (46,70,23)  (70,93,23)  (139,139,23)
+//     R/G  0.50        0.66        0.75         1.00
+//     B/G  0.50        0.33        0.25         0.17
+//
+// Blue does not move — 23 at every rung — while green triples. Ours ran
+// 23, 23, 30, 50, 58, 58: blue CLIMBING with value, B/G 0.31-0.36 at the top
+// against the reference's 0.17, i.e. rather more than double its blue in the
+// brightest greens. An earlier round wrote this exact essay and later rounds
+// undid it a few values at a time while chasing single bins.
+//
+// One move, three measured deficits. Per-pixel saturation is (max-min)/max, so in
+// a yellow-green the BLUE channel is the min and it alone sets the saturation:
+// frame mean blue 57 against the reference's 44, frame saturation 0.716 against
+// its 0.756, and frame mean red 96 against its 91 are not three problems. Holding
+// blue at 23-29 across the ramp and putting the middle rungs on the reference's
+// own R/G ladder (index 1: 0.80 -> 0.69, index 2: 0.91 -> 0.78) fixes all three,
+// and it fixes them in the detail blanket at the same time without touching
+// props.js — same instances, same density, corrected colour source.
+//
+// The top two rungs also come down in value (index 3 luma 0.588 -> 0.505, index 4
+// 0.651 -> 0.570) because that is where the bright acid population lives. The
+// colours our BRIGHT deciles render at are supplied by patchA, not by these rungs
+// (solve the grade backwards from decile-0.6 grass and the arriving colour is
+// patchA to within a value), so lowering the rungs thins the bright population
+// without moving the colours that already match the reference decile for decile.
+// CYCLE 4 — the blue fix held, the VALUE cut overshot. Measured after cycle 3:
+//
+//   dominant bins  ours #172e17 5.5  #5d7417 4.9  #2e4617 4.8  #465d17 4.7
+//                  ref  #172e17 9.4  #2e4617 7.1  #8b8b17 4.3  #465d17 4.0
+//
+// Three of the reference's four top bins are now ours and both acid bins
+// (#747417, #8b8b17) have left the top five, so the hue and channel-balance half
+// of the brief is done and these rungs keep their blue. But the frame went from
+// 0.019 too BRIGHT to 0.009 too dark and the mid-brights emptied out:
+//
+//   bucket        1     2     3     4     5     6
+//   grass ours   9.3  15.1  17.2  13.0   4.7   0.2
+//   grass ref   13.4  11.4  10.2  12.4   7.7   0.5
+//
+// Six points of grass piled into buckets 2-3 and bucket 5 fell to 4.7 against
+// 7.7. So indices 3 and 4 go back about 55% of the way up in VALUE — luma 0.505
+// -> 0.552 and 0.570 -> 0.613 — with blue left at 28-30. Value and blue were
+// always separable here; cycle 3 moved both and only one of them wanted moving.
+//
+// Index 2 also gains back red. The reference's R/G ladder is a function of VALUE
+// (0.66 at green 70, 0.75 at green 93, 1.00 at green 139), and index 2 sits at
+// green 110 — so interpolating its own ladder it wants R/G ~0.84, not the 0.78
+// cycle 3 gave it. Rendered grass came back R/G 0.758 against the reference's
+// 0.806, which is that error: reading the ladder as a set of fixed numbers rather
+// than as a function of value is what over-cooled the mids.
+// CYCLE 6 — INDEX 1 IS THE DARK SPECKLE, AND IT IS SITTING ONE BUCKET TOO HIGH.
+// props.js derives the blanket's dark cover from this rung specifically:
+//   grass[0] = ground[2].lerp(ground[1], 0.55)   — 55% of the way onto index 1
+//   meadow   = shade(ground[1], -0.05, 0.07)
+// so index 1's value is where the reference's near-black turf speckle has to come
+// from. It sat at (48,70,24), luma 0.226 — bucket 2 — while the remaining grass
+// error is bucket 1 short by 4.6 points and bucket 2 OVER by 2.2. Taking it to
+// luma 0.192 moves that speckle across the boundary it was sitting on the wrong
+// side of. Held above luma 0.17 on purpose: bucket 0 is already 2.1 points over
+// the reference and the AO and grade lift (post.js, grade.js — outside this file)
+// multiply this rung down further wherever a tuft sits in contact shade.
+const ALPINE_RAMP = [0x182c17, 0x263717, 0x5c6e1a, 0x92981c, 0xa2a81e, 0x929824];
 const AUTUMN_RAMP = [0x3b4c28, 0x5a682e, 0x83803a, 0xac974a, 0xccb466, 0xe6d59a];
 const DESERT_RAMP = [0xe8d5a4, 0xdcb476, 0xcf8546, 0xbc5730, 0xa33c27, 0xc9713c];
 const COAST_RAMP = [0x104a46, 0x0f6f4c, 0x1e924c, 0x54a548, 0x9c9a56, 0xcfc084];
@@ -293,8 +377,53 @@ export const PALETTES = {
       // noise stack, so the meadow has to be able to reach L 0.60 on a sunlit
       // rise and L 0.19 in a hollow without either end being a different
       // material. Keep them one hue family apart, not one value apart.
-      lowland: 0x172e1c,     // damp draws and tarn shores — bluest green here
-      patchA: 0x8f9c48,      // sun-bleached alp grass, and the swatch the top
+      // CYCLE 1: was (23,46,28) — blue FIVE AHEAD of red, which is the teal the
+      // round-7 essay below drove out and which has crept back. The reference's
+      // shade grass (its decile 0.2, and 24% of all its grass) is (21,45,23):
+      // red and blue EQUAL. Blue only comes off, red stays: at this value the
+      // reference is not redder than us, it is less blue.
+      lowland: 0x172e18,     // damp draws and tarn shores — bluest green here
+      // CYCLE 6: ITS BLUE IS THE FRAME'S MISSING SATURATION. B/G was 0.46 — by
+      // far the bluest thing in the meadow — against the reference's 0.17 in
+      // bright grass, and the note below defends that with a backsolve through the
+      // grade's `saturation: 1.68`. The backsolve is real but it was fitted to ONE
+      // decile; applied to the whole lit lobe it costs more than it buys. Proof
+      // from cycle 5: the middle-evacuation exponent, which only moves pixels
+      // further ONTO patchA and patchB, dropped frame saturation 0.739 -> 0.728 and
+      // raised grass blue 20 -> 22 without touching a single colour. A knob that
+      // makes saturation worse by using more of a swatch is a knob pointing at that
+      // swatch.
+      //
+      // CYCLE 7: AND 48 WAS TOO FAR — IT PUT THE ZERO-BLUE BINS BACK. At blue 48
+      // frame saturation OVERSHOT to 0.763 against the reference's 0.756 and the
+      // dominant table printed #5d7400 5.7%, #748b00 4.9%, #747400 4.8%: three
+      // bins at blue level 0, which is the brief's headline defect and the one
+      // failure mode it explicitly says not to recreate. A zero channel forces
+      // per-pixel saturation to 1.0 regardless of the other two, so it BUYS the
+      // saturation number by breaking the thing the number is a proxy for.
+      // Grass blue measured 22 at B=72, 16 at B=48 against the reference's 18, and
+      // saturation 0.728 / 0.763 against its 0.756 — so 58 is where both land, and
+      // it is chosen off the blue channel rather than off the saturation because
+      // saturation is exactly the statistic a zero channel can counterfeit.
+      //
+      // CYCLE 8: 58 STILL COUNTERFEITS IT — 68, AND THE EVIDENCE IS THE BLUE
+      // HISTOGRAM, NOT THE BINS. Green pixels at luma 0.25-0.55, blue in twelves:
+      //
+      //     blue    ours (B=58)            reference
+      //     0-12     59.4%  (104,117, 4)    38.4%  (109,123, 5)
+      //     12-24    20.2%  ( 86,103,16)    45.6%  ( 91,108,17)  <- its MODE
+      //
+      // Our mode is in the bin the reference's ISN'T, and frame-wide 29.3% of our
+      // green pixels carry blue under 12 against its 13.3%. Per luma decile the
+      // reason is exact: deciles 0.4 and 0.5 already match the reference's blue to
+      // the value (16 and 12), and the whole error is deciles 0.6-0.7, where the
+      // reference runs blue 15 and 25 and we ran 11 and 9. The reference's grass
+      // saturation FALLS at the top — 0.90 -> 0.86 — where ours climbed 0.91 ->
+      // 0.95. Its brightest sward is a pale half-desaturated yellow-green; a lit
+      // highlight is the one place a meadow loses chroma, and patchA is the swatch
+      // that lit lobe is made of. Blue 68 with the chroma roll-off in biomes.js
+      // taken from 0.14 to 0.22 puts both back.
+      patchA: 0x8f9c44,      // sun-bleached alp grass, and the swatch the top
                              // three luma deciles are made of. R/G 0.91 (the
                              // reference's own sunlit grass runs 0.89-0.94), and
                              // B/G 0.46 — by far the bluest swatch in the ramp,
@@ -333,7 +462,26 @@ export const PALETTES = {
       // 0.3; ours had 13.2% and 26.4%. It is short of genuinely deep shade and
       // long on mid-dark, which is the shade lobe of the meadow field not
       // reaching far enough down. Deepening this swatch is what extends it.
-      patchB: 0x16281a,      // shaded heath / bilberry. Was (28,37,22), G/R only
+      // CYCLE 1: AND IT WENT ONE STOP TOO FAR DOWN. Populations again, points of
+      // frame per bucket, GRASS only:
+      //
+      //   bucket    0     1     2     3     4     5
+      //   ours     2.8   8.3  11.8  14.1  14.9   8.1
+      //   ref      0.8  13.4  11.4  10.2  12.4   7.7
+      //
+      // The reference's grass has a HARD FLOOR at bucket 1 and piles 13.4 points
+      // of the frame into it. Ours spills 2.8 points out of the bottom into
+      // bucket 0 and only manages 8.3 in bucket 1 — the shade lobe is falling
+      // THROUGH the bucket the reference lives in. Both halves of the brief's
+      // "bucket 1 toward 15%, bucket 0 toward 0.9%" are this one fact.
+      //
+      // (26,44,26) -> (22,40,26) was the wrong direction. This swatch is the
+      // value the shade lobe lands ON, so it has to sit inside bucket 1, not on
+      // its lower edge: luma 0.138 puts every pixel the AO or a cast shadow then
+      // multiplies down into bucket 0. The reference's own shade grass is
+      // (21,45,23) at luma 0.150 — and it is GREENER than ours, not darker, with
+      // red and blue equal. Same move as `lowland` above: +5 green, -3 blue.
+      patchB: 0x162d17,      // shaded heath / bilberry. Was (28,37,22), G/R only
                              // 1.32 — a near-neutral dark, which is why our
                              // luma bucket 0 held 1.7% against the reference's
                              // 0.9%. The reference's darkest bin is (23,46,23):
@@ -449,13 +597,65 @@ export const PALETTES = {
     water: 0x1179bd,
     waterDeep: 0x0a4f8c,
     waterFoam: 0xeaf7ff,
-    // ROAD, pulled down a stop. MEASURED: our road surface renders at
-    // rgb(209,162,70), luma 0.65, and it is ~10% of the frame, which is why our
-    // luma bucket 6 (0.6-0.7) held 9.9% of the picture against the reference's
-    // 5.0% while bucket 5 held 10.2% against its 17.5%. Sampled at two points
-    // the reference road is rgb(203,160,73) and rgb(184,141,74) — the same
-    // R/G ratio of 1.27-1.30 as ours, just a stop lower and far more varied.
-    // So the hue was already right; only the level was wrong.
+    // ROAD. CYCLE 1: THE BUCKET-6 EXCESS IS THIS SURFACE, NOT THE MEADOW.
+    //
+    // Seven rounds have read luma bucket 6 (0.6-0.7) as "bright acid grass" and
+    // gone looking for it in the ramp. Split the frame into populations by
+    // rendered colour (sky/road/grass/rock) and report each one's contribution
+    // to each bucket in POINTS OF THE FRAME, and it is not the grass at all:
+    //
+    //   bucket 6 =  11.7% ours / 4.9% reference
+    //     of which  road  10.3 ours / 4.4 ref     <- the whole 6.8-point error
+    //               grass  1.3 ours / 0.5 ref
+    //
+    // The note this replaces sampled the reference road "at two points" and got
+    // rgb(203,160,73) and rgb(184,141,74), and concluded the level was nearly
+    // right. Those are its two SUNLIT points. The reference road's POPULATION
+    // mean is rgb(151,124,47) — ours is rgb(185,138,68) — because a third of its
+    // road is in tree and bank shadow. Sampling lit patches and calling the
+    // result the surface is the exact trap the brief warns about.
+    //
+    // And the distribution matters as much as the level. Points of frame per
+    // bucket, road only:
+    //
+    //   bucket    1    2    3    4    5    6    7
+    //   ours     0.1  0.4  1.0  3.3  6.6 10.3  0.0
+    //   ref      0.6  2.5  4.3  8.4  9.6  4.4  1.3
+    //
+    // Ours is a spike at the top of the range; the reference's runs all the way
+    // down into bucket 1.
+    //
+    // BUT THIS KNOB CANNOT FIX IT, MEASURED AND REVERTED. Cutting these two
+    // swatches by 18% (0xb38a46 -> 0x9c7d3a) moved the rendered road population
+    // mean by ONE VALUE, from rgb(185,138,68) to rgb(184,137,67), and every luma
+    // bucket by 0.1 or less. The reason is in roads.js `surfaceColour`:
+    //
+    //     case 'dirt': return pale(c.lerp(ochre, 0.94).multiplyScalar(0.93));
+    //
+    // where `ochre` is a hardcoded 0xc9a45f. Alpine's road is a dirt road, so
+    // `palette.road` is lerped 94% of the way OUT of the picture and contributes
+    // about 6% of the surface colour; the `pale()` helper above it then applies
+    // its own measured g*1.12 and b*1.34. The road's level lives in roads.js, not
+    // here, and 5.9 of the frame's 6.8-point bucket-6 error is behind that door.
+    // Left at the authored value so the diff does not imply a fix that is not one.
+    //
+    // AND IT IS ALSO THE WHOLE OF THE RESIDUAL SATURATION GAP. Frame mean
+    // saturation is a share-weighted sum, so it decomposes exactly. Each
+    // population's contribution (share x its own mean saturation), ours against
+    // the reference, at the end of this round:
+    //
+    //     sky/water   0.133   0.102   +0.031
+    //     road        0.124   0.215   -0.091
+    //     grass       0.463   0.439   +0.024
+    //     rock        0.003   0.002   +0.001
+    //     TOTAL       0.724   0.759   -0.035
+    //
+    // The meadow is now CONTRIBUTING MORE than the reference's meadow does. The
+    // deficit is one population: the reference's road is 31.2% of its frame at
+    // saturation 0.69, ours is 20.4% at 0.61. Both numbers — the width and the
+    // chroma — are set in roads.js. No further move in this file can close it, and
+    // any attempt to close it from the meadow would have to over-saturate the grass
+    // past the reference to pay for another surface's shortfall.
     road: 0xb38a46,
     roadEdge: 0xc9a76b,
     accents: [0xef4d4d, 0xffd23f, 0xff8fbf, 0xffffff],

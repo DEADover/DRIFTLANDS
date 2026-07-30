@@ -119,6 +119,38 @@ function steepness(c, K, slope, soilAt, screeAt, cliffAt, m = [0.42, 0.72, 0.9])
 // cap — which is where the white blow-out in the frame came from. The landform
 // below now tops out at ~170 m and does so only outside r = 700 m, so these
 // stops cover the whole world and the last two are rim-hill greens, not snow.
+// CYCLE 9 — WHICH RUNGS THE VISIBLE MEADOW ACTUALLY SITS ON.
+//
+// The last error in the grass is bucket 1 short by 5.4 points and bucket 3 over by
+// 4.1, and eight cycles have established which levers can move a number that size:
+// the ramp can, the value field cannot (bias, lobe knee and the middle-evacuation
+// exponent each moved the render by under a point, because a quarter of the
+// meadow's pixels are detail instances that never see the field — see the ramp
+// essay in palette.js). The stops are the third lever and they had not been tried.
+//
+// Alpine's basin runs roughly 12-60 m where the camera can see it. Against
+// [-26,-6,12,38,78,150] that band lands on indices 2-4, whose luma is 0.389,
+// 0.556 and 0.613 — every rung the visible meadow is made of sits in bucket 3 or
+// above, and there is no dark rung anywhere in the altitudes a driver occupies.
+// That is the structural reason the meadow cannot reach the reference's bucket-1
+// pile no matter how the value field is tuned: the field can only lerp away from
+// whatever the ramp already handed it, and it was handing it bucket 3.
+//
+// TRIED AND REVERTED, MEASURED. Shifting the lower stops up 10-14 m
+// ([-26,0,22,52,92,160]) slid the meadow one rung down as intended and it is a net
+// regression: bucket 1 gained only 0.7 points (9.6 -> 10.3 against the reference's
+// 15.0) while bucket 2 went 2.4 points further OVER, bucket 5 drained 13.7 -> 11.3
+// against its 17.5, frame luma overshot to 0.010 BELOW the reference and frame
+// saturation fell 0.727 -> 0.708.
+//
+// The reason is a fact about the ramp that is easy to miss: the DARK rungs are the
+// BLUE-RICH ones, correctly so — the reference's own dark green is (23,46,23) at
+// B/G 0.50 against 0.17 in its brightest sward. So sliding the meadow onto them
+// adds blue and costs chroma, and rendered grass blue went 16 -> 25. The bucket-1
+// pile cannot be bought by moving the meadow down the ramp; the reference's own
+// bucket-1 bin has saturation 0.50 and it reaches a 0.756 frame mean anyway,
+// because that mean is carried by its ROAD (31.2% of frame at saturation 0.69
+// against our 20.2% at 0.61 — the whole of our residual deficit, see below).
 const ALPINE_STOPS = [-26, -6, 12, 38, 78, 150];
 const AUTUMN_STOPS = [-34, -14, 3, 20, 40, 68];
 const DESERT_STOPS = [8, 21, 31, 50, 78, 108];
@@ -310,6 +342,24 @@ export const BIOMES = {
       // most of the 0.015 of mean luma the acid fix cost, without touching a
       // single colour — which is the right way round, because the colours now
       // match the reference decile by decile and the DISTRIBUTION does not.
+      // CYCLE 2: THE BIAS GOES POSITIVE, AND THAT IS NOT A REVERSAL.
+      // Paired with the saturating shade knee below, this term no longer sets
+      // "how dark the meadow is" — the knee does. What it sets is HOW MUCH of the
+      // field is in the shade lobe at all, and the reference wants that number
+      // LOWER than ours while the shade itself goes far deeper: a smaller, much
+      // darker shade population. Sampled offline over 384k points of the field
+      // (the field is homogeneous, so a large sample predicts the albedo
+      // distribution without paying for a render), bias -0.075 -> +0.05 with the
+      // knee at 0.68 takes the shade lobe from 63.3% to 51.0% of the meadow while
+      // albedo luma bucket 1 goes 2.2% -> 10.4% and bucket 3 falls 24.4% -> 16.4%.
+      // Mean albedo luma only moves 0.436 -> 0.421, which is what keeps the frame
+      // mean on the reference; the two moves are deliberately mean-neutral.
+      // ...and CYCLE 3 PUTS IT BACK. Measured, bias +0.05 with the knee raised the
+      // rendered grass mean from (82,97,22) to (84,100,25) and frame luma from
+      // 0.390 to 0.398 against the reference's 0.379 — the offline albedo model
+      // called the pair mean-neutral and the render disagreed, because the model
+      // cannot see the detail blanket (see the ramp essay in palette.js). The
+      // knee stays, the bias goes back to the value seven rounds tuned it to.
       let t = clamp((big * 0.44 + mid * 0.34 + fine * 0.20) * 1.8 - 0.075, -1, 1);
       // ...and then PUSHED OFF ZERO. A sum of fbm octaves is a bell: most of the
       // meadow lands near t = 0, i.e. on the bare ramp, and that is why the
@@ -335,7 +385,24 @@ export const BIOMES = {
       // away, and evacuating the middle is what fills decile 0.4-0.5 rather than
       // piling everything on the bare ramp at 0.3. It stays where it was; the
       // mode is placed with the bias term above instead.
-      t = Math.sign(t) * Math.pow(Math.abs(t), 0.68);
+      // CYCLE 5: 0.68 -> 0.56, AND THE REASON THE ROUND-12 TEST SAID OTHERWISE IS
+      // THAT IT WAS RUN AGAINST THE OLD RAMP. With the rungs now on the
+      // reference's ladder the frame mean has landed (luma 0.382 against 0.379,
+      // saturation 0.739 against 0.756, grass mean (77,95,20) against (75,93,18))
+      // and exactly one error is left in the meadow — it is not a colour, it is
+      // the bimodality:
+      //
+      //   bucket        0     1     2     3     4     5
+      //   grass ours   2.8   8.7  13.2  15.8  14.3   6.7
+      //   grass ref    0.8  13.4  11.4  10.2  12.4   7.7
+      //
+      // The reference dips at bucket 3 between two piles; ours has its single mode
+      // there, 5.6 points over, and is 4.7 short at bucket 1. This exponent is the
+      // one knob that moves BOTH at once, because it evacuates the middle and
+      // feeds whichever lobe a pixel is already on. Sampled offline, 0.68 -> 0.56
+      // takes albedo bucket 1 from 18.1% to 22.6% and bucket 3 from 19.7% to
+      // 17.0% while the lit lobe holds (bucket 5 23.9% -> 25.1%).
+      t = Math.sign(t) * Math.pow(Math.abs(t), 0.56);
       // Asymmetric on purpose. THREE.Color.lerp mixes in LINEAR space, where a
       // 50% mix toward a dark green is nowhere near 50% of the way down in
       // perceived value — the bright end always wins. The dark lerp has to be
@@ -349,8 +416,42 @@ export const BIOMES = {
       // exponent keeps the mid-tones on the warm side of the path and only lets
       // the cool blue-green arrive in the genuinely deep hollows, which is what
       // the reference does.
+      // CYCLE 2: THE SHADE LERP IS A KNEE, NOT A POWER CURVE, AND THAT IS THE
+      // SHAPE OF THE REFERENCE'S HISTOGRAM.
+      //
+      // Grass per luma bucket as a share of each frame's own grass:
+      //
+      //   bucket    0     1     2     3     4     5     6
+      //   ours     4.6  13.5  19.2  23.0  24.4  13.2   2.1
+      //   ref      1.4  23.8  20.2  18.1  22.0  13.7   0.9
+      //
+      // The reference is BIMODAL — a pile at bucket 1, a dip at 3, a second pile
+      // at 4 — and bucket 0 is a CLIFF beneath it: 1.4% under a 23.8%. Ours is one
+      // broad mode at 3-4 with a soft leak out of the bottom. Seven rounds have
+      // read that leak as "our shade is too dark" and lightened swatches; it is
+      // the opposite. A cliff with a pile on top of it is the signature of a
+      // SATURATING mix — a population that all lands on one swatch and then stops
+      // — and `pow(-t, 1.22)` is the least saturating curve available: with |t|
+      // typically 0.3 it returns 0.23, so the shaded meadow only travelled a
+      // quarter of the way to patchB and the deep green never actually arrived.
+      // Measured offline, albedo luma bucket 1 held 2.2% of the meadow.
+      //
+      // `min(1, -t / 0.68)` reaches patchB at t = -0.68 and holds there, which
+      // puts a hard floor at patchB's own luma (0.150 — inside bucket 1, which is
+      // why cycle 1 raised it) and piles the shade lobe onto it: albedo bucket 1
+      // 2.2% -> 10.4%. The exponent that replaced it is 1.0 on purpose; the
+      // round-12 essay's worry about a straight lerp passing through pure hue-100
+      // green at the halfway point is answered by patchB now being (22,45,23),
+      // red and blue EQUAL, so the path no longer runs through a teal.
+      //
+      // THE LIT SIDE KEEPS ITS SOFT TAPER AND IS DELIBERATELY NOT KNEED. The
+      // reference's lit lobe does not cliff — 22.0 / 13.7 / 0.9 across buckets
+      // 4/5/6 is a taper — and a knee there would land a third of the meadow on
+      // exactly patchA, which is the flat slab of brightest grass that reads as an
+      // acid patch in the first place. Tested offline: litKnee 0.55 puts 34% of
+      // the field on one value. The brief's "do not flatten the meadow" is this.
       if (t > 0) c.lerp(K.patchA, t * 0.92);
-      else c.lerp(K.patchB, Math.pow(-t, 1.22) * 1.0);
+      else c.lerp(K.patchB, Math.min(1, -t / 0.68));
       // Hue and chroma ride WITH the value, they do not float free: a lit rise
       // is warmer AND yellower AND more saturated (grass drying in the sun),
       // a hollow is cooler AND greener AND duller. The reference shows a 60-80
@@ -381,7 +482,14 @@ export const BIOMES = {
       // -0.022 (about 8 degrees) the lit lobe crossed the line where RED LEADS
       // GREEN, which is what put R exactly equal to G in both acid bins; the
       // reference's brightest grass still keeps green ahead at R/G 0.94.
-      if (t > 0) c.offsetHSL(t * -0.006, t * 0.020 - t * t * 0.14, 0);
+      // CYCLE 8: the quadratic term 0.14 -> 0.22. Measured per luma decile on the
+      // grass population, the reference's saturation peaks near decile 0.45 and
+      // then FALLS, 0.90 -> 0.86, as its blue climbs 12 -> 15 -> 25; ours rose
+      // 0.91 -> 0.95 with blue falling 12 -> 11 -> 9. This is the term that is
+      // supposed to produce that roll-off and it was not biting hard enough to
+      // reach the top two deciles. Quadratic in t on purpose, so deciles 0.4-0.5 —
+      // which already match the reference's blue to the value — are left alone.
+      if (t > 0) c.offsetHSL(t * -0.006, t * 0.020 - t * t * 0.22, 0);
       else c.offsetHSL(-t * 0.030, t * 0.065, 0);
 
       // Damp, darker grass in the hollows and along the tarn shores.
