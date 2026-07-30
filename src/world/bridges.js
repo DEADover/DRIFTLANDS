@@ -164,6 +164,27 @@ class Kit {
   }
 }
 
+/**
+ * Height at (x, z) inside a triangle, or null if the point is outside it.
+ *
+ * Barycentric, with a tolerance that is a hair NEGATIVE so the shared edge
+ * between the two triangles of a quad is never claimed twice, and a hair
+ * positive on the outside so the seam between adjacent quads has no crack a
+ * wheel can fall into. Allocation-free: this runs a few hundred times a frame.
+ */
+function triHeight(x, z, ax, az, ay, bx, bz, by, cx, cz, cy) {
+  const v0x = bx - ax, v0z = bz - az;
+  const v1x = cx - ax, v1z = cz - az;
+  const den = v0x * v1z - v1x * v0z;
+  if (den === 0) return null;
+  const px = x - ax, pz = z - az;
+  const u = (px * v1z - v1x * pz) / den;
+  const v = (v0x * pz - px * v0z) / den;
+  const EPS = 1e-6;
+  if (u < -EPS || v < -EPS || u + v > 1 + EPS) return null;
+  return ay + u * (by - ay) + v * (cy - ay);
+}
+
 /** Recover the route centreline as a real polyline with arc length. */
 function routePolyline(roads) {
   const M = 4000;
@@ -421,28 +442,82 @@ export function createBridges(ctx) {
         if (x < B[0] || x > B[2] || z < B[1] || z > B[3]) continue;
         const d = decks[k];
         const pts = d.pts;
-        const hw2 = d.hw * d.hw;
         for (let i = 0; i < pts.length - 1; i++) {
           const p = pts[i], q = pts[i + 1];
           const ex = q.x - p.x, ez = q.z - p.z;
           const L2 = ex * ex + ez * ez;
           if (L2 < 1e-9) continue;
           let t = ((x - p.x) * ex + (z - p.z) * ez) / L2;
-          if (t < 0) { if (i > 0) continue; t = 0; }
-          if (t > 1) { if (i < pts.length - 2) continue; t = 1; }
-          const cx = p.x + ex * t, cz = p.z + ez * t;
-          const dx = x - cx, dz = z - cz;
-          if (dx * dx + dz * dz <= hw2) {
-            // THE DECK IS NO LONGER LEVEL ACROSS ITS WIDTH (see buildDeck), so
-            // the height the car stands on depends on how far off the centreline
-            // it is. Reporting the centreline height put the car up to a metre
-            // above or below the planks it was visibly driving on.
-            const nxm = p.nx + (q.nx - p.nx) * t, nzm = p.nz + (q.nz - p.nz) * t;
-            const il = 1 / (Math.hypot(nxm, nzm) || 1);
-            const off = dx * nxm * il + dz * nzm * il;
-            const cs = (p.cs ?? 0) + (((q.cs ?? 0) - (p.cs ?? 0)) * t);
-            return p.y + (q.y - p.y) * t + cs * off;
-          }
+
+          /**
+           * THIS FUNCTION USED TO CLAIM A DECK THAT IS NOT DRAWN.
+           *
+           * Past the first or last station `t` was clamped to 0 or 1 and the
+           * point was then accepted on a CIRCLE of radius `hw` about the
+           * endpoint. A circle does not know the difference between "0.5 m to
+           * the side of the deck" and "8 m off the end of it", so the analytic
+           * footprint was the drawn deck plus a HALF-DISC OF RADIUS 8.6 m beyond
+           * each abutment — with `p.y` held flat and the cross-fall still
+           * applied. game.js then takes max(deck, road), so that phantom slab
+           * always won.
+           *
+           * MEASURED before this fix: 2,346 sample points where heightAt answered
+           * and no plank was drawn (2,243 with no plank mesh anywhere below), in
+           * ten clusters — one per abutment, every span, both ends. groundAt minus
+           * the topmost drawn surface there ran p50 0.037, p95 0.462, MAX +1.072 m
+           * (an invisible ledge a metre above bare hillside, off the side of the
+           * road, past the end of a bridge). On the line the car actually drives
+           * that produced 24 one-frame ground steps over 0.30 m, worst -2.211 m at
+           * 30.7 m/s, and 620 frames of 24,000 with the drawn car more than 0.35 m
+           * above the visible surface, worst +3.319 m.
+           *
+           * It was invisible to every audit: auditSink reports drawn - queried
+           * with positive thresholds, so a car held ABOVE the mesh scores as
+           * negative sink and never appears at all.
+           *
+           * So the two bounds are now separated and both are honest. The
+           * LONGITUDINAL one gets a seam tolerance only — enough that a wheel
+           * exactly on the joint still finds the planks, nowhere near enough to
+           * invent a slab. The LATERAL one is tested as a lateral offset against
+           * the deck's own half width, which is what the old circle was doing
+           * correctly for interior segments and incorrectly at the ends.
+           */
+          // Cheap longitudinal reject first, so the triangle test below only runs
+          // for the one or two segments that can possibly contain the point.
+          if (t < -0.5 || t > 1.5) continue;
+
+          /**
+           * MEMBERSHIP IS TESTED AGAINST THE TRIANGLES THAT ARE DRAWN.
+           *
+           * Bounding the perpendicular offset by `hw` is only equivalent to the
+           * drawn deck while the deck is STRAIGHT. buildDeck emits one quad per
+           * segment — `kit.quad(L(p,-hw), L(p,hw), L(q,hw), L(q,-hw))` — and on a
+           * curving span consecutive normals diverge, so those quads are
+           * trapezoids that fan open on the outside of the bend. A point 8 m off
+           * the centreline can be inside the offset bound and outside every
+           * plank, which is what survived the first attempt at this fix: phantom
+           * samples fell from 2,346 to 24, but the worst was still an invisible
+           * 1.23 m ledge at (454, 222), on a curve.
+           *
+           * So the test is the same pair of triangles `kit.quad` winds — A-B-C and
+           * A-C-D — and the height is their barycentric interpolation. The query
+           * is then the drawn surface by construction, not an approximation of it,
+           * exactly as terrain.drawnHeightAt is for the ground. `cs * off` falls
+           * out for free: it is already baked into the corner heights.
+           */
+          const ax = p.x + p.nx * -d.hw, az = p.z + p.nz * -d.hw;
+          const bx = p.x + p.nx * d.hw, bz = p.z + p.nz * d.hw;
+          const qcx = q.x + q.nx * d.hw, qcz = q.z + q.nz * d.hw;
+          const qdx = q.x + q.nx * -d.hw, qdz = q.z + q.nz * -d.hw;
+          const pcs = p.cs ?? 0, qcs = q.cs ?? 0;
+          const ay = p.y - pcs * d.hw, by = p.y + pcs * d.hw;
+          const cy = q.y + qcs * d.hw, dy2 = q.y - qcs * d.hw;
+
+          const h = triHeight(x, z, ax, az, ay, bx, bz, by, qcx, qcz, cy);
+          if (h !== null) return h;
+          const h2 = triHeight(x, z, ax, az, ay, qcx, qcz, cy, qdx, qdz, dy2);
+          if (h2 !== null) return h2;
+          continue;
         }
       }
       return null;

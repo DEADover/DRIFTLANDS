@@ -436,6 +436,74 @@ export function auditCornerGuards(game) {
  * above it you get gravel on the planks and, worse, two surfaces fighting over
  * the wheel.
  */
+/**
+ * DOES bridges.heightAt CLAIM A DECK THAT IS NOT DRAWN?
+ *
+ * The one defect no other audit here could see. `auditSink` reports
+ * drawn - queried with positive thresholds, so a car held ABOVE the mesh scores
+ * as negative sink and never appears; `auditDeckOverdraw` only samples where
+ * planks exist. So this asks the inverse question directly: fire a ray, and if
+ * bridges.heightAt answers where no bridge triangle is drawn below, that is an
+ * invisible ledge the physics will stand the car on.
+ */
+export function auditPhantomDeck(game, { step = 1.5, pad = 14 } = {}) {
+  const scene = game.scene;
+  const bridgeMeshes = [];
+  scene.traverse((o) => {
+    if (!o.isMesh || !o.visible) return;
+    for (let p = o; p; p = p.parent) if (p.name === 'bridges') { bridgeMeshes.push(o); break; }
+  });
+  if (!bridgeMeshes.length) return { note: 'no bridges in scene' };
+
+  const ray = new THREE.Raycaster();
+  const dir = new THREE.Vector3(0, -1, 0);
+  const org = new THREE.Vector3();
+  const plank = (x, z) => {
+    org.set(x, 600, z);
+    ray.set(org, dir);
+    const h = ray.intersectObjects(bridgeMeshes, false);
+    return h.length ? h[0].point.y : null;
+  };
+  const surf = makeRaycastSurface(scene);
+
+  // Sweep a pad around every span, not the whole map: the phantom lives just off
+  // the ends of the drawn deck.
+  const boxes = [];
+  for (const m of bridgeMeshes) {
+    m.geometry.computeBoundingBox();
+    const b = m.geometry.boundingBox.clone().applyMatrix4(m.matrixWorld);
+    boxes.push(b);
+  }
+  const rows = [];
+  for (const b of boxes) {
+    for (let x = b.min.x - pad; x <= b.max.x + pad; x += step) {
+      for (let z = b.min.z - pad; z <= b.max.z + pad; z += step) {
+        const deck = game.bridges.heightAt?.(x, z);
+        if (deck == null) continue;
+        if (plank(x, z) != null) continue;           // a plank is there: fine
+        const d = surf(x, z);
+        rows.push({
+          x: +x.toFixed(1), z: +z.toFixed(1), deck: +deck.toFixed(3),
+          drawn: d ? +d.y.toFixed(3) : null,
+          ledge: d ? +(deck - d.y).toFixed(3) : null,
+        });
+      }
+    }
+  }
+  const ledges = rows.map((r) => r.ledge).filter((v) => v != null);
+  return {
+    sampled: boxes.length,
+    phantom: rows.length,
+    all: stats(ledges),
+    over: {
+      '0.12': ledges.filter((v) => v > 0.12).length,
+      '0.30': ledges.filter((v) => v > 0.30).length,
+      '0.50': ledges.filter((v) => v > 0.50).length,
+    },
+    worst: rows.filter((r) => r.ledge != null).sort((a, b) => b.ledge - a.ledge).slice(0, 6),
+  };
+}
+
 export function auditDeckOverdraw(game, { stations = 400 } = {}) {
   const scene = game.scene;
   const bridgeMeshes = [];

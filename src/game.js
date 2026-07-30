@@ -177,6 +177,11 @@ export class Game {
       ...this.props.colliders,
       ...this.bridges.colliders,
       ...this.landmarks.colliders,
+      // roads.js publishes sign posts and the marker boards at hairpins and
+      // NOTHING WAS READING THEM. They were built, drawn and documented, and the
+      // collision grid never saw one: the boards a car meets when it runs wide
+      // out of a hairpin were scenery you drove straight through.
+      ...(this.roads.colliders ?? []),
     ];
     this._buildColliderGrid();
     // The barrier set is rebuilt with the roads, so the collision world has to

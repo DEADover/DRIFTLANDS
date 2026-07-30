@@ -55,6 +55,7 @@ const report = await page.evaluate(async ({ only, driven }) => {
   if (want('guards')) out.cornerGuards = P.auditCornerGuards(g);
   if (want('gaps')) out.guardGaps = P.auditGuardGaps(g);
   if (want('deck')) out.deckOverdraw = P.auditDeckOverdraw(g);
+  if (want('phantom')) out.phantomDeck = P.auditPhantomDeck(g);
   // Driving mutates the world state, so these must go last.
   if (want('wheels')) out.wheels = P.auditWheelSeating(g);
   if (driven) out.driven = P.auditDriven(g, { seconds: driven });
@@ -150,6 +151,18 @@ if (report.guardGaps) {
   line('    trouble   fall    radius  entry   protected by      at');
   for (const r of g.runs) {
     line(`  ${String(r.trouble).padStart(8)}  ${f(r.fall, 1).padStart(5)} m  ${String(r.radius).padStart(5)} m  ${f(r.entry, 0).padStart(4)}   ${String(r.protectedBy).padEnd(12)}  (${r.x}, ${r.z})  x${r.stations}`);
+  }
+}
+
+if (report.phantomDeck) {
+  const p = report.phantomDeck;
+  line('');
+  line('PHANTOM DECK — bridges.heightAt answers where no plank is drawn');
+  if (p.note) line(`  ${p.note}`);
+  else {
+    line(`  spans ${p.sampled}   phantom samples ${p.phantom}   over 0.12 m ${p.over['0.12']}   over 0.30 m ${p.over['0.30']}   over 0.50 m ${p.over['0.50']}`);
+    if (p.all.n) line(`  ledge above the drawn surface: mean ${f(p.all.mean)}  p95 ${f(p.all.p95)}  MAX ${f(p.all.max)}`);
+    for (const w of p.worst) line(`    +${f(w.ledge)} m at (${w.x}, ${w.z})  deck ${f(w.deck, 2)} vs drawn ${f(w.drawn, 2)}`);
   }
 }
 
