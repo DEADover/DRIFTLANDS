@@ -202,6 +202,13 @@ export class Vehicle {
     this._bodyY = this._bodyVY = 0;
     this._groundY = null;
     this._contactTime = 0;
+    // core/collision.js hangs two bits of per-pass contact state here: which
+    // scenery we are mid-brush through, and which obstacles our bumper corner
+    // has folded around (see its § SHED). Both describe a pass that a respawn
+    // has just ended, and a car that spawned still "folded" would start the run
+    // able to drive through the tree it is parked next to.
+    this._collideBrushed = null;
+    this._collideShed = null;
     this.lastImpact = 0;
     this.landImpact = 0;
     this.airTime = 0;

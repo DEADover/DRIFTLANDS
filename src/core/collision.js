@@ -33,8 +33,12 @@
  *
  *  1. A CIRCLE cannot tell a nose-on hit from a side-swipe, its corners catch on
  *     nothing, and at r = 1.5 m against a 1.9 m-wide car it collided with things
- *     the car visually cleared by 0.55 m on each flank. -> the chassis is now an
- *     oriented box, 4.20 x 1.90 m, tested exactly (§ GEOMETRY).
+ *     the car visually cleared. -> the chassis is now an oriented box, 5.10 x
+ *     2.14 m, measured off the scene graph and tested exactly (§ GEOMETRY).
+ *  1b. AND A RIGID BOX IS STILL NOT A CAR. A box stops the same way wherever you
+ *     hit it, which made a tree a binary: 15% of entry speed at every lateral
+ *     offset out to 1.20 m, then a clean miss at 1.40. -> § EDGE COMPLIANCE and
+ *     § SHED, which is where most of the trunk's feel now comes from.
  *  2. NO ANGULAR RESPONSE — both paths only damped yaw (`yawRate *= 0.5`).
  *     Clipping a rail with a corner at 30 m/s has to spin the car; that is the
  *     entire feel of hitting something in a rally game. -> a real 2D rigid-body
@@ -69,10 +73,25 @@ export const CHASSIS = {
   halfLength: 2.55,        // m, nose to centre — the wedge tip at x = 2.72 less
                            // the 0.17 m of taper that is not full width
   halfWidth: 1.07,         // m, centreline to flank — ARCH_W/2, the widest solid
+  // EDGE COMPLIANCE. The share of the car's structure standing behind a contact
+  // at the very EDGE of a face, against 1.0 in the middle of one. This is the
+  // difference between "clipped a tree with the corner" and "hit a tree"; see
+  // the long note at the impulse for why the geometry alone cannot supply it.
+  // Both numbers were fitted by grid search against a target exit-speed curve,
+  // not guessed — the offset sweep printed by tools/collide-test.mjs is the
+  // evidence, and the fit is the only combination in the grid with no dip.
+  edgeCarry: 0.22,
+  crushPower: 1.20,        // carry = 1 - (1 - edgeCarry) * edge^this
+  // Past this much of the way out along a face the structure does not merely
+  // give — it FOLDS, and the obstacle ends up sitting in the fold (§ SHED).
+  // 0.32 of the half-width is 0.34 m, so the inner third of the bumper still
+  // stops the car dead and everything outside it is a clip.
+  shedEdge: 0.32,
+
   mass: 1180,              // kg — DEFAULT_TUNE.mass in entities/vehicle.js
-  // YAW INERTIA. A 4.2 x 1.9 m plate is I = m(L^2+W^2)/12 = 1180*21.25/12
-  // = 2090 kg m^2. The handling model does NOT use that: DEFAULT_TUNE has
-  // `inertiaScale: 1.30`, i.e. Iz = 1534 kg m^2, 27% under the plate value,
+  // YAW INERTIA. A 5.1 x 2.14 m plate is I = m(L^2+W^2)/12 = 1180*30.59/12
+  // = 3008 kg m^2. The handling model does NOT use that: DEFAULT_TUNE has
+  // `inertiaScale: 1.30`, i.e. Iz = 1534 kg m^2, 49% under the plate value,
   // because a lower inertia makes the car rotate more eagerly and that is the
   // arcade drift model's whole premise. Collisions read the SAME number, so the
   // yaw a hit injects and the yaw the drift model then damps are in the same
@@ -95,7 +114,11 @@ const BARRIER_HALF_T = { guard: 0.24, fence: 0.20 };
  * Every number here was set by driving the case in tools/collide-test.mjs and
  * reading the exit speed, so each one is quoted against its measurement.
  *
- *   restitution  e in the normal impulse. Exit speed off a square hit is e * v.
+ *   restitution  e in the normal impulse. Exit speed off a square hit is e * v,
+ *                so it is near zero on the things that are supposed to stop you
+ *                (a trunk bouncing the car back up the road is both odd and, as
+ *                § EDGE COMPLIANCE found, the one thing that made the offset
+ *                curve non-monotone).
  *   friction     Coulomb mu at the contact. LOW = you slide along the face.
  *   spin         Fraction of the GEOMETRIC contact lever that becomes rotation.
  *                Why it is not 1: the exact rigid-body answer for a front
@@ -107,14 +130,20 @@ const BARRIER_HALF_T = { guard: 0.24, fence: 0.20 };
  *                torque, which is the exact physics of a contact patch that
  *                smears toward the centreline instead of a mathematical point —
  *                so the solution stays self-consistent and the contact still
- *                separates. 0.12 puts that same corner hit at 2.8 rad/s.
+ *                separates. Divided by sqrt(carry), so a folding corner still
+ *                throws the car: see § EDGE COMPLIANCE.
  *   spinCap      rad/s ceiling on ONE contact's yaw change. Below vehicle.js's
  *                own 3.6 clamp on purpose, so the player still has yaw
  *                authority left to catch the slide.
- *   absorb       Extra speed bleed, applied as (1 - absorb * headOn^2) where
- *                headOn = |closing| / |contact speed|. Squared so a graze is
- *                free and only a square hit pays. This is the crumple that the
- *                normal impulse alone does not model.
+ *   absorb       Extra speed bleed, applied as (1 - absorb * carry * headOn^2)
+ *                where headOn = |closing| / |contact speed|. Squared so an
+ *                oblique approach is free; scaled by `carry` so an off-centre
+ *                one is too. This is the crumple the normal impulse does not
+ *                model.
+ *   edgeCarry    Optional per-material override of CHASSIS.edgeCarry. 1.0 on
+ *                the barriers, because a rail spreads its load down a beam and
+ *                a post line rather than into one bumper corner — and because a
+ *                barrier must never be shed.
  *   deflect      0..1. After the impulse, any speed still driving into the
  *                surface is turned along it by this fraction (§ NO-GRIND).
  *                1.0 on steel: the rail keeps you on the stage. 0.15 on a
@@ -144,6 +173,13 @@ export const MATERIALS = {
   guard: {
     restitution: 0.18, friction: 0.09, spin: 0.030, spinCap: 1.20,
     absorb: 0.10, deflect: 1.00, eventSpeed: 3.5,
+    // NO EDGE COMPLIANCE, and never shed. A W-beam is a continuous member
+    // bolted to a post line: it spreads the load down the flank and into the
+    // ground instead of concentrating it on one bumper corner, so the corner
+    // does not fold round it — and a barrier that could be shed would be a hole
+    // in the route. Leaving this at 1.0 is also what keeps the rail behaviour
+    // the critic signed off byte-identical to the round that was signed off.
+    edgeCarry: 1.0,
   },
 
   /**
@@ -161,31 +197,50 @@ export const MATERIALS = {
     // away — so the lever arm still gives the shunt a little rotation (0.4 rad/s
     // for a 12 m/s corner-first break) instead of a pure scalar multiply.
     breakCost: 0.25, breakSpin: 0.10, breakSpinCap: 0.60,
+    edgeCarry: 1.0,          // a rail line, not a point: see `guard`
   },
 
   /**
-   * MATURE TREE. Immovable, and the run's momentum ends here. Square on at 25
-   * m/s the car exits at 3.8 m/s BACKWARDS (e 0.30 gives 7.5, absorb 0.50 halves
-   * it): not "55% shaved off", stopped. Squarely on the front-left corner it
-   * exits at 3.6 and spins at 2.82 rad/s — that is the headline number and the
-   * one the whole module exists for.
+   * MATURE TREE. The single most important curve in the file, because "a tree is
+   * a stop, not an event" was the round's headline defect. Measured at 25 m/s
+   * against a 0.30 m trunk, exit speed as a share of entry, by how far the
+   * contact sits off the car's centreline:
    *
-   * mu = 0.52 is the number that took the most finding. FRICTION AT A CORNER
-   * CONTACT TORQUES THE CAR THE OTHER WAY: the normal impulse swings the nose
-   * away from the trunk, and friction dragging that same corner backwards swings
-   * it back. Measured on an oblique corner clip at 25 m/s (trunk 0.27 m outboard
-   * of the flank line, which is the clip a player really gets), the two cancel
-   * almost exactly at mu 0.72 — 0.19 rad/s, so the car simply stopped and did
-   * not spin at all. 0.72 -> 0.60 -> 0.52 -> 0.45 gives 0.27 / 0.54 / 0.72 /
-   * 0.87 rad/s and 47 / 53 / 57 / 60% of entry speed kept. 0.52 is where the
-   * clip reads as a rally moment: 43% of the speed gone and 30 deg out of shape,
-   * with the car still moving.
+   *     0.0   0.2   0.4   0.6   0.8   1.0   1.1   1.2   1.3   1.4 m
+   *      3%    0%   12%   25%   41%   61%   68%   72%   92%   miss
+   *      0    9deg 35deg 47deg 53deg 51deg 90deg 36deg -14deg
+   *
+   * Hit one square and the run ends (3% and no heading). Catch one with the
+   * outer third of the bumper and it costs you a corner, half your speed and
+   * fifty degrees, and you drive on. Before edge compliance that whole row read
+   * 15% 15% 15% 15% 15% 14% 15% 16% 63% miss — a binary with a 0.10 m window.
+   *
+   * restitution 0.06 is a token: it exists so a dead-centre hit reads as 0.75
+   * m/s rather than exactly 0.00, which looks like the hard-stop bug this module
+   * replaced. Anything higher reverses the car at full carry and puts a dip back
+   * in the curve — see § EDGE COMPLIANCE.
+   *
+   * mu = 0.72, and it means something quite different than it did before edge
+   * compliance existed. FRICTION AT A CORNER CONTACT TORQUES THE CAR THE OTHER
+   * WAY — the normal impulse swings the nose off the trunk, friction dragging
+   * that same corner backwards swings it back — and in the rigid model those
+   * two very nearly cancelled, which is what forced mu down to 0.52 last round.
+   * With the impulse capped and the shed contact exempt from the no-grind rule
+   * the cancellation is weak, and mu now mostly sets how hard a corner clip
+   * THROWS you. Re-measured on the same clip (trunk 0.10 m outboard of the
+   * flank line) at 25 m/s: mu 0.30 / 0.45 / 0.52 / 0.60 / 0.72 / 0.85 gives
+   * 1.20 / 1.65 / 1.86 / 2.10 / 2.46 / 2.85 rad/s of peak yaw, and exit speed
+   * barely moves at all (69 / 68 / 68 / 68 / 67 / 67%). 0.72 is bark against
+   * sheet steel and it is also where the clip reads best: two thirds of the
+   * speed kept and the car pitched properly sideways.
    *
    * deflect 0.15 stops the dead-on case feeling like the old hard stop: there is
-   * always a little slide past the trunk, so the car is never welded to it.
+   * always a little slide past the trunk, so the car is never welded to it. It
+   * only applies to contacts too central to shed — past shedEdge the corner has
+   * folded and there is nothing left to deflect off.
    */
   trunk: {
-    restitution: 0.30, friction: 0.52, spin: 0.12, spinCap: 3.20,
+    restitution: 0.06, friction: 0.72, spin: 0.12, spinCap: 3.20,
     absorb: 0.50, deflect: 0.15, eventSpeed: 3.0,
   },
 
@@ -199,8 +254,14 @@ export const MATERIALS = {
    * against the trunk's 3.59 and 2.82.
    */
   rock: {
-    restitution: 0.20, friction: 0.85, spin: 0.08, spinCap: 2.40,
+    restitution: 0.08, friction: 0.85, spin: 0.08, spinCap: 2.40,
     absorb: 0.58, deflect: 0.30, eventSpeed: 3.0,
+    // A boulder is 1.0-2.4 m across (surveyed) and presents a BROAD face, so a
+    // bumper corner cannot fold round it the way it folds round a 0.30 m trunk
+    // — more of the car is engaged whatever part of the bumper lands on it.
+    // Without this a corner clip on stone came out at 65% of entry against the
+    // trunk's 69%, i.e. indistinguishable; at 0.55 it is 44%.
+    edgeCarry: 0.55,
   },
 
   /**
@@ -222,12 +283,23 @@ export const MATERIALS = {
   },
 
   /**
-   * FENCE POST / MARKER / SIGN. Solid enough to hear and to knock the nose, far
-   * too light to end anything. Used only when a collider declares kind:'post'.
+   * CORNER BOARD / MARKER / SIGN. Now live: roads.js tags the hairpin marker
+   * boards `post` (r 0.70), and they stand 2.2 m outside the verge — precisely
+   * where a car running wide goes.
+   *
+   * RETUNED TO YIELD, and the placement is the argument. As a solid material it
+   * took a 25 m/s pass down to 15.6 and 31 degrees out of shape: a 1.4 m-wide
+   * obstacle you cannot see coming, sitting in the band the game wants you to
+   * use. props.js already refuses to make roadside stone solid for exactly this
+   * reason ("a rock you cannot see coming, in the band where the game wants you
+   * to be, is not a hazard — it is a wall"), and a plywood board on two stakes
+   * has far better claim to yielding than a boulder does. So the car mows it
+   * down: 6% of speed, no depenetration, no spin, and an event at 5 m/s so the
+   * FX owner still gets a bang and a shower of plywood out of it.
    */
   post: {
-    restitution: 0.10, friction: 0.30, spin: 0.09, spinCap: 0.90,
-    absorb: 0.14, deflect: 0.85, eventSpeed: 4.0,
+    yields: true, yieldCost: 0.06, eventSpeed: 5.0,
+    restitution: 0, friction: 0, spin: 0, spinCap: 0, absorb: 0, deflect: 0,
   },
 };
 
@@ -282,6 +354,14 @@ const MAX_SUBSTEPS = 8;          // 0.96 m of swept travel; beyond that we slice
 // must never be allowed to shove the car through a second one indefinitely.
 const MAX_ITER = 4;
 
+// SHED (see § SHED at the solver). A folded corner stays folded just long
+// enough for the car to get past the thing that folded it: 0.80 s covers the
+// 5.1 m of chassis that has to clear at the 8 m/s minimum fold speed, with a
+// little over. Bounding it by TIME rather than distance is what stops a shed
+// obstacle becoming a hole the player can turn round and drive back through.
+const SHED_LIFE = 0.80;          // s
+const SHED_MIN_CLOSING = 8;      // m/s — below this a corner dents, it does not fold
+
 const SLOP = 0.005;              // m of penetration left alone — stops contact chatter
 const MAX_PUSH = 0.40;           // m per contact. Never teleport: a push bigger than
                                  // this is a degenerate case (car spawned inside a
@@ -291,11 +371,18 @@ const MAX_PUSH = 0.40;           // m per contact. Never teleport: a push bigger
 // case. A barrier's penetration is measured along its face normal, and that is
 // only a true overlap while the car is on one side of it: smash a timber bay at
 // 45 degrees, carry on, and the neighbouring bay reports the car's 2.16 m
-// diagonal reach across the line as "depth 1.81 m". Measured — that is a real
-// case and it was a 1.8 m teleport. 0.60 m per step is 72 m/s of separation
-// rate at the shell's 1/120, so nothing legitimate ever touches this, and the
-// straddle walks itself out over three frames instead of jumping.
-const MAX_PUSH_STEP = 0.60;
+// diagonal reach across the line as "depth 1.77 m". Measured — that is a real
+// case, and it was a 1.8 m teleport.
+//
+// Expressed as a RATE rather than a per-step distance, because the thing that
+// reads as a teleport is metres per second, not metres per frame: the first
+// version budgeted 0.60 m per step, which at the shell's 1/120 is 72 m/s and
+// looked exactly like the jump it was meant to prevent. 14 m/s is 0.117 m at
+// 1/120 and 0.233 m at 1/60 — still an order of magnitude faster than any
+// legitimate overlap can accumulate, since the swept solver never lets a
+// contact get deeper than MAX_ADVANCE — and it walks the 1.77 m straddle out
+// over 15 frames, an eighth of a second, instead of one.
+const MAX_PUSH_RATE = 14;        // m/s of depenetration
 const REST_SPEED = 0.35;         // m/s of closing below which restitution is dropped,
                                  // so a car resting against a rail does not buzz.
 
@@ -513,6 +600,37 @@ export function resolveCollisions(vehicle, world, dt) {
   let pz = vehicle.position.z - vz * dt;
   let ang = vehicle.heading - w * dt;
 
+  // -------------------------------------------------------------------------
+  // § SHED — why an off-centre hit can end with the car still moving
+  // -------------------------------------------------------------------------
+  // Capping the impulse at an off-centre contact is NOT enough on its own, and
+  // measuring it is the only way to find that out. The impulse is proportional
+  // to the closing speed, so a capped contact leaves the car still closing, it
+  // contacts again next step, and the sequence is a geometric decay to a dead
+  // stop: with the cap alone, exit speed at every offset from 0.10 to 1.00 m
+  // came out at 0-7% — WORSE than the flat 15% it was meant to fix.
+  //
+  // What actually happens to a car that clips a tree with the outer third of
+  // its bumper is that the corner FOLDS, and the tree ends up sitting in the
+  // fold. The contact is not weaker, it is gone: the geometry the solver is
+  // testing no longer exists. So past `shedEdge` an obstacle delivers its one
+  // impulse and is then ignored for the rest of the pass — the car's own bumper
+  // corner passes through it, which at this camera height (the car is 4% of the
+  // frame) is a few frames of 0.3 m overlap that nobody can see.
+  //
+  // PROPS ONLY, and only above SHED_MIN_CLOSING. A barrier is a continuous
+  // surface whose entire job is keeping the car on the stage — shedding one
+  // would put a hole in the route. And a corner that is merely leant on does
+  // not fold, so creeping into a trunk on the throttle still stops you dead.
+  let shed = vehicle._collideShed ?? null;
+  if (shed) {
+    for (const [c, t] of shed) {
+      const left = t - dt;
+      if (left > 0) shed.set(c, left); else shed.delete(c);
+    }
+    if (shed.size === 0) shed = null;
+  }
+
   // --- broad phase, once, about the middle of the sweep ----------------------
   // The sweep is under 0.4 m at the shell's 1/120 step and the prop grid cell is
   // 24 m, so one query at the midpoint covers the whole path with room to spare.
@@ -543,6 +661,7 @@ export function resolveCollisions(vehicle, world, dt) {
   // Nothing within reach: the overwhelmingly common case, and it must be free.
   if (_props.length === 0 && _bars.length === 0) {
     vehicle._collideBrushed = null;
+    vehicle._collideShed = shed;      // still ticking down; the pass may resume
     return events;
   }
 
@@ -573,6 +692,7 @@ export function resolveCollisions(vehicle, world, dt) {
       _cand.depth = 0; _cand.obj = null; _cand.seg = null;
 
       for (const c of _props) {
+        if (shed?.has(c)) continue;                  // folded past it — see § SHED
         if (!obbVsCircle(px, pz, fx, fz, rx, rz, c.x, c.z, c.r, _hit)) continue;
         const kind = classifyCollider(c);
         if (MATERIALS[kind].yields) {
@@ -644,7 +764,7 @@ export function resolveCollisions(vehicle, world, dt) {
       // Never further than the overlap actually measured, never more than
       // MAX_PUSH in one go, and never more than MAX_PUSH_STEP across the step.
       const push = Math.min(Math.max(0, _cand.depth - SLOP), MAX_PUSH,
-        MAX_PUSH_STEP - pushBudget);
+        MAX_PUSH_RATE * dt - pushBudget);
       pushBudget += push;
       px += nx * push; pz += nz * push;
 
@@ -658,15 +778,72 @@ export function resolveCollisions(vehicle, world, dt) {
         continue;
       }
 
+      // -- EDGE COMPLIANCE ----------------------------------------------------
+      // THE FIX FOR "A TREE IS A STOP, NOT AN EVENT".
+      //
+      // Measured before this existed: exit speed off a 0.30 m trunk at 25 m/s
+      // was a FLAT 15% of entry at every lateral offset from 0.00 m to 1.20 m,
+      // then 63% at 1.30 and a clean miss at 1.40. A 0.10 m cliff between
+      // "lose 85%" and "lose nothing", with only the spin varying in between.
+      //
+      // The cause is not the material and not `absorb`. It is that a CIRCLE
+      // whose centre lies laterally inside the box always finds its closest
+      // point on the flat front FACE, so the contact normal is exactly square
+      // at every offset out to the half-width. `headOn` is therefore 1.0
+      // everywhere, and the headOn^2 weighting that is supposed to make a graze
+      // cheap never sees a graze. Only the lever arm varies, which is why only
+      // the spin varied. Chamfering the box would not fix it either: measured
+      // off car.js, the drawn car really is blunt in plan — the splitter is
+      // 2.00 m wide right at the nose against 2.14 m over the arches, a 6 deg
+      // bevel.
+      //
+      // What is actually missing is that the solver treats the car as RIGID, so
+      // every contact must remove all of the approach velocity at the contact
+      // point, wherever on the car it lands. Real cars do not do that: hit a
+      // tree with the middle of the bumper and the whole front structure loads
+      // and you stop; hit it with the last 20 cm and the corner folds, sheds
+      // the contact, and the car yaws round it and carries on. The impulse a
+      // contact can deliver is limited by the structure behind it.
+      //
+      // `carry` is that: the share of the car standing behind this contact, 1
+      // in the middle of a face and `edgeCarry` at its edge. It scales the
+      // impulse, the crumple and the no-grind rule together, so one number
+      // moves the whole outcome and the curve stays monotone.
+      const conL = arx * fx + arz * fz;            // contact point, body frame
+      const conS = arx * rx + arz * rz;
+      const nL = nx * fx + nz * fz;                // normal, body frame
+      const nS = nx * rx + nz * rz;
+      // How far ACROSS the contacted face the contact sits: 0 at its middle, 1
+      // at its edge. Blended by the normal, so it reads the lateral coordinate
+      // on the nose and the longitudinal one on a flank — which is why a T-bone
+      // at the B-pillar is full strength and one at the front wheel is not.
+      const edge = clamp(
+        (Math.abs(conS) / CHASSIS.halfWidth) * Math.abs(nL)
+        + (Math.abs(conL) / CHASSIS.halfLength) * Math.abs(nS), 0, 1);
+      const carry = 1 - (1 - (mat.edgeCarry ?? CHASSIS.edgeCarry))
+        * Math.pow(edge, CHASSIS.crushPower);
+      // Does this contact FOLD the corner rather than merely load it? Props
+      // only, far enough out, and hard enough. Decided here because the answer
+      // changes what the rest of the contact is allowed to do to the car.
+      const willShed = !_cand.seg && edge > CHASSIS.shedEdge
+        && closing >= SHED_MIN_CLOSING;
+
       // -- the impulse --------------------------------------------------------
       // Softened lever (see MATERIALS.spin) used in the effective mass AND in
       // the torque, so the pair stays a consistent rigid-body solution: the
       // contact really does end up separating.
-      const g = mat.spin;
+      // The linear impulse is discounted by `carry`; the ANGULAR one is not
+      // discounted as hard. A corner that folds round a trunk keeps delivering
+      // torque for as long as it is crushing — the tree is a pivot — so the
+      // rotation survives an impact the structure could not stop. sqrt() makes
+      // Δω scale as sqrt(carry) rather than carry: at the very edge that is 47%
+      // of the full angular response instead of 22%, which is the difference
+      // between being thrown sideways and being nudged.
+      const g = mat.spin / Math.sqrt(carry);
       const levN = (arz * nx - arx * nz) * g;
       const kN = invM + levN * levN * invI;
       const e = closing > REST_SPEED ? mat.restitution : 0;
-      const Jn = ((1 + e) * closing) / kN;
+      const Jn = (((1 + e) * closing) / kN) * carry;
 
       // Coulomb friction along the contact's own tangential slide direction.
       let tx = cvx - vn * nx, tz = cvz - vn * nz;
@@ -687,11 +864,12 @@ export function resolveCollisions(vehicle, world, dt) {
 
       // -- crumple ------------------------------------------------------------
       // The normal impulse models a rebound, not a wreck. `absorb` is the energy
-      // that went into bending things, and it is weighted by headOn^2 so a graze
-      // is free (0.26^2 = 7% of the coefficient at 15 degrees) and only a square
-      // hit pays the full price.
+      // that went into bending things: weighted by headOn^2 so an oblique
+      // approach is cheap (0.26^2 = 7% of the coefficient at 15 degrees), and by
+      // `carry` so an off-centre one is too — only the corner folded, so only
+      // the corner's worth of energy went into folding it.
       const headOn = carSpeed > 0.5 ? clamp(closing / carSpeed, 0, 1) : 1;
-      const keep = 1 - mat.absorb * headOn * headOn;
+      const keep = 1 - mat.absorb * carry * headOn * headOn;
       vx *= keep; vz *= keep;
 
       // -- NO-GRIND GUARANTEE -------------------------------------------------
@@ -702,14 +880,40 @@ export function resolveCollisions(vehicle, world, dt) {
       // the face. On steel that is the whole thing: you lose nothing and leave
       // pointing down the road. On a trunk it is a sixth, which is just enough
       // that the car crawls clear instead of parking against the bark.
-      const vnC = vx * nx + vz * nz;
+      //
+      // Scaled by `carry` for the same reason the impulse is: a surface can only
+      // insist you stop approaching it as hard as the part of the car touching
+      // it can push back. Without this the rule undid the whole edge-compliance
+      // fix — the capped impulse deliberately leaves the centre of mass still
+      // closing, and an unscaled no-grind zeroed exactly that residue and put
+      // every offset back to a dead stop.
+      //
+      // A SHED contact is exempt: the corner has folded, so there is nothing
+      // left there to push back with, and the car is going past rather than
+      // grinding. Measured — with the rule still firing on a shed contact it
+      // removed carry-worth of the residue every step and put a 0.40 m offset
+      // hit back to a 4% exit. It is the last thing that was flattening the
+      // curve.
+      const vnC = willShed ? 0 : vx * nx + vz * nz;
       if (vnC < 0) {
-        vx -= nx * vnC; vz -= nz * vnC;
+        const was = Math.hypot(vx, vz);
+        const take = vnC * carry;
+        vx -= nx * take; vz -= nz * take;
         if (mat.deflect > 0 && tl > 1e-4) {
-          const give = -vnC * mat.deflect;
+          const give = -take * mat.deflect;
           vx += tx * give; vz += tz * give;
         }
+        // REDIRECT, NEVER ADD. Taking a component off the normal and handing the
+        // same magnitude to the tangent is not energy-neutral when the车 already
+        // had tangential speed — measured, the 15 deg rail glance came out at
+        // 106% of entry, i.e. the barrier was accelerating the car. Cap the
+        // result at what we walked in with.
+        const now = Math.hypot(vx, vz);
+        if (now > was && now > 1e-6) { const k = was / now; vx *= k; vz *= k; }
       }
+
+      // -- shed the folded corner ---------------------------------------------
+      if (willShed) (shed ??= new Map()).set(_cand.obj, SHED_LIFE);
 
       // -- report -------------------------------------------------------------
       if (!already) {
@@ -730,6 +934,7 @@ export function resolveCollisions(vehicle, world, dt) {
   vehicle.heading = ang;
   vehicle.yawRate = clamp(w, -3.6, 3.6);       // the same clamp vehicle.step uses
   vehicle._collideBrushed = brushedNow;
+  vehicle._collideShed = shed;
 
   // Sticky telemetry that fx/feel.js reads off the vehicle rather than off the
   // event stream (it has its own 0.30 s debounce and picks the worst hit in the

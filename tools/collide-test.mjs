@@ -184,21 +184,28 @@ for (const v of [10, 20, 35]) {
 // ===========================================================================
 // 3. FRONT-LEFT CORNER INTO A TRUNK AT 25 m/s
 // heading = 0 -> forward = (+1, 0), right = (0, +1), so the car's LEFT is -z.
-// A 0.35 m trunk (props.js p50 is 0.29, p90 0.34) sitting on the left flank
-// line at z = -0.95 is clipped by the corner and nothing else.
+// A 0.35 m trunk (props.js p50 is 0.29, p90 0.34) sitting ON the left flank
+// line is clipped by the corner and nothing else.
+//
+// RE-BASELINED against the measured chassis. These offsets were picked for the
+// old 1.90 m box; against the real 2.14 m one the "oblique clip" at z = -1.22
+// was inside the flank and had become a square nose hit — which is exactly the
+// class of error the whole edge-compliance change is about, so it is worth
+// saying out loud rather than quietly moving a number.
 // ===========================================================================
 add('trunk front-left corner 25 m/s', {
   car: makeCar(-14, 0, 0, 25, 0),
-  world: propWorld([{ x: 0, z: -0.95, r: 0.35 }]),
-  expect: (r) => r.contacts > 0 && r.peakYaw > 1.5 && r.residual < 0.02,
+  world: propWorld([{ x: 0, z: -CHASSIS.halfWidth, r: 0.35 }]),
+  expect: (r) => r.contacts > 0 && r.peakYaw > 0.9 && r.kept > 0.45 && r.residual < 0.02,
 });
-// Same corner, but the trunk 0.27 m further out, so the contact normal is
-// oblique rather than straight up the car's nose. This is the tree-clip a
-// player actually has: it spins AND it lets you drive on.
+// Same corner, but the trunk 0.18 m further out, so the closest point on the
+// box is the CORNER and the contact normal is genuinely oblique rather than
+// straight up the car's nose. This is the tree-clip a player actually has: it
+// spins AND it lets you drive on.
 add('trunk corner CLIP oblique 25 m/s', {
   car: makeCar(-14, 0, 0, 25, 0),
-  world: propWorld([{ x: 0, z: -1.22, r: 0.35 }]),
-  expect: (r) => r.contacts > 0 && r.peakYaw > 0.5 && r.kept > 0.45,
+  world: propWorld([{ x: 0, z: -(CHASSIS.halfWidth + 0.10), r: 0.35 }]),
+  expect: (r) => r.contacts > 0 && r.peakYaw > 1.2 && r.kept > 0.60,
 });
 
 // ===========================================================================
@@ -288,7 +295,7 @@ add('rail CROSS at 40 m/s, dt=1/60', {
 // A rock is not a tree: same geometry, different material.
 add('rock front-left corner 25 m/s', {
   car: makeCar(-14, 0, 0, 25, 0),
-  world: propWorld([{ x: 0, z: -0.95, r: 1.20 }]),
+  world: propWorld([{ x: 0, z: -CHASSIS.halfWidth, r: 1.20 }]),
 });
 // Head-on vs corner on the SAME trunk: the circle model could not tell these
 // apart at all.
@@ -296,15 +303,64 @@ add('trunk square nose 25 m/s', {
   car: makeCar(-14, 0, 0, 25, 0),
   world: propWorld([{ x: 0, z: 0, r: 0.35 }]),
 });
-// THE PHANTOM WIDTH. A 0.30 m trunk whose centre is 1.45 m off the centreline
-// clears the 0.95 m flank by 0.20 m and is hit by nothing. The old 1.5 m circle
-// reached 1.80 m and stopped the car dead on it.
+// THE PHANTOM WIDTH. A 0.30 m trunk whose centre clears the flank by 0.20 m is
+// hit by nothing. The old 1.5 m circle reached 1.80 m and stopped the car dead
+// on things it visually cleared.
 add('clearance: trunk 0.20 m off the flank, 30 m/s', {
   car: makeCar(-14, 0, 0, 30, 0),
-  world: propWorld([{ x: 0, z: 1.45, r: 0.30 }]),
+  world: propWorld([{ x: 0, z: CHASSIS.halfWidth + 0.30 + 0.20, r: 0.30 }]),
   maxT: 1.2,
   expect: (r) => r.contacts === 0 && r.kept > 0.999,
 });
+// The corner board roads.js now tags `post`: 0.70 m of plywood standing 2.2 m
+// outside the verge, i.e. squarely in the line a car running wide takes. It has
+// to be a bang and a scattering of board, not a wall.
+add('post corner board 30 m/s', {
+  car: makeCar(-14, 0, 0, 30, 0),
+  world: propWorld([{ x: 0, z: 0, r: 0.70, kind: 'post' }]),
+  maxT: 1.4,
+  expect: (r) => r.kept > 0.90 && r.peakYaw < 0.05 && r.contacts === 1,
+});
+
+// ===========================================================================
+// THE CURVES
+// ===========================================================================
+// A single tuned case proves nothing about feel. What a player experiences is
+// how the outcome DEGRADES as the hit gets less square, and that is a curve.
+// Two of them, because they are the two ways a hit can be glancing:
+//   - a trunk taken further and further out along the bumper (lateral offset)
+//   - a rail taken at a shallower and shallower angle
+// The rail curve was signed off by the critic; the trunk curve is what this
+// round is for. They are printed side by side on purpose.
+// ===========================================================================
+function sweepTrunkOffset(v = 25, r = 0.30) {
+  const out = [];
+  for (let z = 0; z <= 1.60001; z += 0.10) {
+    const car = makeCar(-14, 0, 0, v, 0);
+    out.push({
+      k: z,
+      ...run(`trunk off ${z.toFixed(2)}`, {
+        car, world: propWorld([{ x: 0, z: -z, r }]), maxT: 2.0, settle: 1.2,
+      }),
+    });
+  }
+  return out;
+}
+
+function sweepGuardAngle(v = 30) {
+  const out = [];
+  for (const deg of [5, 10, 15, 20, 30, 45, 60, 90]) {
+    const a = deg / DEG;
+    out.push({
+      k: deg,
+      ...run(`guard ${deg}deg`, {
+        car: makeCar(-18, -3.0, -a, v * Math.cos(a), v * Math.sin(a)),
+        world: railWorld('guard', 13), maxT: 2.4, settle: 1.2,
+      }),
+    });
+  }
+  return out;
+}
 
 // --- report ----------------------------------------------------------------
 const f = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : '  -  ');
@@ -346,6 +402,30 @@ if (CSV) {
   console.log('moment the solver resolved it   pen1x = what a single end-of-step test would have');
   console.log('seen instead   move = worst single-step position correction: depenetration (budget');
   console.log('0.60 m) plus the swept re-integration after the impulse changed the velocity');
+  console.log('');
+  // ---- the curves --------------------------------------------------------
+  const curve = (title, rows2, kLabel, kFmt) => {
+    console.log('');
+    console.log(title);
+    console.log('  ' + kLabel.padEnd(9) + ['v out', 'kept', 'd hdg', 'peak yaw', 'n']
+      .map((s) => s.padStart(10)).join(''));
+    for (const r of rows2) {
+      console.log('  ' + kFmt(r.k).padEnd(9)
+        + f(r.vOut, 2).padStart(10)
+        + ((r.kept * 100).toFixed(0) + '%').padStart(10)
+        + f(r.dHeadingDeg, 1).padStart(10)
+        + f(r.peakYaw, 2).padStart(10)
+        + String(r.contacts).padStart(10));
+    }
+  };
+  curve('TRUNK: lateral offset of a 0.30 m trunk from the car centreline, 25 m/s head-on',
+    sweepTrunkOffset(), 'offset m', (k) => k.toFixed(2));
+  curve('GUARDRAIL: approach angle to the beam, 30 m/s  (the shape the trunk curve has to earn)',
+    sweepGuardAngle(), 'angle', (k) => `${k}deg`);
+  console.log(`  half-width ${CHASSIS.halfWidth} m, so contact is on the NOSE up to `
+    + `${CHASSIS.halfWidth.toFixed(2)} m and on the front CORNER out to `
+    + `${(CHASSIS.halfWidth + 0.30).toFixed(2)} m; past that it is a clean miss.`);
+
   console.log('');
   console.log(`inference check: r=0.29 -> ${classifyCollider({ r: 0.29 })}, `
     + `r=0.83 -> ${classifyCollider({ r: 0.83 })}, `
