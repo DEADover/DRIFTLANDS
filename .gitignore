@@ -6,3 +6,7 @@ shots/
 # The player's own soundtrack: local, large, and not ours to commit.
 music/*
 !music/README.md
+
+# Engine samples the player supplies: local, and not ours to commit.
+sfx/*
+!sfx/README.md
