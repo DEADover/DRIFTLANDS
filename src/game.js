@@ -11,6 +11,7 @@ import { PropScatter } from './world/props.js';
 import { createRoadNetwork } from './world/roads.js';
 import { createBridges } from './world/bridges.js';
 import { createLandmarks } from './world/landmarks.js';
+import { createJump } from './world/jump.js';
 import { Vehicle } from './entities/vehicle.js';
 import { CarView } from './entities/car.js';
 import { createAnimals } from './entities/animals.js';
@@ -172,8 +173,14 @@ export class Game {
     this.landmarks = createLandmarks({ ...ctx, roads: this.roads, water: this.water });
     this.worldGroup.add(this.landmarks.group);
 
+    // BEFORE the props: the ford's bed is carved into the terrain, and anything
+    // scattered first would end up standing in the stream.
+    this.jump = createJump({ ...ctx, roads: this.roads, water: this.water });
+    this.worldGroup.add(this.jump.group);
+
     const blocked = (x, z) =>
-      this.roads.isBlocked(x, z) || this.bridges.isBlocked(x, z) || this.landmarks.isBlocked(x, z);
+      this.roads.isBlocked(x, z) || this.bridges.isBlocked(x, z)
+      || this.landmarks.isBlocked(x, z) || this.jump.isBlocked(x, z);
 
     this.props = new PropScatter(this.terrain, palette, biome, seed + 11);
     this.worldGroup.add(this.props.build(blocked));
@@ -280,7 +287,17 @@ export class Game {
    */
   surfaceHeight(x, z) {
     const deck = this.bridges.heightAt(x, z);
-    const road = this.roads.heightAt?.(x, z);
+    let road = this.roads.heightAt?.(x, z);
+    // THE JUMP CROWN JOINS THE ROAD, NOT THE BRIDGE.
+    //
+    // It is an embankment built ON the carriageway, so it is simply the topmost
+    // drawn surface there and belongs in the same max. It must NOT go in the
+    // deck branch: that branch returns a hard UP normal, and a jump ramp is
+    // nothing but gradient — with UP the car would climb the 1:4 face for free
+    // and get nothing back down the landing.
+    const ramp = this.jump?.heightAt(x, z);
+    if (ramp != null && (road == null || ramp > road)) road = ramp;
+
     // TOPMOST, not deck-wins. Over the last few metres of a span the deck is
     // deliberately eased back down onto the road's own height so the car does
     // not hit a step getting on, which means the ribbon is legitimately drawn
@@ -303,7 +320,17 @@ export class Game {
 
   groundAt(x, z) {
     const deck = this.bridges.heightAt(x, z);
-    const road = this.roads.heightAt?.(x, z);
+    let road = this.roads.heightAt?.(x, z);
+    // THE JUMP CROWN JOINS THE ROAD, NOT THE BRIDGE.
+    //
+    // It is an embankment built ON the carriageway, so it is simply the topmost
+    // drawn surface there and belongs in the same max. It must NOT go in the
+    // deck branch: that branch returns a hard UP normal, and a jump ramp is
+    // nothing but gradient — with UP the car would climb the 1:4 face for free
+    // and get nothing back down the landing.
+    const ramp = this.jump?.heightAt(x, z);
+    if (ramp != null && (road == null || ramp > road)) road = ramp;
+
 
     // Whichever is drawn on top wins — see surfaceHeight. `onBridge` follows the
     // surface the wheels are actually resting on, not merely whether a deck

@@ -19,7 +19,7 @@ import * as THREE from 'three';
  */
 
 /** Surfaces a wheel can rest on. Everything else (props, water, sky) is not ground. */
-const DRIVABLE = /^(terrain|road-main|road-spur|bridge|deck|abutment|pier|rail|kerb)/;
+const DRIVABLE = /^(terrain|road-main|road-spur|bridge|deck|abutment|pier|rail|kerb|jumpramp)/;
 
 function collectDrivable(scene) {
   const out = [];

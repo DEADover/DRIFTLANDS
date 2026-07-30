@@ -115,6 +115,33 @@ export const PRESETS = {
     autopilot: { aggression: 1 },
     notes: 'Judge animal silhouettes, motion, believability of the herd.',
   },
+
+  /**
+   * THE JUMP. Car airborne over the stream, mid-flight.
+   *
+   * WHY THE WARMUP IS TWO MINUTES. Every other preset frames something that is
+   * near the spawn; this one frames a set-piece 2.4 km around the loop from it,
+   * and main.js has exactly one way to move the car — drive it. 108.72 s is the
+   * measured moment the autopilot at full throttle is 8 m past the take-off lip
+   * and 4.7 m over the water (tools/jump-test.mjs prints the same arrival).
+   *
+   * That makes this the one preset in the set whose framing depends on a hundred
+   * seconds of driving, so it is also the one that will drift if the route, the
+   * tyre model or the autopilot change. If it comes back with the car on the
+   * ground, re-measure the arrival rather than assuming the jump is broken —
+   * `node tools/jump-test.mjs` reports the site and the approach speed directly.
+   */
+  jump_alpine: {
+    id: 'jump_alpine',
+    label: 'The jump — airborne over the stream',
+    biome: 'alpine',
+    seed: 1337,
+    warmup: 108.72,
+    tape: [drive(108.72, { throttle: 1 })],
+    camera: { zoom: 0.86 },
+    autopilot: { aggression: 1 },
+    notes: 'Judge the earthwork, the crib revetments, the stream and the air.',
+  },
 };
 
 export const PRESET_IDS = Object.keys(PRESETS);
