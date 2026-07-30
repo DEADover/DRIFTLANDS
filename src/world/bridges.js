@@ -335,6 +335,19 @@ export function createBridges(ctx) {
             })),
           }
         : { stats: null, crossings: 0, lakes: [] };
+      // SLOPE AUDIT HOOK. tools/slope.mjs walks the route and takes a
+      // perpendicular terrain profile at every station; to say anything about
+      // what the CARVE did it has to be able to ask both heights at a point.
+      // `raw` is terrain.heightAt as it was before carveLakes() replaced it.
+      if (plan) {
+        window.__WATER.probe = {
+          raw: (x, z) => plan.raw(x, z),
+          carved: (x, z) => plan.heightAt(x, z),
+          at: (x, z) => plan.probeAt(x, z),
+          level: (x, z) => plan.levelAt(x, z),
+          route: P.map((p) => ({ x: p.x, z: p.z, nx: p.nx, nz: p.nz, ds: p.ds })),
+        };
+      }
     }
     // Route heights move with the ground under them.
     if (plan && P) for (const p of P) p.yT = terrain.heightAt(p.x, p.z);

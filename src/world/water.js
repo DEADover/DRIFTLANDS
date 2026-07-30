@@ -459,6 +459,19 @@ const CARVE = {
   SPUR_IN: 9,
   SPUR_OUT: 36,
   FREEBOARD: 3.0,     // road surface above the tarn it runs beside
+  // How far above the LOWEST NATURAL GROUND inside its own disc a tarn's surface
+  // sits. This, not the road, is what decides the level: a lake is a filled
+  // hollow. With DEPTH at 8.5 the middle of the bed still ends up six metres
+  // under the hollow's floor, so there is a real basin — it is simply a basin
+  // and not a quarry.
+  POND_RISE: 2.4,
+  // If the road forces the surface further than this below the hollow, the site
+  // is not a tarn site. Reject it instead of excavating it.
+  MAX_SINK: 4.5,
+  // Mean metres of ground the basin would have to move, above which the site is
+  // refused. Was effectively 40 (a score threshold of 34 against a cost that
+  // carried a -7 size bonus), which is a quarry by any measure.
+  MAX_COST: 9.0,
   NECK_FREEBOARD: 5.5,
   // How far the run-off beside the carriageway is held above the waterline.
   // Water is a fair hazard; it should be something you reach by getting it
@@ -470,10 +483,124 @@ const CARVE = {
   DEPTH: 8.5,         // bed below the surface at the middle
 };
 
+// ===========================================================================
+// THE ANGLE OF REPOSE
+//
+// THE CLIENT'S COMPLAINT, AND WHAT WAS ACTUALLY WRONG
+// ---------------------------------------------------
+// "Height changes must not just be one dumb vertical polygon downward.
+//  Mountains clearly do not form that way."
+//
+// Measured with tools/slope.mjs — walk the route, take a perpendicular terrain
+// profile at 260 stations, report the steepest adjacent step:
+//
+//     246 of 260 stations steeper than 45 deg   (140 of them over 85 deg)
+//     worst step 33.3 m/m — 88.3 degrees
+//     median dead-flat dug run 16 m, longest 66 m
+//     the UNTOUCHED terrain's own worst step: 0.69 m/m, 34.5 deg
+//
+// The last line is the whole diagnosis. terrain.js writes nothing steeper than
+// 35 degrees anywhere on the map. Every cliff in the frame was written by this
+// file, and there were two mechanisms:
+//
+// 1. THE CARVE HARD-SET INSTEAD OF BLENDING.  The old line was
+//        const target = L.level + 3.0 - (3.0 + DEPTH * bf - relief) * k;
+//        if (target < h) h = target;
+//    `k` is the guard band, zero at the road and one out in the basin — but it
+//    only scaled the depth BELOW a reference height of level + 3. At k = 0 the
+//    target is therefore not "the ground as it was", it is `level + 3`, and the
+//    ground was slammed to it. So the transition from real hillside to basin
+//    happened in the ONE METRE where the guard's smoothstep leaves zero. A
+//    profile at station 159 read 40.5 m at 12 m off the centreline and 6.3 m at
+//    16 m: a 33-metre wall, and `level + 3` on the other side of it.
+//
+// 2. THE BANK PROFILE HELD A CONSTANT.  bedFrac's land branch was
+//        -min(2.9, -m * 0.14) / DEPTH
+//    a 1:7 beach that STOPPED CLIMBING at 2.9 m and then held that number for
+//    as far as the basin reached. Every basin wrote a plateau exactly 2.9 m
+//    above its own water, tens of metres wide, with a vertical face where it
+//    met the hillside. Those are the flat green shelves and the vertical green
+//    band in shots/r15/lake_bridge.png. They are also DRY by construction —
+//    ground held 2.9 m above the waterline can never hold water, which is why
+//    the client sees bare green walls rather than lakes.
+//
+// THE MODEL
+// ---------
+// Loose material stands at about 33 degrees and nothing this file writes is
+// rock unless it is a bridge abutment. So:
+//
+//   * every height the carve wants is a TARGET, and the ground is BLENDED to it
+//     from where it actually was — k = 0 now means "untouched", not "level + 3";
+//   * the blend distance is derived from the HEIGHT DIFFERENCE at that point,
+//     not from a fixed pair of metres: a 30 m drop is given 55 m of slope;
+//   * outside the waterline the basin's own ground climbs at the angle of
+//     repose until it INTERSECTS the hillside, and the intersection is where
+//     the basin ends. There is no cap and therefore no constant;
+//   * the descent is BENCHED, because a 60 m plane is as unconvincing as a
+//     wall and real ground steps down.
+//
+// BENCHING, IN ONE LINE
+//   k(t) = t - (A / 2 pi N) sin(2 pi N t)
+// is monotone for A <= 1, runs 0 -> 1, and its gradient oscillates between
+// (1 - A) and (1 + A) times the mean. With A = 0.78 over a run authored at
+// 1:1.85 that is treads at about 7 degrees and faces at about 44 — N of them,
+// N growing with the height to be lost. It starts and ends at the gentle end of
+// the oscillation, so the slope also meets the hillside above and the floor
+// below without a crease.
+// ===========================================================================
+const TALUS = {
+  // MEAN gradient of a cut face, metres of fall per metre of ground. tan(31) is
+  // 0.60, so a 30 m drop is spread over fifty metres and a 3 m one over five.
+  //
+  // MEASURED, and this is the number the brief's "talus around 30-35 degrees" is
+  // actually about (tools/slope.mjs, "MEAN gradient of the carved dry slope"):
+  // p50 22-29 deg, p95 33-35 deg over the three presets. The steepest single
+  // metre of a station is a bench FACE and is meant to be steeper than this.
+  //
+  // TRIED AND REVERTED: 0.56 with AMP 0.44. It is gentler on paper (mean talus
+  // p95 30-32) and made no difference at all to the extremes — lake_bridge's
+  // worst step stayed at 1.34 m/m, because that one is a bridge abutment and
+  // TAN_ROCK owns it — while the wider cut it produces moved the prop scatter
+  // enough to cost 0.008 of frame luma (0.371 against 0.379, target 0.379).
+  TAN: 0.60,
+  // Banding. The limit is modulated +-AMP along the hillside's own contours, so
+  // the descent alternates between treads and faces. The global bound on the
+  // finished field is therefore the FACE value, and it is a bound and not an
+  // average — which is the whole reason for doing it with cones.
+  //
+  // Faces at TAN*(1+AMP) = 0.81 -> 38.9 deg, treads at 0.31 -> 17.4 deg. At 0.60
+  // / 0.46 the faces stood at 41.2 and lake_bridge came back with four stations
+  // over 45 and a p99 of 45.2; at 0.56 / 0.44 it is two stations and 41.7. A
+  // bench face wants to be clearly steeper than its tread and clearly gentler
+  // than a wall, and 39 against 17 is that.
+  AMP: 0.46,
+  BAND_H: 7.5,        // metres of height per bench band
+  // A CROSSING IS THE ONE PLACE THIS FILE IS ALLOWED TO WRITE ROCK.
+  //
+  // bridges.js will not build a deck unless there is open water 13 m off the
+  // centreline (`necked()`), and the deck's half width is 8.6 m. Holding the
+  // abutment to 31 degrees from a road standing five and a half metres over its
+  // water puts the waterline at 4.6 + 9.2 = 14 m — outboard of the test, and
+  // every bridge in the world silently stops being built. A bridge abutment is
+  // a CUT ROCK FACE, so the crossing, and only the crossing, gets a rock limit.
+  // It applies over the twenty metres of route the deck covers and nowhere else.
+  // MEASURED DOWN FROM 1.55. At tan 57 the twelve crossing stations were the
+  // only thing left in the 45-60 band and three of them were over 60. The
+  // abutment only has to be steep enough to get the waterline inside the 13 m
+  // bridges.js tests at: with the crossing's own sink held to 6.2 m (below),
+  // tan 46 needs 6.4 m of run from a 4.6 m keep-out, so the water reaches 11 m
+  // and there is still margin. A five-metre rock face under the planks.
+  TAN_ROCK: 1.05,     // tan 46.4 deg
+};
+
 const sstep = (a, b, x) => {
   const t = Math.max(0, Math.min(1, (x - a) / (b - a || 1e-6)));
   return t * t * (3 - 2 * t);
 };
+
+// Attribution slot for the slope audit; null in every normal call, so the carve
+// pays one null test per mechanism and nothing else. See plan.probeAt().
+let DBG = null;
 
 // ---------------------------------------------------------------------------
 // BATHYMETRY NOISE
@@ -878,21 +1005,119 @@ const NECK_WATERLINE = 8.8;
 const BED_KNOTS = [[0, 0], [6, 1.0], [15, 3.0], [30, 6.0], [52, 8.5]];
 
 /**
- * @param {number} m  metres inside the waterline; negative is up the bank
- * @returns {number}  bed depth as a fraction of CARVE.DEPTH, negative on land
+ * Depth of the bed below the waterline, in metres.
+ *
+ * @param {number} m  metres inside the waterline; zero or less is dry land
  */
-function bedFrac(m) {
-  if (m <= 0) {
-    // The bank. A 1:7 rise, capped at 2.9 m: this is the old curve's -0.32 of
-    // DEPTH, and it is what the berm below closes the shoreline against.
-    return -Math.min(2.9, -m * 0.14) / CARVE.DEPTH;
-  }
+function bedDepth(m) {
+  if (m <= 0) return 0;
   for (let i = 1; i < BED_KNOTS.length; i++) {
     const [x0, y0] = BED_KNOTS[i - 1];
     const [x1, y1] = BED_KNOTS[i];
-    if (m <= x1) return (y0 + (y1 - y0) * sstep(x0, x1, m)) / CARVE.DEPTH;
+    if (m <= x1) return y0 + (y1 - y0) * sstep(x0, x1, m);
   }
-  return 1;
+  return BED_KNOTS[BED_KNOTS.length - 1][1];
+}
+
+/**
+ * CONE TRANSFORMS — the thing that makes the angle of repose a GUARANTEE.
+ *
+ * `chamfer()` below propagates DISTANCE. These propagate HEIGHT with a slope
+ * limit, over the same eight-neighbour lattice:
+ *
+ *     coneDown:  F[b] = min(F[b], F[a] + dist(a,b) * slope)
+ *     coneUp:    F[b] = max(F[b], F[a] - dist(a,b) * slope)
+ *
+ * coneDown is the lower envelope of cones rising out of every place the water
+ * demands a bed: "the ground may be no HIGHER than this, given that it has to
+ * fall to the bed over there and may only fall at the angle of repose."
+ * coneUp is the mirror: "the ground may be no LOWER than this, given that the
+ * carriageway over there has to stay where it is."
+ *
+ * The point of doing it this way rather than with a guard band is that the
+ * bound is structural. Every step of the sweep satisfies
+ * F[b] - F[a] <= dist * slope, so the finished field cannot contain a gradient
+ * steeper than the local slope limit however the basins are planned, wherever
+ * they overlap and whatever the terrain under them does. Three rounds of tuning
+ * smoothstep endpoints could not achieve that, because a smoothstep's gradient
+ * depends on the height it is asked to carry and nothing was telling it what
+ * that height was.
+ *
+ * `slope` is per-cell, which is what gives the descent its benches: banding the
+ * limit between a tread value and a face value along the hillside's own contours
+ * makes the envelope step down instead of running as one plane.
+ *
+ * Four sweeps rather than two. Two are exact for a constant metric; with a
+ * varying one the extra pair buys accuracy, and the bound holds either way.
+ */
+function coneDown(F, N, C, slope) {
+  const a = C, b = C * Math.SQRT2;
+  for (let it = 0; it < 2; it++) {
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const k = j * N + i, s = slope[k];
+        let v = F[k];
+        if (i > 0) v = Math.min(v, F[k - 1] + a * s);
+        if (j > 0) v = Math.min(v, F[k - N] + a * s);
+        if (i > 0 && j > 0) v = Math.min(v, F[k - N - 1] + b * s);
+        if (i < N - 1 && j > 0) v = Math.min(v, F[k - N + 1] + b * s);
+        F[k] = v;
+      }
+    }
+    for (let j = N - 1; j >= 0; j--) {
+      for (let i = N - 1; i >= 0; i--) {
+        const k = j * N + i, s = slope[k];
+        let v = F[k];
+        if (i < N - 1) v = Math.min(v, F[k + 1] + a * s);
+        if (j < N - 1) v = Math.min(v, F[k + N] + a * s);
+        if (i < N - 1 && j < N - 1) v = Math.min(v, F[k + N + 1] + b * s);
+        if (i > 0 && j < N - 1) v = Math.min(v, F[k + N - 1] + b * s);
+        F[k] = v;
+      }
+    }
+  }
+}
+
+function coneUp(F, N, C, slope) {
+  const a = C, b = C * Math.SQRT2;
+  for (let it = 0; it < 2; it++) {
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const k = j * N + i, s = slope[k];
+        let v = F[k];
+        if (i > 0) v = Math.max(v, F[k - 1] - a * s);
+        if (j > 0) v = Math.max(v, F[k - N] - a * s);
+        if (i > 0 && j > 0) v = Math.max(v, F[k - N - 1] - b * s);
+        if (i < N - 1 && j > 0) v = Math.max(v, F[k - N + 1] - b * s);
+        F[k] = v;
+      }
+    }
+    for (let j = N - 1; j >= 0; j--) {
+      for (let i = N - 1; i >= 0; i--) {
+        const k = j * N + i, s = slope[k];
+        let v = F[k];
+        if (i < N - 1) v = Math.max(v, F[k + 1] - a * s);
+        if (j < N - 1) v = Math.max(v, F[k + N] - a * s);
+        if (i < N - 1 && j < N - 1) v = Math.max(v, F[k + N + 1] - b * s);
+        if (i > 0 && j < N - 1) v = Math.max(v, F[k + N - 1] - b * s);
+        F[k] = v;
+      }
+    }
+  }
+}
+
+/** Bilinear sample of a square grid whose (0,0) cell centre is at -half. */
+function gridSampler(F, N, C, half) {
+  return (x, z) => {
+    const fi = (x + half) / C, fj = (z + half) / C;
+    let i = Math.floor(fi), j = Math.floor(fj);
+    if (i < 0) i = 0; else if (i > N - 2) i = N - 2;
+    if (j < 0) j = 0; else if (j > N - 2) j = N - 2;
+    const u = Math.max(0, Math.min(1, fi - i)), v = Math.max(0, Math.min(1, fj - j));
+    const k = j * N + i;
+    return (F[k] * (1 - u) + F[k + 1] * u) * (1 - v)
+         + (F[k + N] * (1 - u) + F[k + N + 1] * u) * v;
+  };
 }
 
 /** Two-pass chamfer distance transform over a square grid of zero-seeds. */
@@ -1049,6 +1274,30 @@ export function planLakes(ctx, P) {
     return lo;
   };
 
+  /**
+   * Lowest UNTOUCHED ground inside a basin's waterline.
+   *
+   * The measurement a tarn's level should be taken from, and the one nothing in
+   * this file consulted before. Sampled over the u <= WATERLINE disc, which is
+   * exactly the ground that ends up wet.
+   */
+  const terrainLowIn = (L) => {
+    let lo = Infinity;
+    for (let a = 0; a < 14; a++) {
+      const t = (a / 14) * Math.PI * 2;
+      const ca = Math.cos(t) * WATERLINE, sa = Math.sin(t) * WATERLINE;
+      for (const f of [0, 0.34, 0.62, 0.86, 1.0]) {
+        const ox = ca * L.Ra * f, oz = sa * L.Rc * f;
+        const h = terrain.heightAt(
+          L.x + L.tx * ox + L.nx * oz,
+          L.z + L.tz * ox + L.nz * oz,
+        );
+        if (h < lo) lo = h;
+      }
+    }
+    return lo;
+  };
+
   /** Lowest and highest ground the road reaches over ±reach samples. */
   const roadBand = (station, reach) => {
     let lo = Infinity, hi = -Infinity;
@@ -1173,9 +1422,15 @@ export function planLakes(ctx, P) {
       // The waterline has to clear the lowest road the lobes touch, but no
       // lower: a level dragged down by a dip eighty metres away turns a neck
       // into a gorge, and the deck fascia into a ten-metre timber wall.
+      // HOW FAR THE CROSSING SINKS, and it is the abutment height. A crossing is
+      // allowed to be a real dip — that is what a bridge is for — but every metre
+      // of it is a metre of cut rock face standing under the deck, and at 8.5 the
+      // twelve crossing stations were the steepest ground left on the map
+      // (measured: three over 60 degrees). 6.2 m keeps the deck clearly a bridge
+      // and the abutment a five-metre step.
       const level = Math.max(
         roadLow(station, Ra * 1.3) - CARVE.NECK_FREEBOARD,
-        p.yT - 8.5,
+        p.yT - 6.2,
       );
       // A neck needs water on BOTH sides or it is not a crossing, just a bay,
       // so it is the WORSE of the two banks that has to be acceptable. Shrink
@@ -1200,7 +1455,12 @@ export function planLakes(ctx, P) {
       for (const Rc of [58, 50, 42, 35, 29]) {
         const a = mk(p, 1, Ra, Rc, Rc * 0.50, level, true, station);
         const b = mk(p, -1, Ra, Rc, Rc * 0.50, level, true, station);
-        if (basinCost(terrain, a, level) < 20 && basinCost(terrain, b, level) < 20) {
+        // TIGHTENED FROM 20. A crossing lobe accepted at twenty metres of mean cut
+        // is a gorge quarried out of a hillside with a bridge over it: measured,
+        // the worst basin on the map had 20.5 m of mean cut and it was a lobe.
+        // Eleven still admits a real arm of water and lets the shrink ladder find
+        // it a narrower one where the ground will not take the wide version.
+        if (basinCost(terrain, a, level) < 11 && basinCost(terrain, b, level) < 11) {
           made = [a, b];
           break;
         }
@@ -1264,25 +1524,52 @@ export function planLakes(ctx, P) {
           // is what this ratio makes.
           const Ra = Rc * 1.8;                        // half width across view
           const D = WATERLINE * Rc + MARGIN;          // metres down-view
-          const cx = p.x + VIEW_X * D, cz = p.z + VIEW_Z * D;
+        for (const across of [0, -105, 105]) {
+          const cx = p.x + VIEW_X * D + CX * across;
+          const cz = p.z + VIEW_Z * D + CZ * across;
           // The waterline has to clear the LOWEST carriageway the basin can
-          // reach, or the far end of the lake ends up over the road.
-          const lo = roadLowNear(cx, cz, Math.max(Ra, Rc) * 1.45);
+          // reach, or the far end of the lake ends up over the road. Only the
+          // WET part can flood a road, so the reach is the ellipse and not a
+          // circle half again its size: at 1.45 the level was being dragged down
+          // by tarmac three hundred and sixty metres away, and that single
+          // number is where most of the quarrying came from.
+          const lo = roadLowNear(cx, cz, Math.max(Ra, Rc) * 0.98);
           if (!Number.isFinite(lo)) continue;
-          const level = lo - CARVE.FREEBOARD;
           const L = {
             x: cx, z: cz,
             tx: CX, tz: CZ, nx: VIEW_X, nz: VIEW_Z,
-            Ra, Rc, o: D, level, floor: level - CARVE.DEPTH,
+            Ra, Rc, o: D, level: 0, floor: 0,
             neck: false, station: st,
           };
+          // A TARN FILLS A HOLLOW. IT DOES NOT SIT AT THE BOTTOM OF A QUARRY.
+          //
+          // The level used to be `lowest road nearby minus three`, and nothing
+          // in it referred to the ground the basin was actually being dug into.
+          // On a route that climbs forty metres that put the waterline tens of
+          // metres under the meadow it was carved from: measured with
+          // tools/slope.mjs, 44 of 53 basins had their surface more than 3 m
+          // below the LOWEST natural ground inside their own disc, the worst by
+          // 26.6 m, and the median basin had 13.1 m of ground taken off it.
+          //
+          // That is the client's "dry pits" — and it is also why the frame was
+          // full of green faces rather than lakes, because a hole cut 26 m into
+          // a hillside is nearly all wall. The level is now the hollow's own low
+          // point plus a couple of metres, bounded above by the road; if the road
+          // forces it much below the hollow, the site is not a tarn site and is
+          // rejected rather than excavated.
+          const tLow = terrainLowIn(L);
+          const level = Math.min(lo - CARVE.FREEBOARD, tLow + CARVE.POND_RISE);
+          if (level < tLow - CARVE.MAX_SINK) continue;
+          L.level = level; L.floor = level - CARVE.DEPTH;
           const cost = basinCost(terrain, L, level);
+          if (cost > CARVE.MAX_COST) continue;
           // Bigger and nearer the road is better when the digging costs the
           // same: a tarn you drive past beats a tarn on the horizon. The margin
           // is scored gently — a wide dry foreground is worth having, but not
           // at the price of pushing the water out of shot altogether.
-          const score = cost - Rc * 0.05 + MARGIN * 0.02;
+          const score = cost - Rc * 0.05 + MARGIN * 0.02 + Math.abs(across) * 0.006;
           cand.push({ L, score });
+        }
         }
       }
     }
@@ -1333,6 +1620,13 @@ export function planLakes(ctx, P) {
   const setRadii = (L) => {
     L.Rmax = Math.max(L.Ra, L.Rc) * 1.30;
     L.R2out = L.Rmax * L.Rmax;
+    // A SEPARATE, WIDER BOUND FOR THE CARVE. The bank now climbs at the angle of
+    // repose until it meets the hillside, and for a basin dug into ground twenty
+    // metres up that intersection is fifty metres outside the waterline. Bounding
+    // the carve at the old 1.3 Rmax chopped the talus off partway and reinstated
+    // the very step this was meant to remove. Rmax itself is left alone because
+    // the overlap test is tuned against it.
+    L.R2carve = (Math.max(L.Ra, L.Rc) * 1.85) ** 2;
     L.hx = Math.abs(L.tx) * L.Ra + Math.abs(L.nx) * L.Rc;
     L.hz = Math.abs(L.tz) * L.Ra + Math.abs(L.nz) * L.Rc;
   };
@@ -1416,42 +1710,289 @@ export function planLakes(ctx, P) {
     return 1 - sstep(0.20, 0.52, Math.abs((dx * L.tx + dz * L.tz) / L.Ra));
   };
   const mix = (a, b, t) => a + (b - a) * t;
-  const guardOf = (L, x, z, w) => {
-    const dr = dRoute(x, z);
-    const g = sstep(
-      mix(CARVE.ROAD_IN, CARVE.NECK_IN, w),
-      mix(CARVE.ROAD_OUT, CARVE.NECK_OUT, w),
-      dr,
-    );
-    return g * sstep(CARVE.SPUR_IN, CARVE.SPUR_OUT, dSpur(x, z));
-  };
 
   const raw = terrain.heightAt.bind(terrain);
+
+  // --- THE TERRAIN'S OWN RELIEF, AS A FIELD A BASIN FLOOR CAN INHERIT -------
+  //
+  // "Kill the flat constant floors. A basin floor should inherit the terrain's
+  // own relief, not replace it with a number."
+  //
+  // The old floor kept a share of the meadow's relief as
+  //     clamp((h - L.level) * 0.22, -2.0, 2.2)
+  // which on a basin sited even ten metres above its own water saturates the
+  // clamp at every single sample — so the term was a CONSTANT 2.2 and the floor
+  // was flat to the centimetre. Measured: dug runs flat to within 3 cm over a
+  // median of 16 m and a maximum of 66 m.
+  //
+  // What a floor should inherit is the terrain's relief with the HILLSIDE'S
+  // TREND TAKEN OUT: the bumps and hollows, not the slope they sit on (a floor
+  // that inherited the trend would simply not be a basin). So a coarse grid of
+  // the untouched height is smoothed twice with a binomial kernel — about a
+  // 90 m box — and what is left in (raw - smooth) is exactly the relief at the
+  // scale of a basin floor, with zero mean and no clamp to saturate.
+  const CB = 26, NB = Math.ceil(size / CB) + 6;
+  const bg0 = -half - CB * 3;
+  const bg = new Float32Array(NB * NB);
+  for (let j = 0; j < NB; j++) {
+    const z = bg0 + j * CB;
+    for (let i = 0; i < NB; i++) bg[j * NB + i] = raw(bg0 + i * CB, z);
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const t = bg.slice();
+    for (let j = 1; j < NB - 1; j++) {
+      for (let i = 1; i < NB - 1; i++) {
+        bg[j * NB + i] = (t[j * NB + i] * 4 + t[j * NB + i - 1] + t[j * NB + i + 1]
+                        + t[(j - 1) * NB + i] + t[(j + 1) * NB + i]) * 0.125;
+      }
+    }
+  }
+  const broadAt = (x, z) => {
+    const fi = (x - bg0) / CB, fj = (z - bg0) / CB;
+    let i = Math.floor(fi), j = Math.floor(fj);
+    if (i < 1) i = 1; else if (i > NB - 3) i = NB - 3;
+    if (j < 1) j = 1; else if (j > NB - 3) j = NB - 3;
+    const uu = Math.max(0, Math.min(1, fi - i)), vv = Math.max(0, Math.min(1, fj - j));
+    const k = j * NB + i;
+    return (bg[k] * (1 - uu) + bg[k + 1] * uu) * (1 - vv)
+         + (bg[k + NB] * (1 - uu) + bg[k + NB + 1] * uu) * vv;
+  };
+
+  // =========================================================================
+  // THE SLOPE-LIMITED EXCAVATION
+  //
+  // Everything above plans WHERE the water goes. This decides what shape the
+  // ground takes to get there, and it is the answer to the client's complaint.
+  //
+  // Three fields on the 5 m lattice:
+  //
+  //   slopeC   the local limit on how fast ground may fall, banded along the
+  //            hillside's contours into treads and faces, and raised to a rock
+  //            value in the twenty metres of route a bridge deck covers.
+  //   env      lower envelope of cones out of every cell the water demands a bed
+  //            in. The ground may be no HIGHER than this.
+  //   prot     upper envelope of cones out of every cell of the carriageway
+  //            corridor. The ground may be no LOWER than this — it is what stops
+  //            a basin undermining the road it was planted beside.
+  //   fillG    upper envelope of cones out of the causeway, the rim and the
+  //            shoreline berm: ground that has to be BUILT UP, and whose
+  //            embankment is held to the same angle as the cut.
+  //
+  // and the answer is  h = max( min(h0, env), min(h0, prot), fill ).
+  //
+  // WHY THE OLD GUARD-BAND FORM COULD NOT WORK. It multiplied the depth by a
+  // smoothstep on distance-to-road: `target = level + 3 - (3 + DEPTH*bf) * k`.
+  // A smoothstep has a fixed WIDTH, so the gradient it writes is proportional to
+  // the height it happens to be carrying — 8 m over 48 m is a bank, 34 m over
+  // the same 48 is a cliff, and the code had no idea which case it was in. Worse,
+  // at k = 0 that expression is `level + 3` rather than "the ground as it was",
+  // so the carve hard-set a dry terrace three metres over the water and joined it
+  // to the hillside with a single vertical face: 33.3 m/m, measured.
+  //
+  // Blending instead of hard-setting fixed the worst of it (33.3 -> 12.0 m/m) but
+  // left 190 of 260 stations over 45 degrees, and tools/slope.mjs attributed
+  // every one of them to the dig. The reason is arithmetic: the bank profile was
+  // already a talus, and multiplying a talus by a ramp that is itself climbing
+  // adds the two gradients. No amount of tuning fixes a form that double-counts.
+  //
+  // A cone transform cannot double-count, because the bound is on the FINISHED
+  // FIELD and not on any one of its terms.
+  // =========================================================================
+  const slopeC = new Float32Array(N * N);
+  const envG = new Float32Array(N * N).fill(1e9);
+  const protG = new Float32Array(N * N).fill(-1e9);
+  const fillG = new Float32Array(N * N).fill(-1e9);
+  {
+    // How "necky" a cell is: 1 where a deck will cover it, 0 elsewhere.
+    const neckAt = (x, z) => {
+      let w = 0;
+      for (const L of lakes) {
+        if (!L.neck) continue;
+        const dx = x - L.x, dz = z - L.z;
+        if (dx * dx + dz * dz > L.R2out) continue;
+        const q = neckW(L, dx, dz);
+        if (q > w) w = q;
+      }
+      return w;
+    };
+    for (let j = 0; j < N; j++) {
+      const z = -half + j * C;
+      for (let i = 0; i < N; i++) {
+        const x = -half + i * C;
+        const k = j * N + i;
+        const h0c = raw(x, z);
+        const nw = neckAt(x, z);
+        // BENCHES ALONG THE CONTOURS. Phase taken off the broadly smoothed
+        // height, so a band of tread and a band of face follow the hillside the
+        // way a terrace does, rather than making concentric rings round each
+        // lake. A slow noise on the phase keeps them from being parallel.
+        const ph = broadAt(x, z) / TALUS.BAND_H + vnoise(x * 0.006, z * 0.006) * 1.9;
+        const band = Math.cos(ph * Math.PI * 2);
+        slopeC[k] = mix(TALUS.TAN * (1 + TALUS.AMP * band), TALUS.TAN_ROCK, nw);
+
+        const dr = dRoute(x, z), ds = dSpur(x, z);
+        let want = 1e9;      // deepest bed demanded here
+        let build = -1e9;    // highest dry ground demanded here
+        for (const L of lakes) {
+          const dx = x - L.x, dz = z - L.z;
+          if (dx * dx + dz * dz > L.R2out) continue;
+          const ua = (dx * L.tx + dz * L.tz) / L.Ra;
+          const uc = (dx * L.nx + dz * L.nz) / L.Rc;
+          const u = Math.hypot(ua, uc);
+          if (u > 1.25) continue;
+          const Rdir = u > 1e-4 ? Math.hypot(ua * L.Ra, uc * L.Rc) / u
+                                : Math.min(L.Ra, L.Rc);
+          const m = (WATERLINE - u) * Rdir;
+          const w = neckW(L, dx, dz);
+          const nk = w > 0.35;
+
+          // --- what the water demands ---------------------------------------
+          // The wet part demands its bed. The first nine metres of DRY bank are
+          // demanded too, at 1:7 — that shallow beach is the band the foam lip
+          // and the pale shelf swatch are keyed on, and letting the cone start
+          // climbing at 31 degrees straight out of the water would undo the
+          // round-13 shoreline. Past it the cone takes over.
+          //
+          // AND THAT IS WHERE THE 1:7 NOW STOPS. It used to run on as
+          //     min(2.9, o * 0.14)
+          // for as far as the basin reached — a beach that stopped climbing at
+          // 2.9 m and then held that number. Every basin therefore hard-set a
+          // dead-flat terrace exactly 2.9 m above its own water, two hundred
+          // metres wide on a scenic tarn, and joined the terrace to the untouched
+          // hillside with one vertical face. Measured: floors constant to the
+          // centimetre over runs of up to 66 m, and 33 m of drop in the single
+          // metre where they ended. That terrace is the flat green shelf in
+          // shots/r15/lake_bridge.png and the face beside it is the client's
+          // "dumb vertical polygon" — and being held 2.9 m ABOVE the waterline is
+          // also exactly why it was bone dry. Nothing is capped here, so there is
+          // no constant, and a basin's outer edge is now the INTERSECTION of a
+          // talus with the hillside rather than a step.
+          if (m >= -9.3) {
+            const bed = m > 0 ? L.level - bedDepth(m)
+                              : L.level + Math.min(1.3, -m * 0.14);
+            if (bed < want) want = bed;
+          }
+
+          // --- what the drive demands ---------------------------------------
+          // A CROSSING OVERRULES ITS NEIGHBOURS' APRONS. The apron is a band of
+          // filled ground either side of the road, and the thing bridges.js
+          // tests before it lays a deck is open water 13 m off the centreline. A
+          // scenic tarn whose apron reaches across a neck quietly fills in the
+          // very water the bridge is meant to span — measured, three of five
+          // planned crossings came back dry at exactly the apron's height and no
+          // deck was built at any of them.
+          if (nw >= 0.35 && !nk) continue;
+          if (nk) {
+            // Held only just clear of the water: the strip between the lobes is
+            // meant to vanish under the planks.
+            if (dr <= CARVE.NECK_OUT) {
+              const need = L.level + CARVE.NECK_CAUSEWAY;
+              if (need > build) build = need;
+            }
+          } else {
+            const aout = mix(CARVE.APRON_OUT, CARVE.NECK_OUT, w);
+            // The rim: a hump of ground just outside the apron, and the thing
+            // that turns a car which ran wide. It is also what the reference has
+            // along its whole shore — a lip between the meadow and the blue,
+            // never a beach running smoothly under.
+            const rimP = (1 - w)
+              * sstep(CARVE.RIM_IN, CARVE.RIM_PEAK, dr)
+              * (1 - sstep(CARVE.RIM_PEAK, CARVE.RIM_OUT, dr));
+            if (dr <= aout || rimP > 0.01 || ds <= CARVE.SPUR_OUT) {
+              const need = L.level + mix(CARVE.CAUSEWAY, CARVE.NECK_CAUSEWAY, w)
+                         + CARVE.RIM_H * rimP;
+              if (need > build) build = need;
+            }
+            // Closing the shoreline: ground out on the bank that is still under
+            // the waterline is lifted clear of it, or a basin dug into a valley
+            // ends in a wall of blue at the lattice boundary rather than at a
+            // shore. Capped at the beach.
+            if (m < 0 && m > -30 && u > 0.86) {
+              const need = L.level + Math.min(1.3, -m * 0.14);
+              if (need > build) build = need;
+            }
+          }
+        }
+        if (want < h0c) envG[k] = want;
+        if (build > h0c) fillG[k] = build;
+
+        // --- the protection: the carriageway corridor stays where it is -----
+        // Narrowed to a knife at a crossing, because the water has to run under
+        // the planks; the deck is 8.6 m to the fascia and covers it.
+        const inR = mix(CARVE.ROAD_IN, CARVE.NECK_IN, nw);
+        if (dr <= inR || (nw < 0.35 && ds <= CARVE.SPUR_IN)) protG[k] = h0c;
+      }
+    }
+    coneDown(envG, N, C, slopeC);
+    coneUp(protG, N, C, slopeC);
+    coneUp(fillG, N, C, slopeC);
+    // ONE SMOOTHING PASS, AND IT IS NOT COSMETIC.
+    //
+    // The chamfer bounds the height difference between ADJACENT cells, so a row
+    // or a column of the finished field cannot be steeper than the local limit.
+    // A CORNER can: where a cell is at the limit in both x and z, the directional
+    // derivative across the diagonal is the limit times root two — 0.88 becomes
+    // 1.24, and 41 degrees becomes 51. Measured, that was the whole of the
+    // remaining tail (p99 49.1 deg against a 41-degree face limit).
+    //
+    // A 3x3 binomial pass costs a third of a metre of shore depth and takes the
+    // corners out. It cannot introduce a step: smoothing a continuous field with
+    // a positive kernel only ever reduces the local extremes.
+    for (const F of [envG, protG, fillG]) {
+      const t = F.slice();
+      for (let j = 1; j < N - 1; j++) {
+        for (let i = 1; i < N - 1; i++) {
+          const k = j * N + i;
+          // Leave the untouched regions alone — 1e9 and -1e9 are "no constraint"
+          // sentinels and must not be averaged into their neighbours.
+          if (Math.abs(t[k]) > 1e8) continue;
+          let sum = t[k] * 4, wsum = 4;
+          for (const d of [-1, 1, -N, N]) {
+            const q = t[k + d];
+            if (Math.abs(q) > 1e8) continue;
+            sum += q; wsum++;
+          }
+          F[k] = sum / wsum;
+        }
+      }
+    }
+  }
+  const envAt = gridSampler(envG, N, C, half);
+  const protAt = gridSampler(protG, N, C, half);
+  const fillAt = gridSampler(fillG, N, C, half);
+
   const carved = (x, z) => {
-    let h = raw(x, z);
-    // THE CAUSEWAY IS BUILT, NOT MERELY SPARED.
-    //
-    // The guard band says "do not DIG here". That is not the same as "this is
-    // dry": where the meadow beside the road happens to sit below the waterline
-    // already, sparing it just leaves it flooded, and the first thing that
-    // happens is the car runs wide out of a fast corner into ten metres of
-    // water and never comes out. Measured on hero_alpine before this: the car
-    // left the road at t=12 and every frame from t=13 to the end of the tape
-    // was a hundred per cent blue.
-    //
-    // So inside the guard the ground is FILLED to a metre and a half of
-    // freeboard, tapering to nothing by the time the guard opens. The level was
-    // chosen three metres under the lowest carriageway the basin can reach, so
-    // this fill is always below the road surface and never buries it.
-    let fillTo = -Infinity, fillK = 0;
-    let neckTo = -Infinity, neckK = 0, underNeck = false;
+    const h0 = raw(x, z);
+    // The terrain's own relief here, hillside trend removed. This is what the
+    // basin floor inherits instead of a number.
+    const rel = h0 - broadAt(x, z);
+    const dr0 = dRoute(x, z);
+    const ds0 = dSpur(x, z);
+    // THE EXCAVATION, IN FOUR LINES. Cut to the envelope; refuse to undermine
+    // the carriageway; then build the causeway, the rim and the shoreline berm.
+    // Every one of the three is a cone field, so every height change in it
+    // stands at the angle of repose by construction.
+    let h = h0;
+    const lim = envAt(x, z);
+    if (lim < h) h = lim;
+    const flo = protAt(x, z);
+    if (flo > h) h = Math.min(h0, flo);
+    const bld = fillAt(x, z);
+    if (bld > h) h = bld;
+    const dug = h;
+    // How deep the water is over the excavated bed here, and whose water it is.
+    // Only used for the bathymetry detail and the shoal — the SHAPE of the
+    // ground is entirely the envelope's business now.
+    let nearNeck = false;        // is a bridge deck about to cover this ground
+    // Signed metres of bathymetry detail to add to the excavated bed.
+    let bedDetail = 0;
     // The shoal is applied ONCE, after every basin has had its say — see below.
     let shoalShape = 0, shoalLevel = 0;
     for (let i = 0; i < lakes.length; i++) {
       const L = lakes[i];
       const dx = x - L.x, dz = z - L.z;
       const d2 = dx * dx + dz * dz;
-      if (d2 > L.R2out) continue;
+      if (d2 > L.R2carve) continue;
       const ua = (dx * L.tx + dz * L.tz) / L.Ra;
       const uc = (dx * L.nx + dz * L.nz) / L.Rc;
       const u = Math.hypot(ua, uc);
@@ -1459,58 +2000,15 @@ export function planLakes(ctx, P) {
       // to its u = 1 boundary in THIS direction, so (WATERLINE - u) * Rdir is
       // signed metres inside the waterline — positive out in the water. That is
       // the unit the bed profile, and therefore the whole readable shelf, is
-      // authored in; see bedFrac().
+      // authored in; see bedDepth().
       const Rdir = u > 1e-4
         ? Math.hypot(ua * L.Ra, uc * L.Rc) / u
         : Math.min(L.Ra, L.Rc);
-      const bf = bedFrac((WATERLINE - u) * Rdir);
+      const m = (WATERLINE - u) * Rdir;   // metres inside the waterline
+      const dep = bedDepth(m);            // metres of water over the bed
+      const bf = dep / CARVE.DEPTH;
       const w = neckW(L, dx, dz);
-      const nk = w > 0.35;
-      const g = guardOf(L, x, z, w);
-      // The causeway fill. Runs wherever the basin reaches, INCLUDING the
-      // stretch the guard protects from digging — that is the whole point.
-      if (u < 1.25) {
-        // A CROSSING HAS ITS OWN, MUCH NARROWER APRON. Running the scenic
-        // fifty-metre apron through a neck raises the ground either side of the
-        // causeway clear of the water, which is precisely the condition
-        // bridges.js tests for when it decides there is anything to bridge —
-        // and every deck in the world silently stopped being built.
-        const ain = mix(CARVE.APRON_IN, CARVE.NECK_IN, w);
-        const aout = mix(CARVE.APRON_OUT, CARVE.NECK_OUT, w);
-        // The apron follows the spurs too, or a branch road walks into the lake.
-        const dr0 = dRoute(x, z);
-        // The rim rides on the same fill field as the apron — one band of
-        // raised ground running from the verge out to open water, flat at
-        // causeway height under the run-off and humped where it meets the
-        // shore. Doing it as a second pass gave a visible step where the two
-        // met; as one height profile it is a bank.
-        const rimP = (1 - w)
-          * sstep(CARVE.RIM_IN, CARVE.RIM_PEAK, dr0)
-          * (1 - sstep(CARVE.RIM_PEAK, CARVE.RIM_OUT, dr0));
-        const k = Math.max(
-          1 - sstep(ain, aout, dr0),
-          rimP,
-          nk ? 0 : 1 - sstep(CARVE.SPUR_IN, CARVE.SPUR_OUT, dSpur(x, z)),
-        ) * (1 - sstep(0.98, 1.25, u));
-        if (nk) {
-          if (u < 1.12) underNeck = true;
-          const need = L.level + CARVE.NECK_CAUSEWAY;
-          if (need > neckTo) neckTo = need;
-          if (k > neckK) neckK = k;
-        } else {
-          const need = L.level + mix(CARVE.CAUSEWAY, CARVE.NECK_CAUSEWAY, w)
-                     + CARVE.RIM_H * rimP;
-          if (need > fillTo) fillTo = need;
-          if (k > fillK) fillK = k;
-        }
-      }
-      if (u > 1.36 || g <= 0) continue;
-      // Fade the whole carve out past the rim so the basin blends into the
-      // hillside instead of ending on a step. The old profile hard-set every
-      // point inside u = 1.02 to level + 3 and did nothing at 1.03, which is a
-      // one-cell cliff running right round the lake — and that cliff, not the
-      // shader, is why the shoreline read as a cut.
-      const k = g * (1 - sstep(1.08, 1.36, u));
+      if (w > 0.35 && u < 1.2) nearNeck = true;
       // The bed keeps a share of whatever relief the meadow had, scaled by how
       // deep it is here. A dead flat floor gives a dead flat depth field, and
       // depth is what drives the colour ramp — the whole body then comes out
@@ -1545,30 +2043,41 @@ export function planLakes(ctx, P) {
       // back as a broad wash of near-white blue and the frame's water pixels
       // averaged [57,91,133] against the reference's [8,101,168]. A shoal
       // belongs out where the water would otherwise be an unbroken slab.
-      const shape = Math.min(1, Math.max(0, (bf - 0.26) * 2.7)) * k;
-      if (shape > shoalShape) { shoalShape = shape; shoalLevel = L.level; }
-      const relief = Math.max(-2.0, Math.min(2.2, (h - L.level) * 0.22))
-                     * Math.max(0, bf)
-                   + bedRoll(x, z) * shape;
-      // The cut is measured from a rim held three metres above the water, so a
-      // basin dug into rising ground comes out as a bowl and not as a hole in a
-      // hillside. (That reference height is inherited from the profile this
-      // replaced; only the CURVE has changed.) Hard-set, not blended toward the
-      // natural ground: blending it was tried and half the lakes disappeared,
-      // because a basin sited on ground forty metres up never got dug at all.
-      const target = L.level + 3.0 - (3.0 + CARVE.DEPTH * bf - relief) * k;
-      if (target < h) h = target;
-      // CLOSING THE SHORELINE. Out on the bank, ground still under the
-      // waterline is lifted clear of it — otherwise a basin dug into a valley
-      // ends in a wall of blue at the lattice boundary rather than at a shore.
-      // This is the old `berm`, but moved OUTSIDE the water instead of sitting
-      // at two thirds of the radius where it used to collide with the cut.
-      if (bf < 0) {
-        const need = L.level - CARVE.DEPTH * bf;
-        const lift = g * sstep(0.88, 1.02, u) * (1 - sstep(1.08, 1.32, u));
-        if (h < need) h += (need - h) * lift;
+      // THE BATHYMETRY, WHICH IS NOW ALL THIS LOOP DOES TO THE BED.
+      //
+      // The envelope above owns the SHAPE of the ground. What is still needed
+      // here is the detail on the floor — and it is needed because depth drives
+      // the colour ramp, so a floor with no relief renders the whole body as one
+      // slab of cobalt. It is applied as a small signed offset UNDER THE WATER,
+      // where it cannot affect any slope anybody can see.
+      if (m > 0) {
+        const d0 = L.level - h;
+        const shape0 = Math.min(1, Math.max(0, (bf - 0.26) * 2.7));
+        if (shape0 > shoalShape) { shoalShape = shape0; shoalLevel = L.level; }
+        // THE FLOOR INHERITS THE GROUND, NOT A NUMBER. `rel` is the terrain's own
+        // relief with the hillside's trend removed, so it has zero mean and no
+        // clamp to saturate against — the old term was clamp((h-level)*0.22,
+        // -2, 2.2), which on a basin ten metres above its own water saturated at
+        // EVERY sample and was therefore a constant. bedRoll and shoalField are
+        // round 13's work and are untouched.
+        if (d0 > 0.8) {
+          const want = Math.max(-3.6, Math.min(3.6, rel)) * 0.9 * bf
+                     + bedRoll(x, z) * shape0;
+          // SOFT-LIMITED BY THE DEPTH, NOT CLIPPED. A clip is exactly how the
+          // old relief term turned into a constant: clamp(x, -2, 2.2) applied to
+          // a quantity that is usually outside the range IS the number 2.2, and
+          // 73 stations still came back with six or more metres of floor flat to
+          // the centimetre when this was written as a clamp. tanh never
+          // saturates, so the floor keeps wandering however much relief is
+          // offered, and it still cannot break the surface or fill the shelf.
+          const lim = Math.min(3.0, (d0 - 0.8) * 0.5);
+          const got = lim > 0.01 ? lim * Math.tanh(want / lim) : 0;
+          if (Math.abs(got) > Math.abs(bedDetail)) bedDetail = got;
+        }
       }
     }
+    if (bedDetail !== 0) h += bedDetail;
+    if (DBG) { DBG.h0 = h0; DBG.dug = dug; DBG.rel = rel; DBG.bed = bedDetail; DBG.fill = bld > flo && bld > lim ? bld - Math.min(h0, lim) : 0; }
     // THE SHOALS GO IN LAST, AND THAT IS WHY THEY NOW EXIST.
     //
     // Riding them along with each basin's own relief term did almost nothing,
@@ -1590,27 +2099,24 @@ export function planLakes(ctx, P) {
         if (rise > 0) h += rise;
       }
     }
-    // A CROSSING OVERRULES ITS NEIGHBOURS' APRONS.
-    //
-    // The apron is a fifty-metre band of filled ground either side of the road,
-    // and the thing bridges.js tests for before it lays a deck is open water
-    // thirteen metres off the centreline. A scenic tarn whose apron happens to
-    // reach across a neck therefore quietly fills in the very water the bridge
-    // is meant to span — measured: three of five planned crossings on
-    // lake_bridge came back +1.6 m dry at exactly the apron's height, and no
-    // deck was built at any of them. Inside a neck, only the neck's own narrow
-    // apron counts.
-    if (underNeck) {
-      if (neckK > 0 && h < neckTo) h += (neckTo - h) * neckK;
-    } else if (fillK > 0 && h < fillTo) {
-      h += (fillTo - h) * fillK;
-    }
+    if (DBG) { DBG.shoal = h - dug - bedDetail; DBG.h = h; DBG.berm = 0; DBG.neck = nearNeck; }
     return h;
   };
 
   return {
     lakes, crossings, raw, stats, heightAt: carved, dRoute, dSpur,
     lakeAt: (x, z) => nearestLake(lakes, x, z),
+    // The surface height of whichever basin owns this ground, or null. The slope
+    // audit needs it to tell a green hillside from a lake bed: the client is
+    // complaining about faces he can SEE, and a steep patch of bathymetry under
+    // six metres of cobalt is not one of them.
+    levelAt: (x, z) => { const L = nearestByRadius(lakes, x, z); return L ? L.level : null; },
+    // ATTRIBUTION FOR THE AUDIT. tools/slope.mjs finds the steepest step in a
+    // profile; without knowing WHICH of the four mechanisms — dig, berm, shoal,
+    // fill — put the height there, fixing it is guesswork. One shared object
+    // rather than an allocation per sample: the carve runs a quarter of a
+    // million times per build.
+    probeAt: (x, z) => { DBG = {}; carved(x, z); const d = DBG; DBG = null; return d; },
   };
 }
 
