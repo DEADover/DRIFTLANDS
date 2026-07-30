@@ -364,6 +364,62 @@ export function auditRoadSolidity(game, { stations = 500 } = {}) {
   return { samples, holes, holePct: pct(holes, samples), cracks: cracks.length, worstCracks: cracks.sort((a, b) => b.step - a.step).slice(0, 8) };
 }
 
+/**
+ * WHERE ARE THE WHEELS, ACTUALLY?
+ *
+ * Everything else here measures the height FUNCTIONS. This measures the scene
+ * graph: it takes the world position of the four wheel nodes the renderer is
+ * about to draw, drops to the bottom of the tyre, and compares that against the
+ * triangle underneath it.
+ *
+ * This is the only audit that can catch a sign error in the body pose, because
+ * a mirrored pitch keeps the CENTRE of the car exactly right and buries one
+ * axle while lifting the other. Reported per wheel and split by whether the car
+ * is climbing or descending — a sign error shows up as front and rear having
+ * equal and opposite errors that swap when the gradient does.
+ */
+export function auditWheelSeating(game, { seconds = 40, dt = 1 / 60, wheelR = 0.46 } = {}) {
+  const surf = makeRaycastSurface(game.scene);
+  const NAMES = ['FL', 'FR', 'RL', 'RR'];
+  const per = [[], [], [], []];
+  const climbing = [[], [], [], []];
+  const descending = [[], [], [], []];
+  const v3 = new THREE.Vector3();
+  const frames = Math.round(seconds / dt);
+
+  for (let f = 0; f < frames; f++) {
+    game.update(dt, game.autopilotInput({ throttle: 1, aggression: 0.85 }));
+    if (f % 6) continue;
+    const v = game.vehicle;
+    if (!v.onGround) continue;
+    const view = game.carView;
+    if (!view?.wheels) break;
+    // Gradient along the car, from the pose the game itself computed.
+    const grade = game._pose?.pitch ?? 0;
+    for (let i = 0; i < 4; i++) {
+      view.wheels[i].getWorldPosition(v3);
+      const d = surf(v3.x, v3.z);
+      if (!d) continue;
+      const bottom = v3.y - wheelR;
+      const err = d.y - bottom;                    // >0 = tyre is inside the ground
+      per[i].push(err);
+      if (grade > 0.05) climbing[i].push(err);
+      else if (grade < -0.05) descending[i].push(err);
+    }
+  }
+
+  const pack = (lists) => Object.fromEntries(NAMES.map((n, i) => [n, stats(lists[i])]));
+  const flat = per.flat();
+  return {
+    samples: flat.length,
+    all: stats(flat),
+    over: { '0.10': pct(flat.filter((e) => e > 0.10).length, flat.length) },
+    perWheel: pack(per),
+    climbing: pack(climbing),
+    descending: pack(descending),
+  };
+}
+
 export function runAll(game, opts = {}) {
   return {
     sink: auditSink(game, opts),

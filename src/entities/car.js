@@ -341,9 +341,30 @@ export class CarView {
     //
     // Dynamic squat and roll are added ON TOP as small offsets, so weight
     // transfer still reads without ever breaking contact.
+    // THE GROUND PITCH WAS APPLIED UPSIDE DOWN, AND IT IS THE SINKING.
+    //
+    // A rotation about local z maps a point at local x to y' = x*sin(theta).
+    // The wheels sit at x = +1.34 (front) and -1.32 (rear), so a climb — where
+    // carPose reports pitch > 0, nose up — needs theta > 0. It was applied as
+    // -gp, which drove the uphill axle straight into the hill.
+    //
+    // MEASURED before the flip, by reading the world position of the four wheel
+    // nodes and comparing the bottom of each tyre against the triangle beneath
+    // it (tools/probe.mjs --only wheels, 1560 samples along the route):
+    //
+    //                 FL      FR      RL      RR
+    //   climbing     +0.690  +0.670  -0.103  -0.112
+    //   descending   +0.030  -0.077  +0.366  +0.301
+    //
+    // Equal and opposite front to rear, and the pair swaps when the gradient
+    // does: the exact signature of a mirrored pitch. 62.3% of wheel samples were
+    // more than 0.10 m inside the ground, mean 0.265 m, worst 2.58 m. That is
+    // several times larger than the height-query error everyone had been
+    // hunting, and it is why the car appeared to sink specifically on climbs and
+    // descents rather than uniformly.
     const gp = pose?.pitch ?? 0;
     const gr = pose?.roll ?? 0;
-    this.chassis.rotation.z = this._pitch - gp;
+    this.chassis.rotation.z = this._pitch + gp;
     this.chassis.rotation.x = this._roll + gr;
 
     // Body rides on the springs: dive, squat and terrain bounce.

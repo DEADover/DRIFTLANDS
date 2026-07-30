@@ -53,7 +53,8 @@ const report = await page.evaluate(async ({ only, driven }) => {
   if (want('feet')) out.barrierFeet = P.auditBarrierFeet(g);
   if (want('guards')) out.cornerGuards = P.auditCornerGuards(g);
   if (want('deck')) out.deckOverdraw = P.auditDeckOverdraw(g);
-  // Driving mutates the world state, so it must go last.
+  // Driving mutates the world state, so these must go last.
+  if (want('wheels')) out.wheels = P.auditWheelSeating(g);
   if (driven) out.driven = P.auditDriven(g, { seconds: driven });
   return out;
 }, { only: args.only, driven: args.driven });
@@ -77,6 +78,20 @@ if (report.sink) {
   for (const w of s.worst.slice(0, 6)) {
     line(`    ${f(w.sink)} m at (${w.x.toFixed(0)}, ${w.z.toFixed(0)})  drawn ${f(w.drawn, 2)} vs queried ${f(w.queried, 2)}  [${w.kind}/${w.physKind}]`);
   }
+}
+
+if (report.wheels) {
+  const w = report.wheels;
+  line('');
+  line('WHEEL SEATING — bottom of each tyre vs the triangle under it (>0 = inside the ground)');
+  line(`  samples ${w.samples}   mean ${f(w.all.mean)}   p95 ${f(w.all.p95)}   MAX ${f(w.all.max)}   min ${f(w.all.min)}   over 0.10 m ${f(w.over['0.10'], 1)}%`);
+  const row = (label, pack) => {
+    const cells = ['FL', 'FR', 'RL', 'RR'].map((n) => `${n} ${f(pack[n]?.mean, 3)}`).join('   ');
+    line(`    ${label.padEnd(11)} ${cells}`);
+  };
+  row('overall', w.perWheel);
+  row('climbing', w.climbing);
+  row('descending', w.descending);
 }
 
 if (report.driven) {

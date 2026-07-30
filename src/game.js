@@ -292,12 +292,15 @@ export class Game {
    * @returns {{y:number, pitch:number, roll:number, onBridge:boolean, contact:number[]}}
    */
   carPose(v, dt = 1 / 60) {
-    const A = 1.35;   // half wheelbase, must match car.js wheel placement
-    const B = 0.92;   // half track
+    // Must match the wheel placement in car.js exactly. The wheelbase is NOT
+    // symmetric — front 1.34, rear 1.32 — and treating it as ±1.35 leaves a
+    // millimetric bias that there is no reason to carry.
+    const AF = 1.34, AR = -1.32;
+    const B = 0.93;                    // ARCH_W/2 - 0.14, from car.js
     const f = v.forward.clone(), r = v.right.clone();
 
-    // Order: FL, FR, RL, RR
-    const off = [[A, B], [A, -B], [-A, B], [-A, -B]];
+    // Order: FL, FR, RL, RR — same order as car.js `wheels`.
+    const off = [[AF, B], [AF, -B], [AR, B], [AR, -B]];
     const h = [0, 0, 0, 0];
     let onBridge = false;
     for (let i = 0; i < 4; i++) {
@@ -308,38 +311,79 @@ export class Game {
       onBridge = onBridge || g.onBridge;
     }
 
-    // Plane through the patches, expressed in the car's own frame.
+    // Tilt from the plane through the patches, expressed in the car's own frame.
     const front = (h[0] + h[1]) * 0.5, rear = (h[2] + h[3]) * 0.5;
     const left = (h[0] + h[2]) * 0.5, right = (h[1] + h[3]) * 0.5;
-    const yPlane = (front + rear) * 0.5;
-    const pitchT = Math.atan2(front - rear, 2 * A);   // nose up on a climb
+    const pitchT = Math.atan2(front - rear, AF - AR);   // nose up on a climb
     const rollT = Math.atan2(left - right, 2 * B);
 
-    // Low-pass the pose, not the wheels. One filter, one place, so there is
-    // nothing left to fight. Rates are high enough to track a real gradient at
-    // speed and low enough to swallow facet-to-facet steps in the mesh.
-    if (this._pose === undefined) {
-      this._pose = { y: yPlane, pitch: pitchT, roll: rollT };
-    } else {
-      const kY = 1 - Math.exp(-55 * Math.max(dt, 1e-5));
-      const kA = 1 - Math.exp(-16 * Math.max(dt, 1e-5));
-      if (Math.abs(yPlane - this._pose.y) > 8) this._pose.y = yPlane;   // respawn
-      else this._pose.y += (yPlane - this._pose.y) * kY;
-      this._pose.pitch += (pitchT - this._pose.pitch) * kA;
-      this._pose.roll += (rollT - this._pose.roll) * kA;
+    // Low-pass the ANGLES only. Rates are high enough to track a real gradient
+    // at speed and low enough to swallow facet-to-facet steps in the mesh.
+    if (this._pose === undefined) this._pose = { y: h[0], pitch: pitchT, roll: rollT };
+    const kA = 1 - Math.exp(-16 * Math.max(dt, 1e-5));
+    this._pose.pitch += (pitchT - this._pose.pitch) * kA;
+    this._pose.roll += (rollT - this._pose.roll) * kA;
+
+    /**
+     * RIDE HEIGHT IS SOLVED, NOT AVERAGED.
+     *
+     * It used to be the mean of the four contact heights. On any surface that is
+     * not a perfect plane — every surface here, since the mesh is faceted on
+     * purpose — the mean sits BELOW the highest patch, so the wheel on the high
+     * side is inside the ground by construction. And because the angles are
+     * low-passed while the mean was not, every metre of filter lag came straight
+     * off the ride height as well.
+     *
+     * So: take the filtered tilt as given, and place the body at the lowest
+     * height for which NO wheel is under its own ground. `dy` is where each
+     * contact patch sits relative to the body origin at that tilt, so the
+     * required origin height for wheel i is h[i] - dy[i] and the answer is the
+     * largest of the four. On a twisted surface the car rides a couple of
+     * centimetres proud on three wheels, which is invisible at this camera
+     * height; the alternative is a wheel through the floor, which is not.
+     *
+     * MEASURED (tools/probe.mjs --only wheels): mean penetration 0.246 m and
+     * 63.7% of samples deeper than 0.10 m came from this averaging alone, on top
+     * of — and independent of — the pitch sign error in car.js.
+     */
+    const sp = Math.sin(this._pose.pitch), sr = Math.sin(this._pose.roll);
+    let support = -Infinity;
+    for (let i = 0; i < 4; i++) {
+      const need = h[i] - (off[i][0] * sp + off[i][1] * sr);
+      if (need > support) support = need;
     }
+
+    /**
+     * The body may rise instantly but must settle gently.
+     *
+     * That asymmetry is not a trick: ground can only push, so a surface coming
+     * up under a wheel acts at once, while a surface falling away is followed at
+     * the rate gravity and the springs allow. Filtering the rise as well is what
+     * made the car swim through crests.
+     */
+    if (this._poseY === undefined || Math.abs(support - this._poseY) > 8) this._poseY = support;
+    else if (support >= this._poseY) this._poseY = support;
+    else this._poseY += (support - this._poseY) * (1 - Math.exp(-26 * Math.max(dt, 1e-5)));
+    this._pose.y = this._poseY;
 
     // Airborne: the ballistic height owns Y, and the body levels out.
     const y = v.onGround === false && this._carY !== undefined
       ? this._carY
       : this._pose.y;
 
-    return { y, pitch: this._pose.pitch, roll: this._pose.roll, onBridge, contact: h };
+    return { y, pitch: this._pose.pitch, roll: this._pose.roll, onBridge, contact: h, support };
   }
 
-  /** Ground under the car, for the physics step. */
+  /**
+   * Ground under the car, for the physics step.
+   *
+   * Computed ONCE per fixed step and cached, because the view used to call this
+   * again at render time with a different dt: the filters ran twice per frame at
+   * two different rates, so the height the physics landed on and the height the
+   * car was drawn at were never quite the same number.
+   */
   carGroundAt(v, dt = 1 / 60) {
-    const p = this.carPose(v, dt);
+    const p = this._poseCache ?? this.carPose(v, dt);
     return { height: p.y, normal: UP.clone(), onBridge: p.onBridge, pose: p };
   }
 
@@ -382,6 +426,12 @@ export class Game {
       }
     }
 
+    // ONE POSE PER STEP, and the vertical dynamics use the same support height
+    // the wheels are drawn on. Physics used to run off the single ground sample
+    // under the car's centre while the body was drawn from four contact patches,
+    // so on any crest or camber the two disagreed and the wheels paid for it.
+    this._poseCache = this.carPose(v, dt);
+
     this._stepVertical(dt);
     this._stepBarriers(dt);
 
@@ -422,7 +472,12 @@ export class Game {
   _stepVertical(dt) {
     const v = this.vehicle;
     const g = this.groundAt(v.position.x, v.position.z);
-    const ground = g.height;
+    // The height the WHEELS rest on, not the height under the car's navel. The
+    // centre sample sits below the contact plane on every crest and camber, and
+    // the gap between the two was the car's resting depth in the ground.
+    // The slope, on the other hand, is still the ground's own — that is what a
+    // gradient costs, and it is a property of the terrain, not of the wheelbase.
+    const ground = this._poseCache?.support ?? g.height;
 
     if (this._carY === undefined) { this._carY = ground; this._carVY = 0; }
 
