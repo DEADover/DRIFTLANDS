@@ -78,6 +78,22 @@ const GRIP = {
  * alpine reference has no tarmac anywhere in frame — it is a dirt rally road
  * from edge to edge, so alpine alternates gravel and dirt, never tarmac. */
 const STYLE = {
+  // WIDTH: MEASURED AND LEFT ALONE AT 11.0.
+  //
+  // "The road is too wide" was tested, not argued about: 11.0 -> 9.2 m, shot and
+  // measured. Every number got worse. The road's share of the frame went 17.7% ->
+  // 15.2% against the reference's 30.3%, frame mean luma 0.364 -> 0.352 against
+  // the target's 0.379, and the frame's dark fraction 32.9% -> 36.1% against
+  // 32.5% — because road pixels are brighter than the meadow that replaces them,
+  // so narrowing the ribbon darkens the whole picture away from the reference.
+  // It also moved the hero spawn (the capture presets score frames off the route),
+  // which makes every A/B after it a comparison of two different places.
+  //
+  // The reference does not get its 30% of frame from a WIDE road. It gets it from
+  // a road that crosses the frame four times. Ours crosses once, diagonally, and
+  // that — not the metres — is why it reads as an airstrip. Fixing it is a route
+  // problem (see `cornerPlan`), not a width one, and it is the one thing left on
+  // this file that would move the share.
   alpine: { width: 11.0, verge: 1.5, kinds: ['gravel', 'dirt'], spurs: 2 },
   autumn: { width: 7.4, verge: 1.20, kinds: ['gravel', 'dirt'], spurs: 2 },
   desert: { width: 8.6, verge: 1.60, kinds: ['dirt', 'sand'], spurs: 2 },
@@ -95,6 +111,54 @@ const STYLE = {
  * cold ones (snow, ice) stay on the palette, where grey is correct.
  */
 const OCHRE = 0xc9a45f;   // ART_DIRECTION §6 — pale warm dirt
+
+/**
+ * THE THREE NUMBERS THAT SET THE ROAD, fitted against the reference's road
+ * POPULATION rather than against a lit patch of it. `tools/roadstat.mjs`
+ * isolates road pixels in both images by hue and connected-component size and
+ * prints the population; that is the statistic these answer to, because a dirt
+ * road with a third of itself in shadow is not described by two sunlit pixels.
+ *
+ *                       ours (before)   reference   after
+ *   mean RGB            196,142,71      152,124,46
+ *   mean luma           0.581           0.488
+ *   G/R                 0.724           0.816
+ *   B/R                 0.362           0.303
+ *   mean saturation     0.630           0.692
+ *
+ * The reference road is a KHAKI: more green relative to red than ours and
+ * markedly LESS blue. The previous fit had it the other way round (g x1.12,
+ * b x1.34) because it was matched to rgb(177,137,69), one of the reference's
+ * sunlit patches — and sunlit dirt is pinker than the surface it belongs to,
+ * since the shadowed remainder is lit by sky and the sky term is what carries
+ * the blue. Fitting the population instead reverses the sign on blue.
+ *
+ * These are LINEAR-space multipliers on a material colour that then goes through
+ * the sun colour and the tonemap, both of which compress ratios toward 1, so
+ * they over-correct on purpose. Each value below is what the rendered population
+ * actually landed on, not what the arithmetic predicted.
+ */
+const PALE_LEVEL = 0.52;  // 0.88 -> 0.52; see the ACES note below.
+// WHY 0.52 AND NOT 0.47. Swept and measured. At 0.47 the road POPULATION lands
+// almost exactly on the reference — rgb(158,128,46) against rgb(152,124,46),
+// luma 0.504 against 0.488 — but the frame's luma bucket 6 falls to 3.3 against
+// the target's 5.0, i.e. it overshoots the very error this was fixing. At 0.52
+// both land at once: the road's own share of bucket 6 is 4.2 points of frame
+// against the reference road's 4.2, and the whole frame's bucket 6 is 5.0
+// against 5.0. Frame mean luma turns out almost insensitive to this knob
+// (0.365 at 0.60, 0.365 at 0.53, 0.361 at 0.47), so the histogram is the
+// binding constraint, not the level.
+const PALE_G = 1.30;      // was 1.12 — the population wants G/R up, not down
+const PALE_B = 1.10;      // was 1.34 — fitted on a sunlit patch, and too blue.
+// WHY 1.10 AND NOT 1.06. The grade's saturation expansion is stronger the
+// brighter the pixel, so one material cannot land both ends of the road on the
+// reference at once. Scanned, our LIT carriageway came out rgb(205,158,44),
+// B/R 0.215, against the reference's lit rgb(210,159,73), B/R 0.348 — a mustard
+// where the reference has warm sand, which is what the close-range wildlife
+// preset shows. Four points of blue takes the lit surface most of the way there
+// and, because it also drops the population's saturation from 0.725 to the
+// reference's 0.69, it is the one adjustment here that improves BOTH the lit
+// patch and the population. It costs about 0.005 of frame mean saturation.
 
 /**
  * LEVEL AND SATURATION, measured against the reference rather than argued about.
@@ -124,7 +188,7 @@ function pale(c) {
   // camera puts about twice as much road in frame as target_01 does. So the HUE
   // is matched exactly and the LEVEL is held ~9% under the reference, which
   // keeps the frame statistics where the previous round left them. Reported.
-  c.multiplyScalar(0.88);
+  c.multiplyScalar(PALE_LEVEL);
   // Channel ratios, measured on a pure road patch. Ours rgb(176,132,62) against
   // the reference's rgb(177,137,69): G/R 0.750 against 0.774, B/R 0.352 against
   // 0.390. Three percent of green and a fifth more blue is the whole difference,
@@ -147,8 +211,31 @@ function pale(c) {
   // slice, where the crown tilts the facet toward the sun and the tonemap treats
   // it as a highlight. A patch average and a scanline are not the same statistic
   // and the road is not one tone.
-  c.g = Math.min(1, c.g * 1.12);
-  c.b = Math.min(1, c.b * 1.34);
+  c.g = Math.min(1, c.g * PALE_G);
+  c.b = Math.min(1, c.b * PALE_B);
+  return c;
+}
+
+/**
+ * PRE-CORRECTION FOR A FACET THE SUN DOES NOT REACH.
+ *
+ * The batter faces slope down and away from the road, so they are lit mostly by
+ * the sky term, which is cold and which the tonemap then does not desaturate the
+ * way it does a highlight. Scanned across the hero frame, the apron beside the
+ * carriageway rendered rgb(111,127,92) at saturation 0.28 — G above R and four
+ * times the blue the material carries — while the carriageway 30 px away
+ * rendered rgb(206,160,49) at 0.77. A metre-wide grey-olive band down both sides
+ * of the road: the "concrete kerb on a dirt rally stage" again, in its third
+ * disguise.
+ *
+ * Painting it browner is not enough on its own, because the sky ADDS blue rather
+ * than scaling it. What works is to take the blue almost entirely out of the
+ * material and trim the green, so that what the sky puts back lands on damp
+ * earth instead of on concrete. Fitted against the scanline, not derived.
+ */
+function skyLit(c) {
+  c.g *= 0.88;
+  c.b *= 0.30;
   return c;
 }
 
@@ -1111,7 +1198,11 @@ function describe(ctx, pts, opts) {
 
 const LIFT = 0.12;   // above the terrain profile — just enough to beat z-fight
 const CROWN = 0.10;  // camber drop at the carriageway edge
-const BANK_MAX = 5;  // longest batter/blend skirt we will build
+// Steepest LATERAL gradient the carriageway surface itself may show, after the
+// drape has finished protecting it from the ground. 0.42 is 23 degrees: a road
+// can be cross-fallen, cambered and rutted, but it cannot kick its outer metre
+// up like a skateboard ramp. See the row clamp in `buildRibbonMesh`.
+const LIP_MAX = 0.42;
 // The shoulder ALWAYS gets this much soft blend. 1.6 m plus a 1.5 m verge put
 // three metres of apron down each side of the carriageway; target_01 goes from
 // dust to meadow in a metre to a metre and a half, and three metres of it read
@@ -1119,6 +1210,46 @@ const BANK_MAX = 5;  // longest batter/blend skirt we will build
 // which with the ragged-edge noise is enough that the road never ends on a line.
 const SKIRT_MIN = 1.15;
 const RUT_DEPTH = 0.11; // how deep the wheel ruts are worn in
+
+/**
+ * THE ANGLE OF REPOSE — why the embankment is no longer a wall.
+ * ------------------------------------------------------------
+ * The client photographed a height change built as a single vertical polygon
+ * and said, correctly, that mountains do not form that way. Audited with
+ * `auditSlopes` (below) on the shipped build: 256 of 260 stations carried a
+ * perpendicular step steeper than 45 degrees and the worst was 31 metres of
+ * drop per metre out — a box canyon, not terrain.
+ *
+ * The road's share of that was structural. `BANK_MAX` was 5 m: whatever the
+ * height difference, the batter had five metres to resolve it, so against a
+ * 30 m drop the "slope" was 6:1 — 80 degrees. The batter slope constants were
+ * already sane (0.75 fill); the LENGTH was the bug. So the skirt is no longer a
+ * fixed number of facets over a capped width. It MARCHES: each step descends by
+ * at most the angle of repose and stops the moment the ground comes within
+ * reach, so the footprint is a function of the height difference and the face
+ * is never steeper than a real tip of spoil.
+ *
+ * Loose dry fill stands at 33-37 degrees; a cut face in soil and scree holds
+ * closer to 40. Anything over 45 is masonry, and masonry is what the client
+ * rejected.
+ */
+const FILL_SLOPE = 0.66;   // tan 33.4 deg — spoil tipped over the downhill edge
+const CUT_SLOPE = 0.82;    // tan 39.4 deg — a face cut into the hillside
+/**
+ * A 22 m drop at the angle of repose is a 33 m talus, and one unbroken 33 m
+ * face is its own kind of wrong: it reads as a ramp. Real mountain roads (and
+ * real spoil heaps) break a tall face into BENCHES — a near-flat shelf every
+ * few metres of rise, which is also where vegetation gets a hold. So every
+ * BENCH_RISE metres of descent the march spends one step going almost
+ * level.
+ */
+const BENCH_RISE = 3.4;    // vertical metres between shelves
+const BENCH_W = 2.9;       // width of the shelf itself
+const BENCH_SLOPE = 0.14;  // it is a shelf, not a terrace: 8 degrees of fall
+const APRON_STEP = 2.3;    // march step on the face
+const APRON_LOOK = 7.0;    // how far past the next step the batter looks for a floor
+const APRON_STEPS = 15;    // hard limit on facets per side, cost control
+const APRON_MAX = 34;      // hard limit on the footprint, metres from the verge
 
 /**
  * THE CROSS-SECTION, as fractions of the half width. Everything about how the
@@ -1381,6 +1512,76 @@ function wear(s, uf, seed) {
     + 0.045 * (valueNoise2D(s * 0.115, uf * 3.1, seed + 29) * 2 - 1);
 }
 
+/**
+ * THE DARK THIRD.
+ * ---------------
+ * Measured, this is the largest single colour error left in the frame, and it is
+ * not the level — it is the SHAPE OF THE DISTRIBUTION. Road pixels only, as a
+ * percentage of the road's own area, by luminance bucket:
+ *
+ *   bucket        1    2    3    4    5    6    7
+ *   ours          -    -    -   11   31   55    -
+ *   reference     2    8   13   27   31   14    5
+ *
+ * Ours is a spike; the reference's road runs all the way down into bucket 1. A
+ * third of the reference's carriageway is in shadow — tree shade, the shade of
+ * its own cut bank, and long damp stretches that never dry out — and the whole
+ * of our bucket-6 excess (10.8% of the frame against the reference's 5.0%, of
+ * which our road supplies 9.9) is the absence of that third.
+ *
+ * `wear` and `braid` cannot supply it. They are SYMMETRIC noise around 1.0 with
+ * amplitudes in the tenths: they widen the spike, they do not build a second
+ * mode. What is needed is a sparse, strongly asymmetric term — most of the road
+ * untouched, and a real minority of it taken down most of a stop. So:
+ *
+ *   · two octaves of noise, ~48 m and ~17 m of arc length, wide in the lateral
+ *     direction so a patch crosses the whole carriageway rather than striping it;
+ *   · a THRESHOLD, so it does nothing at all over the majority of the surface;
+ *   · smoothstepped, so a patch has a soft margin like a shadow and not a
+ *     stencilled edge.
+ *
+ * The multiplier is applied in LINEAR space and the display is roughly a 1/2.2
+ * power of it, so 0.42 of light is 0.67 of display level: a bucket-6 tone at
+ * 0.65 lands at 0.44 — bucket 4 — and the deepest patches reach bucket 3. That
+ * is the shape above, built out of the one thing a vertex colour can honestly
+ * claim to be: how much light this piece of ground gets.
+ */
+function shade(s, uf) {
+  // THE PATCHES HAVE TO CROSS THE ROAD, NOT RUN ALONG IT. At uf * 0.42 the lateral
+  // argument spans 0.84 of a noise unit across the whole carriageway while the
+  // longitudinal one spans 2.1 per hundred metres, so every patch came out as a
+  // stripe five times longer than it was wide — and the surface read as corduroy,
+  // which is the one thing the reference never looks like. A tree shadow, a damp
+  // hollow and a swept-clean crossing all lie ACROSS a road. 26 m and 10 m of arc
+  // length against 1.4 and 3.1 lateral units puts the long axis the other way.
+  const n = 0.62 * valueNoise2D(s * 0.038, uf * 0.70, 3313)
+    + 0.38 * valueNoise2D(s * 0.098, uf * 1.55, 6607);
+  // Nothing happens between SHADE_ON and SHADE_DRY; below the one the patch
+  // deepens smoothly, above the other the ground is bone dry and lifts.
+  const t = clamp((SHADE_ON - n) / SHADE_SOFT, 0, 1);
+  // The dry term rides its OWN noise. A first version thresholded the same `n`
+  // and delivered nothing: two octaves summed 0.62/0.38 give a distribution
+  // piled up around the middle, so P(n > 0.84) measured 0.0% of the surface and
+  // the bright tail never appeared in the frame at all. One octave is close
+  // enough to uniform that a threshold means what it says — 22% of the road
+  // above 0.78, of which about a fifth reaches full lift.
+  const d = valueNoise2D(s * 0.017, uf * 0.55, 5171);
+  const b = clamp((d - SHADE_DRY) / (1 - SHADE_DRY), 0, 1);
+  return (1 - SHADE_DEEP * t * t * (3 - 2 * t)) * (1 + SHADE_LIFT * b);
+}
+const SHADE_ON = 0.545;    // noise level at which a patch starts
+const SHADE_SOFT = 0.30;   // ...and how far below that it reaches full depth
+const SHADE_DEEP = 0.58;   // deepest patch keeps 42% of the light
+/**
+ * AND THE OTHER TAIL. The reference road puts 4.6% of its own area above L 0.7
+ * and a little above 0.8; ours had 0.0% there, which is the same bug as the
+ * missing dark third seen from the other end — a spike has no tails. These are
+ * the stretches of bone-dry dust the wind has cleaned off, and they are what
+ * stops the darkened road reading as uniformly damp.
+ */
+const SHADE_DRY = 0.78;    // noise level above which the surface is dry dust
+const SHADE_LIFT = 0.34;   // ...and how far it lifts at its driest
+
 /** Nominal lateral station of the two ruts, as a fraction of the half width. */
 const RUT_U = 0.42;
 
@@ -1451,15 +1652,145 @@ function sectionY(sm, u) {
     - rutDepth(t, sm.rutL ?? -RUT_U, sm.rutR ?? RUT_U);
 }
 
-/** March outward until the batter face meets the terrain. */
-function batterWidth(terrain, px, pz, dirx, dirz, base, yEdge, cutSlope, fillSlope) {
-  for (let d = 1.2; d <= BANK_MAX; d += 1.2) {
-    const t = terrain.heightAt(px + dirx * (base + d), pz + dirz * (base + d));
-    const dy = t - yEdge;
-    const allowed = (dy > 0 ? cutSlope : fillSlope) * d;
-    if (Math.abs(dy) <= allowed) return d;
+/**
+ * DRAPE. The carriageway is a designed surface — crown, camber, ruts, the bench
+ * tilt — but the ground underneath it is a jittered mesh with ~10 m triangles,
+ * and a designed plane WILL be speared by it: a high vertex two metres off the
+ * centre line pokes a green tongue straight across the road and the ribbon reads
+ * as chopped into pieces. So no vertex is allowed below the ground beneath it.
+ *
+ * Sampled at the vertex AND around it. A terrain triangle is ~10 m across while
+ * the carriageway quads are 3 m by 2 m, so a high ground vertex can sit BETWEEN
+ * two road stations, above the quad that spans them, and shows as a green tongue
+ * lying across the ochre. Taking the worst ground within a couple of metres
+ * closes the gap the interpolation leaves; on a 1:10 slope it costs 0.16 m of
+ * extra height, which is inside the ±0.45 m the car's raw-terrain ground
+ * contact can absorb.
+ *
+ * MODULE LEVEL ON PURPOSE. This used to be a closure inside buildRibbonMesh, so
+ * `auditSlopes` had to approximate the carriageway with max(sectionY, ground) —
+ * and where the ground rose sharply just outside the carriageway the drape's
+ * 1.7 m neighbour sample lifted the real edge vertex two metres above the
+ * approximation. The audit duly reported a 60 degree "wall" between an edge that
+ * was not there and a shoulder that was. One function, two callers.
+ */
+function drapeY(terrain, sm, u) {
+  const cu = capU(sm, u);
+  const px = sm.x + sm.nx * cu, pz = sm.z + sm.nz * cu;
+  let g = terrain.heightAt(px, pz);
+  for (const [ax, az] of [[sm.nx, sm.nz], [-sm.nx, -sm.nz], [sm.tx, sm.tz], [-sm.tx, -sm.tz]]) {
+    const h = terrain.heightAt(px + ax * 1.7, pz + az * 1.7);
+    if (h > g) g = h;
   }
-  return BANK_MAX;
+  return Math.max(sectionY(sm, cu), g + LIFT);
+}
+
+/**
+ * THE EMBANKMENT PROFILE for one side of one station.
+ *
+ * Walks outward from the verge edge, descending (or climbing) by at most the
+ * angle of repose per step, and stops the instant the ground is within one
+ * step's allowance — which is exactly where a real batter daylights. The
+ * footprint therefore SCALES WITH THE HEIGHT DIFFERENCE instead of being capped
+ * at a few metres, and the face angle is a constant of the material.
+ *
+ * Returns `{ pts, landed, benches }`, where `pts` is a list of
+ * `[u, y, grass, bench]` in increasing absolute lateral offset from the road
+ * centre line, starting at the verge point and ending — when `landed` — exactly
+ * on the terrain.
+ *
+ *   cap      how far out the earthworks may reach (inside a bend, not far)
+ *   wobble   0.75..1.25, so the facet spacing and the landing point wander
+ *
+ * `landed: false` means even APRON_MAX metres of talus could not reach the
+ * ground: the last point is dropped onto it anyway (a hole is worse than a
+ * step) and `auditSlopes` reports the residual.
+ */
+function apronProfile(terrain, sm, side, base, yEdge, cap, wobble) {
+  const gAt = (uu) => terrain.heightAt(sm.x + sm.nx * side * uu, sm.z + sm.nz * side * uu);
+  // A/B HARNESS. Set globalThis.__ROAD_LEGACY_BATTER before the world builds
+  // and the ribbon is built with the model the client rejected: march at 1.2 m
+  // for at most 5 m, then THREE facets that interpolate to the ground whether it
+  // is one metre down or thirty. `tools/slopes.mjs --ab` boots the page twice,
+  // once each way, so the before/after in the report is measured rather than
+  // remembered.
+  if (globalThis.__ROAD_LEGACY_BATTER) {
+    const L_BANK = 5, L_CUT = 1.05, L_FILL = 0.75;
+    let w = L_BANK;
+    for (let d = 1.2; d <= L_BANK; d += 1.2) {
+      const dy = gAt(base + d) - yEdge;
+      if (Math.abs(dy) <= (dy > 0 ? L_CUT : L_FILL) * d) { w = d; break; }
+    }
+    w = Math.max(Math.min(cap, SKIRT_MIN), Math.min(cap, w)) * wobble;
+    const pts = [[base, yEdge, 0, 0]];
+    for (const f of [0.42, 0.74, 1.0]) {
+      const u = base + w * f, t = gAt(u);
+      const y = f === 1 ? t + 0.02 : Math.max(lerp(yEdge, t, f * 0.95), t + 0.03);
+      pts.push([u, y, f === 1 ? 1 : (f > 0.5 ? 0.55 : 0), 0]);
+    }
+    return { pts, landed: true, benches: 0 };
+  }
+  const pts = [[base, yEdge, 0, 0]];
+  const limit = base + Math.min(cap, APRON_MAX);
+  let u = base, y = yEdge, rise = 0, benches = 0, landed = false;
+  for (let s = 0; s < APRON_STEPS; s++) {
+    const bench = rise >= BENCH_RISE;
+    const step = (bench ? BENCH_W : APRON_STEP) * wobble;
+    const un = Math.min(u + step, limit);
+    const h = un - u;
+    if (h < 0.25) break;
+    const g = gAt(un);
+    // DO NOT LAND ON A LEDGE YOU CAN SEE OVER. The ground one step out being
+    // level with the batter does not mean the batter is finished: a road along
+    // the lip of a carved basin sits on a shelf two metres wide with the floor
+    // twenty metres below, and landing on that shelf is how the "flat floor,
+    // vertical sides" box canyon in the client's photograph gets built.
+    //
+    // So look APRON_LOOK metres further and take the LOWER of the two as the
+    // target — but only if the remaining footprint budget can actually reach it
+    // at the angle of repose. If it cannot, land here and leave the cliff to
+    // whoever owns the landform: chasing a drop we cannot finish would trade a
+    // gentle toe for a NEW wall at the end of a long ramp, which is worse than
+    // the shelf.
+    let target = g;
+    const room = limit - un;
+    const far = gAt(Math.min(un + APRON_LOOK, limit));
+    if (far < g - 1.2 && (y - far) < room * FILL_SLOPE * 0.85) target = far;
+    const dy = target - y;
+    // A bench is nearly level, so it only "reaches" ground very close by; the
+    // face proper reaches a third of a metre down for every half metre out.
+    const slope = bench ? BENCH_SLOPE : (dy > 0 ? CUT_SLOPE : FILL_SLOPE);
+    const allowed = slope * h;
+    if (Math.abs(dy) <= allowed) {
+      pts.push([un, g, 1, bench ? 1 : 0]);
+      landed = true;
+      break;
+    }
+    // Never dig below the ground here: a batter that descends toward a floor it
+    // saw further out must still lie ON the shelf it is crossing.
+    const yPrev = y;
+    y = Math.max(y + Math.sign(dy) * allowed, g - 0.02);
+    u = un;
+    // The rise that earns the next bench is the height ACTUALLY descended, not
+    // the height allowed: a step that crossed a shelf without dropping has not
+    // earned anything, and counting it would cut shelves into flat ground.
+    if (bench) { rise = 0; benches++; } else rise += Math.abs(y - yPrev);
+    // Greening ramps with distance from the carriageway, and a shelf greens
+    // faster than a face because soil and seed actually stay on it.
+    const f = (s + 1) / APRON_STEPS;
+    pts.push([u, y, Math.min(0.92, f * f * 1.5 + (bench ? 0.30 : 0)), bench ? 1 : 0]);
+    if (un >= limit - 1e-6) break;
+  }
+  if (!landed) {
+    const g = gAt(u);
+    const last = pts[pts.length - 1];
+    // Land it. This is the one place a step can survive the model, so make it
+    // as cheap as possible: put the landing a step further out, which buys one
+    // more step's worth of allowance for free.
+    if (Math.abs(g - last[1]) > 0.05) pts.push([u + 0.9, g, 1, 0]);
+    else { last[1] = g; last[2] = 1; }
+  }
+  return { pts, landed, benches };
 }
 
 class Strip {
@@ -1511,25 +1842,6 @@ function buildRibbonMesh(ctx, route, colours, name) {
   const closed = route.closed;
   const last = closed ? n : n - 1;
 
-  const bwL = new Float64Array(n), bwR = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const sm = S[i];
-    const base = sm.hw + sm.verge;
-    if (sm.wet) { bwL[i] = 1.2; bwR[i] = 1.2; continue; }
-    // inside a bend the earthworks must shrink or neighbouring sections overlap
-    const inner = Math.max(0, 0.45 / Math.max(Math.abs(sm.k), 1e-5) - base);
-    const capL = sm.k > 0 ? inner : BANK_MAX;
-    const capR = sm.k < 0 ? inner : BANK_MAX;
-    bwL[i] = Math.min(capL, batterWidth(terrain, sm.x, sm.z, sm.nx, sm.nz, base, sectionY(sm, base), 1.05, 0.75));
-    bwR[i] = Math.min(capR, batterWidth(terrain, sm.x, sm.z, -sm.nx, -sm.nz, base, sectionY(sm, -base), 1.05, 0.75));
-    // The skirt is never allowed to vanish: without a few metres of soft blend
-    // the carriageway ends in a clean straight line, which is exactly the "cut
-    // out and pasted on" look the client rejected.
-    bwL[i] = Math.max(bwL[i], Math.min(capL, SKIRT_MIN));
-    bwR[i] = Math.max(bwR[i], Math.min(capR, SKIRT_MIN));
-  }
-  const BL = blurRing(bwL, 3, 2, closed), BR = blurRing(bwR, 3, 2, closed);
-
   /**
    * Ragged-edge noise. A dirt road has no surveyed boundary — grass creeps in
    * two metres here, a wash of grit spills out three metres there.
@@ -1551,38 +1863,8 @@ function buildRibbonMesh(ctx, route, colours, name) {
     return [sm.x + sm.nx * cu, y === undefined ? sectionY(sm, cu) : y, sm.z + sm.nz * cu];
   };
 
-  /**
-   * DRAPE. The carriageway is a designed surface — crown, camber, ruts, the
-   * bench tilt — but the ground underneath it is a jittered mesh with ~10 m
-   * triangles, and a designed plane WILL be speared by it: a high vertex two
-   * metres off the centre line pokes a green tongue straight across the road,
-   * and the ribbon reads as chopped into pieces.
-   *
-   * Rather than jacking the whole road into the air to clear its worst bump —
-   * which we cannot afford, because game.js still stands the car on RAW terrain
-   * height (`groundAt`) and any lift is a gap under the wheels — every vertex
-   * is simply not allowed to go below the ground beneath it. Where the design
-   * clears the ground, the design wins and the section is crisp; where it does
-   * not, the road drapes over the bump like a graded dirt track actually does.
-   * Nothing can poke through, and the surface never leaves the car behind.
-   */
-  const drape = (sm, u) => {
-    const cu = capU(sm, u);
-    const px = sm.x + sm.nx * cu, pz = sm.z + sm.nz * cu;
-    // Sampled at the vertex AND around it. A terrain triangle is ~10 m across
-    // while the carriageway quads are 3 m by 2 m, so a high ground vertex can
-    // sit BETWEEN two road stations, above the quad that spans them, and shows
-    // as a green tongue lying across the ochre. Taking the worst ground within
-    // a couple of metres closes the gap the interpolation leaves; on a 1:10
-    // slope it costs 0.16 m of extra height, which is inside the ±0.45 m the
-    // car's raw-terrain ground contact can absorb.
-    let g = terrain.heightAt(px, pz);
-    for (const [ax, az] of [[sm.nx, sm.nz], [-sm.nx, -sm.nz], [sm.tx, sm.tz], [-sm.tx, -sm.tz]]) {
-      const h = terrain.heightAt(px + ax * 1.7, pz + az * 1.7);
-      if (h > g) g = h;
-    }
-    return Math.max(sectionY(sm, cu), g + LIFT);
-  };
+  /** Shorthand for this ribbon's terrain — see `drapeY` at module level. */
+  const drape = (sm, u) => drapeY(terrain, sm, u);
 
   // --- carriageway --------------------------------------------------------
   //
@@ -1602,6 +1884,13 @@ function buildRibbonMesh(ctx, route, colours, name) {
   const rowX = new Float64Array(n * NB);
   const rowY = new Float64Array(n * NB);
   const rowZ = new Float64Array(n * NB);
+  // Kept for every station, not just the current one: `auditSlopes` profiles the
+  // carriageway from these rows. It used to re-derive it from `drapeY`, which
+  // silently bypassed the lip clamp below and went on reporting a 64 degree
+  // kick-up that the shipped mesh no longer had.
+  const rowU = new Float64Array(n * NB);
+  const edgeU = new Float64Array(n * 2);     // outermost offset, [left, right]
+  const edgeY = new Float64Array(n * 2);     // ...and its height after clamping
   for (let i = 0; i < n; i++) {
     const sm = S[i];
     // The ruts wander: a slow lateral drift with arc length, so they are never
@@ -1619,11 +1908,112 @@ function buildRibbonMesh(ctx, route, colours, name) {
       if (a > 0.19 && a < 0.7) f += sway * Math.sign(uf);
       if (a >= 0.999) f *= hem[uf > 0 ? 1 : 0];
       const cu = capU(sm, f * sm.hw);
+      rowU[i * NB + j] = cu;
       rowX[i * NB + j] = sm.x + sm.nx * cu;
       rowY[i * NB + j] = drape(sm, f * sm.hw);
       rowZ[i * NB + j] = sm.z + sm.nz * cu;
     }
+    // THE LIP. `drape` protects the carriageway from being speared by the ground
+    // by refusing to let any vertex sit below it — and on a steep cutting that
+    // hoists the OUTERMOST vertex up to the hillside. Audited: the outer edge of
+    // one spur station stood 1.76 m above the vertex 0.84 m inboard of it, a
+    // 64 degree kick-up on the road SURFACE. That is a wall too, and it is the
+    // one the driver actually looks at.
+    //
+    // So the row is walked outward from the crown and each vertex is capped at
+    // LIP_MAX of gradient above its inboard neighbour. Where the ground rises
+    // faster than that the ribbon stays under it and the terrain wins the last
+    // half metre of edge — which is a ragged green tongue biting into the ochre,
+    // i.e. exactly what an unsurfaced road's boundary does anyway. Only upward
+    // excursions are clamped; the crown, camber and ruts are design and are left
+    // alone.
+    const mid = Math.round((NB - 1) / 2);
+    // `--ab` wants the mesh the client actually saw, which had no clamp either.
+    // `--ab` wants the mesh the client actually saw, which had no clamp either.
+    if (!globalThis.__ROAD_LEGACY_BATTER) {
+      for (let j = mid + 1; j < NB; j++) {
+        const du = Math.abs(rowU[i * NB + j] - rowU[i * NB + j - 1]);
+        const capY = rowY[i * NB + j - 1] + LIP_MAX * du;
+        if (rowY[i * NB + j] > capY) rowY[i * NB + j] = capY;
+      }
+      for (let j = mid - 1; j >= 0; j--) {
+        const du = Math.abs(rowU[i * NB + j] - rowU[i * NB + j + 1]);
+        const capY = rowY[i * NB + j + 1] + LIP_MAX * du;
+        if (rowY[i * NB + j] > capY) rowY[i * NB + j] = capY;
+      }
+    }
+    // The shoulder quad starts exactly here, so the earthworks pre-pass below
+    // must read the CLAMPED edge, not re-derive it from `drape`: half a metre of
+    // disagreement between the two is a crack you can see the sky through.
+    edgeU[i * 2] = rowU[i * NB]; edgeU[i * 2 + 1] = rowU[i * NB + NB - 1];
+    edgeY[i * 2] = rowY[i * NB]; edgeY[i * 2 + 1] = rowY[i * NB + NB - 1];
   }
+  // --- earthworks pre-pass -------------------------------------------------
+  //
+  // Every station's embankment, both sides, computed once and CACHED ON THE
+  // SAMPLE, because two things need to agree about it exactly: the mesh built
+  // below, and `auditSlopes`, which walks the finished profile looking for the
+  // vertical walls the client rejected. An audit that re-derives the shape is
+  // an audit of a different road.
+  const APRON = [];
+  for (let i = 0; i < n; i++) {
+    const sm = S[i];
+    const hem = [1 + ragged(sm, -1) * 0.13, 1 + ragged(sm, 1) * 0.13];
+    const sides = {};
+    for (const side of [1, -1]) {
+      const hm = side > 0 ? hem[1] : hem[0];
+      const rg = 1 + ragged(sm, side) * 0.5;
+      const e = edgeU[i * 2 + (side > 0 ? 1 : 0)];
+      const vAbs = sm.hw * hm + sm.verge * rg;
+      const v = side * vAbs;
+      const yE = edgeY[i * 2 + (side > 0 ? 1 : 0)];
+      const gv = terrain.heightAt(sm.x + sm.nx * capU(sm, v), sm.z + sm.nz * capU(sm, v));
+      // shoulder height: half way from the carriageway edge down to the ground,
+      // and never below the ground it is standing on
+      // A QUARTER OF THE WAY DOWN, NOT HALF. The shoulder used to fall half way
+      // from the carriageway edge to the ground, which tilted it far enough that
+      // the sun stopped reaching it: scanned across the hero frame it rendered
+      // rgb(113,129,93) at saturation 0.28 between a carriageway at 0.78 and a
+      // meadow at 0.83 — a grey-olive kerb a metre wide following the road down
+      // both sides, which is the "concrete kerb on a dirt rally stage" this file
+      // has already been through three times. A facet lit by the sky is a cold
+      // facet whatever colour it is painted, so the fix is geometric: keep the
+      // shoulder nearly coplanar with the road, and let the batter outside it —
+      // which now marches at the angle of repose and can afford the height — do
+      // the descending.
+      let yV = Math.max(lerp(drape(sm, v), gv + LIFT, 0.25), gv + 0.03);
+      // ...BUT THE SHOULDER IS A GRADED VERGE, NOT A RETAINING WALL. On a cut
+      // the natural ground at the verge is metres above the carriageway, and
+      // "never below the ground" used to hoist the shoulder point straight up
+      // to meet it: measured, that put a 1.7 m rise into 1.0 m of verge — a
+      // 60 degree step, and the steepest thing the road built anywhere in the
+      // world. So the shoulder is capped at 1:2 either way and the CLIMB is
+      // handed to the batter outside it, which already knows the angle of
+      // repose. On the cut side that leaves the ribbon fractionally below the
+      // raw ground for a metre or so; the terrain triangle wins there, which is
+      // correct — a cutting is a hole in the hill, and roads.js does not own the
+      // hill.
+      const vw = Math.max(0.35, vAbs - Math.abs(e));
+      if (!globalThis.__ROAD_LEGACY_BATTER) {
+        yV = Math.min(yV, yE + 0.30 * vw);
+        yV = Math.max(yV, yE - 0.30 * vw);
+      }
+      // A bridge deck has no earthworks — the ground is thirty metres of air.
+      // Inside a bend the batter must shrink or neighbouring sections overlap;
+      // only the INSIDE of the bend is capped, so the outside of a hairpin still
+      // gets its full talus.
+      const inner = Math.max(0, 0.45 / Math.max(Math.abs(sm.k), 1e-5) - vAbs);
+      const cap = sm.wet ? 1.2 : Math.max(SKIRT_MIN, (side > 0) === (sm.k > 0) ? inner : APRON_MAX);
+      const wob = clamp(1 + ragged(sm, side) * 0.30, 0.72, 1.3);
+      const ap = apronProfile(terrain, sm, side, vAbs, yV, cap, wob);
+      sides[side] = { e, yE, v, yV, cut: yE + 0.5 < terrain.heightAt(sm.x + sm.nx * capU(sm, v), sm.z + sm.nz * capU(sm, v)), ...ap };
+    }
+    APRON.push(sides);
+    sm._apron = sides;   // diagnostics: auditSlopes reads this
+    // ...and so is the finished carriageway row, clamp and all.
+    sm._row = { u: rowU.subarray(i * NB, i * NB + NB), y: rowY.subarray(i * NB, i * NB + NB) };
+  }
+
   // Scratch, so the inner loop allocates nothing.
   const _p = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
   const ds = route.ds || 3;
@@ -1674,39 +2064,26 @@ function buildRibbonMesh(ctx, route, colours, name) {
           const wash = clamp((Math.abs(uc) - 0.55) / 0.45, 0, 1);
           const cluster = valueNoise2D(ss * 0.075, uc * 2.4, 7717);
           const m = streak(ss, uc) * wear(ss, uc, 4801) * braid(ss, uc, shift)
-            * grit(i * SUBROWS * 2 + k * 2 + h, j, wash, cluster);
+            * shade(ss, uc) * grit(i * SUBROWS * 2 + k * 2 + h, j, wash, cluster);
           (h ? _sc2 : _sc).copy(tone[kind]).multiplyScalar(m);
         }
         b.quad(_p[0], _p[1], _p[2], _p[3], _sc, _sc2);
       }
     }
 
-    const hemA = [1 + ragged(A, -1) * 0.13, 1 + ragged(A, 1) * 0.13];
-    const hemB = [1 + ragged(B, -1) * 0.13, 1 + ragged(B, 1) * 0.13];
     for (const side of [1, -1]) {
       // --- shoulder: carriageway edge -> soft skirt -> untouched ground ------
       //
       // No gutter, no kerb lip, no vertical face. The section walks outward in
-      // three steps, each one lower and greener than the last, and the LAST one
-      // lands exactly on the terrain it is standing on. That is what stops the
-      // ribbon reading as a slab: there is nowhere left for a step to hide.
-      const hmA = side > 0 ? hemA[1] : hemA[0];
-      const hmB = side > 0 ? hemB[1] : hemB[0];
-      const eA = side * A.hw * hmA, eB = side * B.hw * hmB;
-      const rgA = 1 + ragged(A, side) * 0.5;
-      const rgB = 1 + ragged(B, side) * 0.5;
-      const wA = (side > 0 ? BL[i] : BR[i]) * rgA;
-      const wB = (side > 0 ? BL[(i + 1) % n] : BR[(i + 1) % n]) * rgB;
-
-      const vA = side * (A.hw * hmA + A.verge * rgA);
-      const vB = side * (B.hw * hmB + B.verge * rgB);
-      const yEA = drape(A, eA), yEB = drape(B, eB);
-      // shoulder height: half way from the carriageway edge down to the ground,
-      // and never below the ground it is standing on
-      const gvA = terrain.heightAt(A.x + A.nx * capU(A, vA), A.z + A.nz * capU(A, vA));
-      const gvB = terrain.heightAt(B.x + B.nx * capU(B, vB), B.z + B.nz * capU(B, vB));
-      const yVA = Math.max(lerp(drape(A, vA), gvA + LIFT, 0.5), gvA + 0.03);
-      const yVB = Math.max(lerp(drape(B, vB), gvB + LIFT, 0.5), gvB + 0.03);
+      // as many steps as the height difference needs, each one lower and greener
+      // than the last, and the LAST one lands exactly on the terrain it is
+      // standing on. That is what stops the ribbon reading as a slab: there is
+      // nowhere left for a step to hide.
+      const apA = APRON[i][side], apB = APRON[(i + 1) % n][side];
+      const eA = apA.e, eB = apB.e;
+      const vA = apA.v, vB = apB.v;
+      const yEA = apA.yE, yEB = apB.yE;
+      const yVA = apA.yV, yVB = apB.yV;
 
       // THE EDGE HAS TO DISSOLVE. `ragged` already makes the shoulder's WIDTH
       // wander, but a uniformly-toned band of wandering width is still a band,
@@ -1728,33 +2105,37 @@ function buildRibbonMesh(ctx, route, colours, name) {
       const creepA = valueNoise2D(A.s * 0.042, side * 7.3, 913);
       const shGrit = grit(i * 2 + (side > 0 ? 0 : 1), 400, 1,
         valueNoise2D(A.s * 0.075, side * 2.4, 7717));
-      _sc.copy(colours.shoulder).lerp(colours.blend, clamp(creepA * 0.60 - 0.10, 0, 0.30))
-        .multiplyScalar(wear(A.s, side * 1.05, 4801) * shGrit);
+      // The shade patches do not stop at the carriageway edge — a tree shadow or a
+      // damp hollow crosses the shoulder too — so the same term runs out here at
+      // three quarters strength, which is also what keeps the shoulder from
+      // reading as a continuous pale band beside a mottled road.
+      _sc.copy(colours.shoulder).lerp(colours.blend, clamp(creepA * 0.55 - 0.12, 0, 0.18))
+        .multiplyScalar(wear(A.s, side * 1.05, 4801) * shGrit
+          * (1 - (1 - shade(A.s, side * 1.05)) * 0.75));
       b.quad(st(A, eA, yEA), st(A, vA, yVA), st(B, eB, yEB), st(B, vB, yVB), _sc);
 
-      // The skirt: two facets marching out to meet the ground exactly. A cut
-      // face shows raw earth, a fill face is already half grassed over.
-      const baseA = A.hw * hmA + A.verge * rgA, baseB = B.hw * hmB + B.verge * rgB;
-      let pA = [vA, yVA], pB = [vB, yVB];
-      // Three facets, not two: earth, then half-grassed, then grass. The extra
-      // step is what turns the last hard tonal edge into a gradient — with two
-      // the road still ended on a visible line at this camera height.
-      for (const f of [0.42, 0.74, 1.0]) {
-        const uA = side * (baseA + wA * f), uB = side * (baseB + wB * f);
-        const cA = capU(A, uA), cB = capU(B, uB);
-        const tA = terrain.heightAt(A.x + A.nx * cA, A.z + A.nz * cA);
-        const tB = terrain.heightAt(B.x + B.nx * cB, B.z + B.nz * cB);
-        // land ON the ground at the last facet, a hair above so it wins the
-        // depth test against the terrain triangle underneath it
-        const yA = f === 1 ? tA + 0.02 : Math.max(lerp(yVA, tA, f * 0.95), tA + 0.03);
-        const yB = f === 1 ? tB + 0.02 : Math.max(lerp(yVB, tB, f * 0.95), tB + 0.03);
-        const cutting = tA > yEA + 0.5;
-        const earth = cutting ? colours.cut : colours.fill;
-        const face = f === 1 ? colours.blend
-          : (f > 0.5 ? earth.clone().lerp(colours.blend, 0.55) : earth);
-        b.quad(st(A, pA[0], pA[1]), st(A, uA, yA), st(B, pB[0], pB[1]), st(B, uB, yB),
-          jitter(face, i * 13 + (side > 0 ? 1 : 2) + Math.round(f * 64), 0.10));
-        pA = [uA, yA]; pB = [uB, yB];
+      // THE TALUS. As many facets as the drop needs — see `apronProfile`. A cut
+      // face shows raw earth; a fill face is already half grassed over; a bench
+      // is greener still because soil and seed stay on a shelf.
+      //
+      // The two stations rarely agree on how many facets they need (the ground
+      // one station along is three metres away and may be two metres lower), so
+      // the quad strip runs to the LONGER of the two and the shorter side simply
+      // repeats its landing point. Those quads come out as slivers along the toe
+      // of the bank, which is exactly where a real batter's daylight line
+      // wanders in and out.
+      const ptsA = apA.pts, ptsB = apB.pts;
+      const steps = Math.max(ptsA.length, ptsB.length);
+      for (let q = 1; q < steps; q++) {
+        const a0 = ptsA[Math.min(q - 1, ptsA.length - 1)], a1 = ptsA[Math.min(q, ptsA.length - 1)];
+        const b0 = ptsB[Math.min(q - 1, ptsB.length - 1)], b1 = ptsB[Math.min(q, ptsB.length - 1)];
+        if (a1[0] - a0[0] < 1e-4 && b1[0] - b0[0] < 1e-4) continue;
+        const earth = apA.cut ? colours.cut : colours.fill;
+        const g = a1[2];
+        const face = g >= 1 ? colours.blend : earth.clone().lerp(colours.blend, g);
+        b.quad(st(A, side * a0[0], a0[1]), st(A, side * a1[0], a1[1]),
+          st(B, side * b0[0], b0[1]), st(B, side * b1[0], b1[1]),
+          jitter(face, i * 13 + (side > 0 ? 1 : 2) + q * 37, 0.10));
       }
     }
   }
@@ -2699,6 +3080,201 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
 }
 
 /**
+ * EARTHWORKS AUDIT — "are there vertical walls in this world, and whose?"
+ *
+ * The client's complaint was a photograph of a height change made as a single
+ * vertical polygon. This walks the route and, at every station, takes the
+ * PERPENDICULAR PROFILE of the surface the camera actually sees — the road
+ * ribbon where the ribbon covers the ground, the terrain everywhere else — and
+ * reports the steepest step in it.
+ *
+ * The profile is assembled from the apron point lists CACHED ON THE SAMPLES by
+ * `buildRibbonMesh`, so this measures the mesh that shipped, not a re-derivation
+ * of it.
+ *
+ * Every step is attributed. `road` steps are between two points of the ribbon
+ * (shoulder, batter face, bench); `land` steps are between two terrain samples
+ * outside the earthworks, which belong to whoever owns `terrain.heightAt` — in
+ * this build water.js, which replaces it with a basin-carving version. Without
+ * that split the number is meaningless: a road cut into a cliff is not a road
+ * bug.
+ *
+ * Returns { stations, road: {...}, land: {...}, apron: {...}, worst, text }.
+ */
+function auditSlopes(routes, terrain, opts = {}) {
+  const OUT = opts.out ?? 60;      // profile half-width, metres
+  const STEP = opts.step ?? 2;     // profile resolution outside the earthworks
+  const every = opts.every ?? 1;   // stations to skip
+  const WALL = opts.wall ?? 1.0;   // tan 45 deg — the client's own threshold
+
+  const roadSteep = [], landSteep = [], widths = [], rawSteep = [];
+  const wHist = new Array(9).fill(0);
+  let rawMax = 0, rawWall = 0;
+  let stations = 0, roadWall = 0, landWall = 0, benches = 0, unlanded = 0, wetWall = 0;
+  let worst = null;
+
+  for (const route of routes) {
+    const S = route.samples;
+    for (let i = 0; i < S.length; i += every) {
+      const sm = S[i];
+      const ap = sm._apron;
+      if (!ap) continue;
+      stations++;
+      const gr = (u) => terrain.heightAt(sm.x + sm.nx * u, sm.z + sm.nz * u);
+
+      // --- assemble the profile, most negative offset first -----------------
+      const prof = [];   // [signed u, y, 'road' | 'land']
+      for (const side of [-1, 1]) {
+        const a = ap[side];
+        const reach = a.pts[a.pts.length - 1][0];
+        widths.push(reach - a.pts[0][0]);
+        benches += a.benches;
+        if (!a.landed) unlanded++;
+        const land = [];
+        for (let d = Math.ceil(reach / STEP) * STEP; d <= OUT; d += STEP) land.push([side * d, gr(side * d), 'land']);
+        // THE VISIBLE SURFACE, not the ribbon's own vertex. Where the batter
+        // lies below the raw ground — the whole inboard half of any cutting —
+        // the terrain triangle is what the camera sees, so the profile takes the
+        // higher of the two and attributes the point to whoever won. Auditing
+        // the ribbon's buried vertices instead would report a tidy 39 degree cut
+        // face nobody can see, which is how an audit comes to disagree with a
+        // screenshot.
+        const face = a.pts.map((p) => {
+          const t = gr(side * p[0]);
+          return t > p[1] + 0.02 ? [side * p[0], t, 'land'] : [side * p[0], p[1], 'road'];
+        });
+        if (side < 0) { land.reverse(); prof.push(...land, ...face.reverse()); }
+        else {
+          // The carriageway itself, from ITS OWN left edge to ITS OWN right one.
+          // The two sides do not share a half width — the ragged hem wanders
+          // independently — and a first version ran this range from |ap[1].e| on
+          // BOTH sides. Where the left hem happened to be the wider of the two
+          // that put a carriageway sample one centimetre inboard of the left
+          // verge point, and the audit's headline number became a 17:1 "wall"
+          // that was a 0.18 m camber drop measured over a 0.01 m baseline. The
+          // du guard below is the belt to this brace.
+          const row = sm._row;
+          for (let q = 0; q < row.u.length; q++) prof.push([row.u[q], row.y[q], 'road']);
+          prof.push(...face, ...land);
+        }
+      }
+
+      // --- the ribbon's OWN geometry, buried or not --------------------------
+      // The profile above reports the VISIBLE surface, which is the right answer
+      // to "does this world have walls in it" but hides what the road builds: on
+      // a cutting the batter sits below the raw ground and every step it makes is
+      // attributed to the terrain that covers it. The brief's complaint was about
+      // the BATTER, so measure that too — the apron point list as built, with no
+      // terrain substitution anywhere.
+      for (const side of [-1, 1]) {
+        const pts = ap[side].pts;
+        for (let q = 1; q < pts.length; q++) {
+          const du = pts[q][0] - pts[q - 1][0];
+          if (du < 0.2) continue;
+          const g = Math.abs(pts[q][1] - pts[q - 1][1]) / du;
+          if (g > rawMax) rawMax = g;
+          if (q === 1) continue;   // the shoulder is measured separately below
+        }
+        let m = 0;
+        for (let q = 1; q < pts.length; q++) {
+          const du = pts[q][0] - pts[q - 1][0];
+          if (du < 0.2) continue;
+          m = Math.max(m, Math.abs(pts[q][1] - pts[q - 1][1]) / du);
+        }
+        rawSteep.push(m);
+        if (m > WALL) rawWall++;
+        const w = pts[pts.length - 1][0] - pts[0][0];
+        wHist[Math.min(wHist.length - 1, Math.floor(w / 4))]++;
+      }
+
+      // --- steepest step, attributed ---------------------------------------
+      // STEEPEST GRADIENT OVER A FIXED BASELINE, not between adjacent samples.
+      // The profile is not evenly sampled: the carriageway carries 66 slice
+      // boundaries about 0.17 m apart while the terrain outside is read every
+      // 2 m. A previous version compared neighbours and threw away any pair
+      // closer than 0.2 m to kill quantisation noise — which silently discarded
+      // EVERY carriageway pair, so the road surface could kick up a metre and
+      // score zero. Comparing each point with the nearest earlier point at least
+      // BASE metres back is scale-free: it answers "over any half metre of this
+      // profile, what is the worst rise?" the same way on both meshes.
+      const BASE = 0.5;
+      let rMax = 0, lMax = 0, rAt = 0, rPair = null;
+      let p0 = 0;
+      for (let q = 1; q < prof.length; q++) {
+        while (p0 + 1 < q && prof[q][0] - prof[p0 + 1][0] >= BASE) p0++;
+        const du = prof[q][0] - prof[p0][0];
+        if (du < BASE * 0.5) continue;
+        const g = Math.abs(prof[q][1] - prof[p0][1]) / du;
+        // Attributed to the road only when the whole span is ribbon.
+        let allRoad = true;
+        for (let m = p0; m <= q && allRoad; m++) if (prof[m][2] !== 'road') allRoad = false;
+        if (allRoad) { if (g > rMax) { rMax = g; rAt = prof[q][0]; rPair = [prof[p0], prof[q]]; } }
+        else if (g > lMax) lMax = g;
+      }
+      if (rMax > WALL && sm.wet) wetWall++;
+      roadSteep.push(rMax); landSteep.push(lMax);
+      if (rMax > WALL) roadWall++;
+      if (lMax > WALL) landWall++;
+      if (!worst || rMax > worst.grad) worst = { grad: rMax, at: rAt, i, wet: !!sm.wet, pair: rPair, route: route === routes[0] ? 'main' : 'spur', prof };
+    }
+  }
+
+  const pct = (a, p) => {
+    if (!a.length) return 0;
+    const s = [...a].sort((x, y) => x - y);
+    return s[Math.min(s.length - 1, Math.floor(p * s.length))];
+  };
+  const deg = (g) => +(Math.atan(g) * 180 / Math.PI).toFixed(1);
+  const R = {
+    p50: +pct(roadSteep, 0.5).toFixed(2), p90: +pct(roadSteep, 0.9).toFixed(2),
+    max: +Math.max(0, ...roadSteep).toFixed(2), over45: roadWall, over45onDecks: wetWall,
+  };
+  const L = {
+    p50: +pct(landSteep, 0.5).toFixed(2), p90: +pct(landSteep, 0.9).toFixed(2),
+    max: +Math.max(0, ...landSteep).toFixed(2), over45: landWall,
+  };
+  const RAW = {
+    p50: +pct(rawSteep, 0.5).toFixed(2), p90: +pct(rawSteep, 0.9).toFixed(2),
+    max: +rawMax.toFixed(2), over45: rawWall,
+  };
+  const A = {
+    medianWidth: +pct(widths, 0.5).toFixed(1), p90Width: +pct(widths, 0.9).toFixed(1),
+    maxWidth: +Math.max(0, ...widths).toFixed(1), benches, unlanded,
+  };
+
+  const lines = [];
+  lines.push(`  stations profiled       ${stations}  (+-${OUT} m perpendicular, ${STEP} m resolution)`);
+  lines.push('');
+  lines.push('  steepest step per station, as a gradient (1.00 = 45 deg)');
+  lines.push(`    ROAD earthworks       p50 ${R.p50} (${deg(R.p50)} deg)  p90 ${R.p90} (${deg(R.p90)} deg)  max ${R.max} (${deg(R.max)} deg)`);
+  lines.push(`      stations over 45 deg  ${R.over45} of ${stations}`);
+  lines.push(`    TERRAIN beyond them   p50 ${L.p50} (${deg(L.p50)} deg)  p90 ${L.p90} (${deg(L.p90)} deg)  max ${L.max} (${deg(L.max)} deg)`);
+  lines.push(`      stations over 45 deg  ${L.over45} of ${stations}   <- terrain.heightAt owner, not roads.js`);
+  lines.push('');
+  lines.push('  ...and the BATTER AS BUILT, ignoring where terrain buries it');
+  lines.push(`    apron faces           p50 ${RAW.p50} (${deg(RAW.p50)} deg)  p90 ${RAW.p90} (${deg(RAW.p90)} deg)  max ${RAW.max} (${deg(RAW.max)} deg)`);
+  lines.push(`      sides over 45 deg     ${RAW.over45} of ${stations * 2}`);
+  lines.push('');
+  lines.push(`  embankment footprint    median ${A.medianWidth} m  p90 ${A.p90Width} m  max ${A.maxWidth} m`);
+  lines.push(`  benches cut             ${A.benches}      batters that ran out of room: ${A.unlanded}`);
+  lines.push(`  footprint histogram     ${wHist.map((v, k) => `${k * 4}-${k * 4 + 4}m:${v}`).join('  ')}`);
+  if (worst) {
+    lines.push('');
+    lines.push(`  worst ROAD step: ${worst.grad.toFixed(2)} (${deg(worst.grad)} deg) at offset ${worst.at.toFixed(1)} m, ${worst.route} station ${worst.i}${worst.wet ? ' (BRIDGE DECK)' : ''}`);
+    if (worst.pair) lines.push(`    between offset ${worst.pair[0][0].toFixed(2)} m at ${worst.pair[0][1].toFixed(2)} m and offset ${worst.pair[1][0].toFixed(2)} m at ${worst.pair[1][1].toFixed(2)} m`);
+    lines.push('  profile across that station (offset m -> height m, * = road ribbon):');
+    let row = '   ';
+    for (const p of worst.prof) {
+      if (Math.abs(p[0]) > 44) continue;
+      row += ` ${p[0] >= 0 ? '+' : ''}${p[0].toFixed(0)}:${p[1].toFixed(1)}${p[2] === 'road' ? '*' : ''}`;
+      if (row.length > 96) { lines.push(row); row = '   '; }
+    }
+    if (row.trim()) lines.push(row);
+  }
+  return { stations, road: R, land: L, raw: RAW, apron: A, widthHist: wHist, worst: worst && { grad: worst.grad, at: worst.at, i: worst.i }, text: lines.join('\n') };
+}
+
+/**
  * THE CHECK. Walks every metre of every route and reports every place where
  * leaving the road would cost the driver the stage but no steel barrier stands
  * there. Diagnostics only — nothing in the game reads it — but it is the thing
@@ -3176,14 +3752,27 @@ export function createRoadNetwork(ctx) {
   // turf the road actually runs through.
   const ramp = palette.ground ?? [0x5faa3c];
   const grass = new THREE.Color(ramp[Math.min(ramp.length - 1, 2)]);
-  // THE MISSING BLUE. tools/measure.mjs: every dominant colour in our frame ends
-  // in 00 — the ground ramp carries literally zero blue — while the reference's
-  // meadow greens measure 0x17 (23) and its frame mean blue is 44 against our
-  // 26. The ramp is not mine to change, but everything this module blends INTO
-  // the meadow is: the shoulder, the fill and cut faces, the soft blend that
-  // lands on the turf, and the greened strip between the ruts. All of them get
-  // the reference's blue back, or the whole fringe of the road reads as khaki.
-  if (grass.b < 23 / 255) grass.b = 23 / 255;
+  // THE MISSING BLUE — AND THE UNIT BUG THAT TURNED IT INTO A GREY KERB.
+  //
+  // The intent is right: the reference's meadow greens measure 0x17 (23) of blue
+  // and everything this module blends into the meadow needs it, or the fringe of
+  // the road reads as khaki. The arithmetic was not. `grass.b` is a channel of a
+  // THREE.Color built from a hex literal, so with colour management on it holds a
+  // LINEAR value — 0x1a of sRGB blue is linear 0.0103 — and it was being compared
+  // against, and then overwritten with, 23/255 = 0.0902 as if it were sRGB. Nine
+  // times too much blue, injected into every colour that touches the turf.
+  //
+  // Measured consequence, scanned across the hero frame: the outermost apron
+  // facet — the one whose whole job is to disappear into the meadow — rendered
+  // rgb(111,127,92) at saturation 0.28, a metre-wide grey-olive band down both
+  // sides of the road, against the terrain's own grass at rgb(76,100,15) and
+  // 0.85. Three separate rounds of this file have chased that band by repainting
+  // the shoulder, the cut face and the fill face. It was never any of them: it
+  // was 0.09 of linear blue where 0.01 was meant.
+  //
+  // Expressed as a colour so the units cannot drift again: the floor IS the hex.
+  const MIN_GRASS_B = new THREE.Color(0x000017).b;
+  if (grass.b < MIN_GRASS_B) grass.b = MIN_GRASS_B;
 
   const colours = {};
   for (const k of new Set(style.kinds)) {
@@ -3246,8 +3835,29 @@ export function createRoadNetwork(ctx) {
   // so they are lit mostly by the sky term, which is cold. A colour that has to
   // survive being lit by the sky has to start warmer and darker than the tone
   // it is trying to look like.
-  colours.shoulder = base.clone().multiplyScalar(0.80).lerp(grass, 0.10);
-  colours.blend = grass.clone().lerp(base, 0.07);
+  // ...and the material follows the geometry: no grass in it at all. The 10% of
+  // turf that used to be mixed in here was the other half of the grey — ochre
+  // and green are near enough complementary that even a tenth of it costs real
+  // chroma, and the shoulder has the road's own grass-creep noise outside it to
+  // do the greening where the turf has actually taken hold.
+  colours.shoulder = base.clone().multiplyScalar(0.90);
+  /**
+   * THE FACET THAT HAS TO BE THE MEADOW. It lies flat ON the terrain at the toe
+   * of the batter, so if it does not render as the turf beside it the road ends
+   * on a visible line — which is the whole complaint this apron exists to answer.
+   *
+   * It is matched by SCANLINE, not by swatch, because the grade's saturation
+   * expansion is not per-channel: measured, the same material blue of 0.013 in
+   * the working space came out as 2 of 255 while 0.090 came out as 92. A channel
+   * below the pixel's own luminance gets pushed toward zero and one near it
+   * survives, so "the swatch has some blue in it" says nothing about whether the
+   * frame will. The two numbers that matter are what the terrain's grass renders
+   * beside this facet, rgb(76,100,15) at saturation 0.85, and what this facet
+   * rendered before the match: rgb(130,147,0) at 1.00 — half a stop too bright,
+   * and acid because the last of its blue had been squeezed out.
+   */
+  colours.blend = grass.clone().multiplyScalar(0.55).lerp(base, 0.06);
+  colours.blend.b = Math.max(colours.blend.b, new THREE.Color(0x000022).b);
   // A CUT FACE IS EARTH, NOT ROCK. `palette.rock` is 0x7d7268 — a cold grey —
   // and at 0.45 of the road tone it rendered rgb(157,136,100): a pale grey-tan
   // apron two or three metres wide following the inside of every corner where
@@ -3256,10 +3866,10 @@ export function createRoadNetwork(ctx) {
   // has bare warm earth there and nothing grey anywhere near a road. So the cut
   // face is now the road's own dust, damp and a shade darker, with a little of
   // the trunk brown in it for the raw-soil cast.
-  colours.cut = base.clone().multiplyScalar(0.84).lerp(new THREE.Color(palette.trunk), 0.22);
+  colours.cut = skyLit(base.clone().multiplyScalar(0.92)).lerp(new THREE.Color(palette.trunk), 0.18);
   // A fill embankment is half grassed over — but it is grassed over DAMP EARTH,
   // so it darkens toward the turf rather than washing out into it.
-  colours.fill = base.clone().multiplyScalar(0.55).lerp(grass, 0.38);
+  colours.fill = skyLit(base.clone().multiplyScalar(0.72)).lerp(grass, 0.12);
 
   // ---- meshes ----
   const ribbons = [buildRibbonMesh(ctx, main, colours, 'road-main')];
@@ -3872,6 +4482,13 @@ export function createRoadNetwork(ctx) {
      * place a barrier is owed. See `auditBarriers`.
      */
     audit: () => auditBarriers(routes, terrain, group, furniture.barriers.segments),
+    /**
+     * EARTHWORKS AUDIT — the answer to "height changes are vertical walls".
+     * Walks the route, takes a perpendicular profile of the visible surface at
+     * every station, and reports the steepest step split into the part the road
+     * built and the part the terrain owns. See `auditSlopes`.
+     */
+    auditSlopes: (opts) => auditSlopes(routes, terrain, opts),
     /** Triangle cost of the ribbons, so the surface texture can be priced. */
     get _meshStats() {
       const out = { slices: SLICES.length, subrows: SUBROWS, tris: 0, ribbons: [] };
