@@ -617,6 +617,179 @@ export function firFrond(r, hUp, drop, seg, o = {}, rng) {
   return g;
 }
 
+/**
+ * ONE TIER OF A CONIFER, TAKE FOUR — the THIRD RING, so each frill CURLS.
+ *
+ * `firFrond` above is the two-ring version and its failure is recorded in its
+ * own essay: solving the notch radius for a vertical (darkest) wall pins the
+ * notch just INSIDE the shoulder ring, so the tier's plan outline is a star with
+ * points at r and valleys at 0.30r. Measured with scratch/nyhist.mjs, that tier
+ * covers 0.35 of the disc of radius r it occupies. A tier that fills a third of
+ * its own footprint is not a pad, it is a rosette of thorns, and at 6x
+ * (ab/trees_r0b.png) that is exactly what our firs read as: four big spikes per
+ * row with sky between them, against the reference's blunt overlapping leaves.
+ *
+ * The predecessor also recorded the cheap fix that does NOT work — an extra hem
+ * vertex out at 0.86r between two tips, which double-covers the flaps, winds
+ * inward, and printed 5.3% of the frame as #171717. Its own diagnosis of the
+ * real fix is what this is: a third ring, so the frill has a shallow bright
+ * inner half and a steep dark outer half WITHIN the visible annulus.
+ *
+ * ---- THE TOPOLOGY, AND WHY THE SHOULDER RING IS GONE ----------------------
+ *
+ * Three rings plus an apex is 5 rings' worth of bands (fan + 3 quad strips) at
+ * 5*S triangles, and at the tier counts a fir needs that does not fit. But the
+ * shoulder ring was only ever there to hold the crown fan up, and collapsing it
+ * onto the apex costs nothing: the fan triangles then run apex -> MID ring, and
+ * because the mid ring alternates high (ridge) and low (crease) vertices the fan
+ * is not a plateau — it is the shallow inner half of each pad. So:
+ *
+ *     apex A            on the axis, hUp above the tier's base plane
+ *     ring M (mid)      S vertices, ridge ones high and out, crease ones low and in
+ *     ring H (hem)      S vertices, ridge ones at r, crease ones pulled in
+ *
+ * with S = 2*(seg/2) and k even = a pad's own RIDGE, k odd = the CREASE between
+ * two pads. Cost: 3*S triangles per tier, i.e. 3*seg against `firFrond`'s 2*seg
+ * — half the increase the third ring was budgeted at.
+ *
+ * ---- WHAT IT BUYS, MEASURED (scratch/nyhist.mjs, seg 8) -------------------
+ *
+ *                         firFrond      firPad
+ *     plan fill              0.35        0.68        <- the whole "spiky" note
+ *     scallop depth           70%         26%        <- blunt teeth, not thorns
+ *     ny 0.0-0.3 (dark)      26%         21%
+ *     ny 0.6-0.8 (mid)       41%         46%
+ *     ny 0.9-1.0 (lit)        3%         12%
+ *
+ * The plan fill is the number that matters. A tier now covers two thirds of its
+ * footprint, so rows overlap into layers instead of interleaving their spikes,
+ * and the outline zigzags between r and 0.74r instead of between r and 0.30r.
+ *
+ * The dark note no longer comes from a near-vertical wall. It comes from the
+ * CREASE: at the mid ring a crease vertex sits 0.66 of the drop down while its
+ * neighbouring ridge vertices sit at 0.18, so the four facets around it tilt
+ * hard sideways and their normal.y falls without any of them being wasted
+ * back-facing geometry. That is also why `firFrond`'s `notchK` is gone — there
+ * is no wall left to keep vertical.
+ *
+ * @param r     radius of the pad tips
+ * @param hUp   apex height above the tier base plane (keep shallow, ~0.22r)
+ * @param drop  how far a pad tip hangs below the tier base plane
+ * @param seg   2 * pad count. seg/2 pads.
+ */
+export function firPad(r, hUp, drop, seg, o = {}, rng) {
+  const f = rng ? (a, b) => rng.float(a, b) : (a, b) => (a + b) / 2;
+  const half = Math.max(3, Math.round(seg / 2));
+  const S = half * 2;
+  const spin = o.spin ?? 0;
+  const da = (Math.PI * 2) / S;
+  /**
+   * THE CURL IS THE RATIO OF THE TWO SLOPES, not either one alone.
+   *
+   * Along a pad's ridge the surface runs apex -> mid -> tip. With the mid break
+   * at 0.64r and only 0.18 of the drop spent by then, the inner half falls at
+   * 25 degrees and the outer half at 47 — so one pad hands the ramp a bright
+   * facet and a mid-dark facet whatever the sun is doing, which is the
+   * "clearly lit side and shaded side within one tier" note, now WITHIN one
+   * frill rather than across two.
+   *
+   * Pushing the break out past ~0.72r flattens the outer half and the tier goes
+   * back to reading as a cone; pulling it in under ~0.50r leaves the bright
+   * inner facets too small to see at 40 px per tree.
+   */
+  const midR = o.midR ?? 0.64;          // ridge mid radius, fraction of r
+  const midY = o.midY ?? 0.18;          // ridge mid drop, fraction of `drop`
+  /**
+   * THE CREASE. `creaseR` pulls the crease vertices in toward the axis and
+   * `creaseY` drops them, and together they are the tier's only dark note. At
+   * creaseY 0.66 against the ridge's 0.18 the valley is half the drop deep at
+   * mid radius and closes again at the hem — which is what a curled frill is,
+   * and it keeps the HEM full (see `hemIn`) while still creasing the tier.
+   */
+  /**
+   * ...and MEASURED, 1.15 was wrong, for a reason only the per-BAND statistic
+   * shows (scratch/sweep.mjs). With the crease plunging 1.15 of the drop at the
+   * mid ring while its neighbouring ridge vertices sit at 0.18, every crown-fan
+   * triangle spans one of each and comes out STEEP: mean normal.y 0.28 across the
+   * whole fan, i.e. the entire inner half of every tier printed at the shade
+   * rung. That is what our small firs read as at 6x — a black core with a rim of
+   * bright triangles round it, a starburst rather than a tree (ab/trees_r6b.png).
+   *
+   * So the crease moves OUTWARD. At creaseR 0.92 the mid ring is nearly a circle
+   * and the fan is a calm shallow cone (mean normal.y 0.77, spread 0.05), and the
+   * crease develops in the OUTER band instead, where a deep scalloped hem is what
+   * it should have been all along. Band statistics for one tier at seg 12:
+   *
+   *                    fan mean ny   fan spread   dark / mid / lit
+   *     creaseY 1.15       0.28         0.05        56 / 31 / 12
+   *     creaseY 0.45       0.77         0.05        22 / 52 / 26
+   */
+  const creaseR = o.creaseR ?? 0.92;    // crease mid radius, fraction of the ridge's
+  const creaseY = o.creaseY ?? 0.45;    // crease mid drop, fraction of `drop`
+  /**
+   * THE HEM, and the number the whole rebuild is for. `hemIn` is the crease's
+   * radius at the hem as a fraction of r, i.e. the depth of the plan-view
+   * scallop. `firFrond` was effectively at 0.30 and read as serration; the
+   * reference's tiers are blunt overlapping leaves, which measures 0.70-0.80.
+   * Below ~0.6 the thorns come back; at 1.0 the hem is a circle and the tier is
+   * a cone again.
+   */
+  /**
+   * NEGATIVE RESULT, SWEPT. The scallop depth and the tier's dark note are the
+   * SAME NUMBER in this topology, and 0.76 is where the two curves cross. Going
+   * blunter to chase the reference's rounder tips collapses the ny spread,
+   * because with the hem nearly circular the whole outer band lies in one plane:
+   *
+   *     hemIn / hemY      plan fill   plan min   dark %   ny bins over 5%
+   *     0.76 / 1.55         0.88        0.71       22           7
+   *     0.84 / 1.55         0.95        0.78        8           6
+   *     0.84 / 1.25         0.95        0.78        2           5
+   *     0.88 / 1.20         0.99        0.82        1           4
+   *
+   * At 0.88 the tier is a smooth cone with a four-value ramp spent on nothing —
+   * the exact failure `firFrond`'s essay describes from the other direction. Do
+   * not push `hemIn` past ~0.80 without finding a new source of dark facets.
+   */
+  const hemIn = o.hemIn ?? 0.76;
+  const hemY = o.hemY ?? 1.55;          // crease hem drop, fraction of `drop`
+
+  const A = [0, hUp, 0];
+  const M = [], H = [];
+  for (let i = 0; i < S; i++) {
+    const ridge = i % 2 === 0;
+    // ANGULAR jitter, for the same reason `firFrond` has it: a mathematically
+    // regular rosette looks identical from every yaw, so 35 000 instances of one
+    // are still "all one shape". Nudging the azimuth makes the pads different
+    // WIDTHS. The hem gets a little EXTRA twist over the mid ring so a pad is
+    // slightly skewed rather than bilaterally perfect — that is a leaf.
+    const a = (i / S) * Math.PI * 2 + spin + da * f(-0.24, 0.24);
+    const rm = r * midR * (ridge ? f(0.90, 1.12) : creaseR * f(0.86, 1.10));
+    const ym = -drop * (ridge ? midY * f(0.45, 1.55) : creaseY * f(0.84, 1.16));
+    M.push([Math.cos(a) * rm, ym, Math.sin(a) * rm]);
+    const ah = a + da * f(-0.14, 0.14);
+    const rh = r * (ridge ? f(0.90, 1.08) : hemIn * f(0.88, 1.10));
+    const yh = -drop * (ridge ? f(0.92, 1.22) : hemY * f(0.80, 1.16));
+    H.push([Math.cos(ah) * rh, yh, Math.sin(ah) * rh]);
+  }
+  const v = [];
+  const T = (p, q, s) => {
+    v.push(p[0], p[1], p[2], q[0], q[1], q[2], s[0], s[1], s[2]);
+  };
+  // WINDING. Same convention the other two tier builders had to be corrected
+  // to: with the rings running (cos a, sin a) in (x, z) and +Y up, a triangle is
+  // OUTWARD-facing as (upper-inner, outer[i+1], outer[i]).
+  for (let i = 0; i < S; i++) {
+    const i1 = (i + 1) % S;
+    T(A, M[i1], M[i]);        // inner half of two adjacent pads — shallow, bright
+    T(M[i], H[i1], H[i]);     // outer half — steep, darker
+    T(M[i], M[i1], H[i1]);    // ...and its other diagonal
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3));
+  g.computeVertexNormals();
+  return g;
+}
+
 // ---------------------------------------------------------------------------
 // Palette derivation. Landmarks and props need more materials than the Palette
 // declares (plaster, roof tile, rusted metal...). Rather than invent hexes we

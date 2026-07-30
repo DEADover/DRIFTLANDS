@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Rng, fbm } from '../core/rng.js';
-import { GeoBuilder, rockGeom, slabGeom, blockGeom, firTier, firFrond, derivePalette } from './buildkit.js';
+import { GeoBuilder, rockGeom, slabGeom, blockGeom, firTier, firPad, derivePalette } from './buildkit.js';
 
 /**
  * VEGETATION & GROUND COVER.
@@ -85,7 +85,10 @@ function fir(rng, K, o = {}) {
   // Triangle budget: 4 per rim vertex pair, i.e. 2*seg per tier. A `fir` at
   // seg 12 and 8 tiers is ~210 triangles against the old 80. Across ~37 000
   // conifers that is about +4.6 M, spent on the subject of the frame.
-  const tiers = o.tiers ?? rng.int(9, 11);
+  // 9-11 -> 8-10, because the ROW SPACING went up this round (see `stepK`) and
+  // total height is the sum of the steps. The reference's hero fir is ~12 m to
+  // the tip and eight or nine rows is what you can count on it.
+  const tiers = o.tiers ?? rng.int(8, 10);
   /**
    * FLAP COUNT, SOLVED FOR PAD ASPECT — the reason our firs read as thistles.
    *
@@ -104,8 +107,19 @@ function fir(rng, K, o = {}) {
    * i.e. pads wider than they are long) and that read denser and blunter again;
    * it only avoids the exposed-plateau failure because `crownK` came down with
    * it — a shallow crown of 0.22r has almost no vertical extent to show.
+   *
+   * ---- ROUND 15: THAT SOLVE BELONGED TO `firFrond` ------------------------
+   *
+   * With `firPad` a pad is no longer a triangle between a chord and a tip — the
+   * annulus is FILLED, so a pad's plan shape is the whole sector from the mid
+   * ring out to the hem and its aspect is fixed by `midR`, not by the pad count.
+   * `seg` is therefore free to buy what the reference actually has and this
+   * solve was suppressing: MANY SMALL TEETH. Counted on target_01's hero fir at
+   * 6x, a tier shows six to eight teeth across its visible half, i.e. 12-16 round
+   * the tier; at seg 8 ours showed two or three, so each tooth was a third of the
+   * tree wide and the row read as a zigzag rather than as a fringe.
    */
-  const seg = o.seg ?? 8;
+  const seg = o.seg ?? 12;
   // Radius ladder first, because both the trunk length and the tier spacing are
   // derived from it — the old code advanced by a jittered fraction of the TIER
   // height, which made total height a random walk and is why "6-9 tiers" once
@@ -130,12 +144,31 @@ function fir(rng, K, o = {}) {
    * reference's tips barely clear the row below. 0.34-0.46 keeps the serration
    * (it is what the silhouette is made of) without the spikes.
    */
-  const dropK = o.dropK ?? rng.float(0.38, 0.50);
+  const dropK = o.dropK ?? rng.float(0.30, 0.40);
   // `stepK` is the tier advance as a fraction of the tier's OWN radius, and it
   // has to stay a little above `dropK` or the tips of one skirt hang below the
   // shoulder of the next one down and the stack closes into a smooth cone. The
   // ratio that reads as "rows of drooping points" is about 1.15.
-  const stepK = o.stepK ?? rng.float(0.42, 0.50);
+  /**
+   * ---- ROUND 15: THE ROWS WERE TELESCOPED, MEASURED ------------------------
+   *
+   * At 6x our fir was one continuous faceted cone where the reference's is eight
+   * or nine countable ROWS, and the arithmetic says why. `step` is stepK * (0.8*r0
+   * + 0.2*v) and a tier's hem hangs dropK * rad[i] below its own base, so for the
+   * lower tiers, where v is close to r0, the vertical gap between the hem of one
+   * tier and the hem of the next is (stepK - dropK) * r0. At 0.46 against 0.44
+   * that gap was 0.02 * r0 — two centimetres on a 2.4 m tier. Every hem in the
+   * tree sat at the same height as the one below it, at 94% of its radius: a
+   * telescope, not a stack, and no shadow can fall between rows that are not
+   * apart.
+   *
+   * 0.54 against a drop of 0.35 makes the gap 0.19 * r0, about 45 cm, which at
+   * this camera is the five or six pixels a row edge needs to read. The
+   * predecessor's note already said the ratio wants to be about 1.15 and the code
+   * was at 1.05; this is 1.55, because `firPad`'s hem is a shallow scallop rather
+   * than a ring of thorns and no longer needs the overlap to hide its gaps.
+   */
+  const stepK = o.stepK ?? rng.float(0.50, 0.58);
   const rad = [];
   const r0 = rng.float(2.20, 2.70) * wide;
   for (let i = 0; i < tiers; i++) {
@@ -219,12 +252,41 @@ function fir(rng, K, o = {}) {
       // frill tops at moderate normal.y — i.e. BODY colour, not highlight. Raising
       // `leafSun` could never reach them, because the area-weighted normal.y
       // histogram puts only 2.5% of a fir above 0.8.
-      .lerp(K.leafRamp[NR - 2], 0.30 + 0.70 * t * t);
-    const litc = K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.25 + 0.75 * t);
+      // 0.42 -> 0.58. With `firPad`'s finer teeth the tier alternates shade and
+      // lit facets every few pixels, and at a 0.42 floor the BODY was close
+      // enough to the shade rung that the alternation read as speckle rather
+      // than as a lit solid — measured, the frame sat 0.012 luma under target
+      // with 36.4% dark against 32.5%. Raising the floor closes the gap between
+      // the body and the lit rung without touching either anchor, so the mosaic
+      // keeps its range and loses its noise.
+      /**
+       * ...and the floor came back DOWN, to 0.22, once the ramp window above had
+       * been re-solved twice. The two levers were fighting: the floor was raised
+       * to 0.58 to stop `firPad`'s fine teeth reading as speckle, and that was the
+       * right diagnosis for the wrong knob — the speckle was the deep mid crease
+       * printing every crown fan at the shade rung, and moving the crease outward
+       * fixed it. What the floor actually controls is the VERTICAL gradient, and
+       * the note it serves is measured: "a reference fir's bottom third is almost
+       * entirely #172e17". At 0.50 our bottom tier was already half-way to the
+       * body rung, so no part of the tree was that colour — 6.8% of the frame
+       * against target_01's 9.4%, and luma bucket 1 at 10.2% against its 15.0%.
+       */
+      // ...and 0.22 overshot, LOOKED AT rather than measured: the histogram barely
+       // moved (bucket 1 10.2% -> 10.3% against the reference's 15.0%) while the
+       // tree lost its mid-green body and read as a dark mass at 6x, and frame
+       // saturation fell 0.758 -> 0.750 against 0.756. That is the evidence that
+       // this gap is NOT albedo: our shadow flanks sit a decile high because of
+       // the ambient floor they are lit by, and no albedo move reaches them. 0.42
+       // keeps the gradient the reference has without paying for nothing.
+      .lerp(K.leafRamp[NR - 2], 0.42 + 0.58 * t * t);
+    // ...and the lit rung follows it down at the skirt and further up at the tip,
+    // because the gradient is the whole read: dark solid below, sunlit new growth
+    // above. 0.25 -> 0.10 at t 0, unchanged at t 1.
+    const litc = K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.20 + 0.80 * t);
     b.push(0, y, 0, rng.float(0, Math.PI * 2));
     b.rawLit(
-      firFrond(r, r * (o.crownK ?? 0.22), dropK * r * tall, seg,
-        { inner: o.inner, notch: o.notch, notchK: o.notchK }, rng),
+      firPad(r, r * (o.crownK ?? 0.22), dropK * r * tall, seg,
+        { midR: o.midR, hemIn: o.hemIn, creaseY: o.creaseY }, rng),
       body, litc,
       /**
        * THE RAMP WINDOW IS SOLVED FROM THE GEOMETRY, not tuned by eye.
@@ -275,7 +337,62 @@ function fir(rng, K, o = {}) {
        * Raising t0 does nothing about it — the band is above t0 either way. That
        * is the sort of thing the histogram tells you and eyeballing does not.
        */
-      { t0: 0.52, t1: 1.10, low: K.leafShade, l0: 0.04 },
+      /**
+       * ---- ROUND 15: RE-SOLVED FOR `firPad` --------------------------------
+       *
+       * The window above was solved against `firFrond`'s histogram, which had
+       * 16% of the area at ny 0.0 (the near-vertical notch walls) and 28% at 0.7.
+       * `firPad` has no walls at all — its dark note is the CREASE, whose facets
+       * tilt sideways rather than standing up — so its histogram is a different
+       * shape and the old window would hand almost the whole tier to the lit end:
+       *
+       *     ny    0.0  0.1  0.2  0.3  0.4  0.5  0.6  0.7  0.8  0.9  1.0
+       *     %     0.1  2.0  5.2 21.5 28.4  7.5  7.7  8.4  5.1  1.3 12.7
+       *
+       * Half the area is in the 0.3-0.4 pair and the other clear population is
+       * the flat shelf at 1.0. So: t0 just above the pair at 0.55 with l0 at 0.28
+       * hands ny 0.3 to the shade rung and ny 0.4 to 44% of the way up from it,
+       * and t1 at 1.00 keeps the lit rung for the shelf and the crown. Solved,
+       * that is 28% of the area at the shade end, 37% mid, 21% at body and 14%
+       * leaning to lit — a four-value tier, which is what the mosaic is.
+       */
+      /**
+       * ...and l0 came back from 0.28 to 0.16. At 0.28 the ny 0.3 band — 21% of
+       * the tier's area on its own — landed at t 0.07, i.e. PURE shade, because
+       * the geometry has almost nothing below 0.3 for the ramp's bottom to be
+       * spent on. Putting l0 under the histogram's floor instead means the shade
+       * rung is an anchor the tier leans toward rather than a colour a fifth of it
+       * actually prints.
+       */
+      /**
+        * ...and the window moved again, this time to make the tier BIMODAL. The
+        * frame's green population by luma decile was coming back flat across
+        * 0.1-0.3 (12.1 / 15.5 / 15.0) where the reference is peaked-dipped-peaked
+        * (13.9 / 11.0 / 9.7): ours had too much half-lit fir and not enough of
+        * either end. The geometry puts 50% of a tier's area in the ny 0.3-0.4
+        * pair, so t0 0.48 with l0 0.34 sends that whole pair to the shade end and
+        * leaves everything from 0.5 up ramping to the lit rung — two populations
+        * instead of one smear.
+        */
+      /**
+       * ...and re-solved once more for the calm-fan geometry. `firPad`'s histogram
+       * at seg 12 is now 0/3/7/12/19/16/7/10/26/0/0, with its largest single
+       * population — 26% — at ny 0.8 where the pad tops sit. t0 0.62 keeps the
+       * 0.3-0.4 pair at the shade end and hands that 0.8 band 44% of the way to
+       * the lit rung rather than all of it, which is the difference between a
+       * highlight and a repainted tree.
+       */
+      /**
+       * ...and one last move, for the one gap left in the histogram. The frame
+       * carries 9.7% of its pixels as decile-0.1 green against the reference's
+       * 13.9%, and #172e17 — rgb(23,46,23), the single most common colour in
+       * target_01 — 6.6% against its 9.4%. Total dark is already right (%dark 30.9
+       * against 32.5), so this is not canopy AREA, it is that our shadow flanks
+       * land a decile too high: 14.3% of the frame sits at decile 0.2 against the
+       * reference's 11.0%. t0 0.72 pulls the ny 0.5-0.6 bands (22% of a tier's
+       * area) down toward the shade rung, which is the population to move.
+       */
+      { t0: 0.66, t1: 1.00, low: K.leafShade, l0: 0.32 },
     );
     b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.
@@ -949,16 +1066,16 @@ const MAKERS = {
   // Short, full, heavy skirts, a slow taper and a wide crown — the "shorter
   // fuller fir" of the reference frame. Fewer tiers, but each one deeper.
   firOld: (r, K) => fir(r, K, {
-    tall: 0.90, wide: 1.28, tiers: 9, seg: 10,
-    dropK: 0.52, stepK: 0.40, profE: 0.42, bareK: 0.16, inner: 0.52,
+    tall: 0.90, wide: 1.28, tiers: 9, seg: 14,
+    dropK: 0.40, stepK: 0.56, profE: 0.42, bareK: 0.16,
   }),
   // TALL NARROW SPIRE. Not a needle: at wide 0.72 with six tiers this once came
   // out as a 22 m green spike three metres across, which read as litter. The
   // narrowness comes from SHORT frills and a fast-closing profile rather than
   // from a thin base, so the bottom of the tree still has a skirt on it.
   firSpire: (r, K) => fir(r, K, {
-    tall: 1.02, wide: 0.86, tiers: 12, seg: 8,
-    dropK: 0.34, stepK: 0.50, profE: 0.74, crownK: 0.26, inner: 0.48,
+    tall: 1.02, wide: 0.86, tiers: 11, seg: 12,
+    dropK: 0.30, stepK: 0.52, profE: 0.74, crownK: 0.26,
   }),
   // SQUAT AND FULL — the fourth silhouette, and the one the reference frame has
   // that we did not: a shoulder-high conifer wider than it is tall at the skirt,
@@ -968,23 +1085,23 @@ const MAKERS = {
   // broadleaf that round 5 correctly threw out (a lumpy bright ball on a stick,
   // the most out-of-place object in that shot).
   firBushy: (r, K) => fir(r, K, {
-    tall: 0.52, wide: 1.05, tiers: 7, seg: 10,
-    dropK: 0.62, stepK: 0.46, profE: 0.34, bareK: 0.03, inner: 0.54, crownK: 0.18,
+    tall: 0.52, wide: 1.05, tiers: 7, seg: 12,
+    dropK: 0.46, stepK: 0.58, profE: 0.34, bareK: 0.03, crownK: 0.18,
   }),
   firYoung: (r, K) => fir(r, K, {
-    tall: 0.74, wide: 0.72, tiers: 7, seg: 8,
-    dropK: 0.46, stepK: 0.50, profE: 0.52, bareK: 0.07, inner: 0.50,
+    tall: 0.74, wide: 0.72, tiers: 7, seg: 10,
+    dropK: 0.36, stepK: 0.54, profE: 0.52, bareK: 0.07,
   }),
   // The bottom of the size ladder. The reference is full of knee-to-waist-high
   // conifers filling the gaps between the hero trees; without them the meadow
   // reads as mown. Cheapest member: 5 tiers at seg 6 is 60 triangles of skirt.
   firSapling: (r, K) => fir(r, K, {
-    tall: 0.80, wide: 0.38, tiers: 5, seg: 6,
-    dropK: 0.48, stepK: 0.52, profE: 0.56, bareK: 0.05, inner: 0.48,
+    tall: 0.80, wide: 0.38, tiers: 5, seg: 8,
+    dropK: 0.38, stepK: 0.56, profE: 0.56, bareK: 0.05,
   }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
   firSnowOld: (r, K) => fir(r, K, {
-    snow: true, tall: 0.92, wide: 1.24, tiers: 9, seg: 10, dropK: 0.50, stepK: 0.44, profE: 0.46,
+    snow: true, tall: 0.92, wide: 1.24, tiers: 9, seg: 14, dropK: 0.40, stepK: 0.56, profE: 0.46,
   }),
   scotsPine, broadleaf, birch, maple, snag, stump,
   saguaro, barrelCactus, ocotillo, scrub, windPine,
@@ -1101,7 +1218,20 @@ const MIXES = {
     // So the count goes back most of the way, and the separation is kept by
     // the gap floor alone: ~42 000 conifers, none of them closer than 5.2 m to
     // another, which is a stand you can see through rather than a thicket.
-    canopyTarget: 94000, coverTarget: 92000, pebbleTarget: 13000, heroes: 800, singles: 60000, moistScale: 90,
+    // ROUND 15. The third ring costs 3*seg per tier against firFrond's 2*seg and
+    // seg went 8 -> 12 with it, so props went 16.72 M -> 21.88 M triangles; the
+    // count has to come down to pay for it, and the frame says the same thing
+    // independently. Measured against target_01 the canopy is simply too much of
+    // the picture: %dark 36.0 against its 32.5, and luma buckets 4 and 5 hold
+    // 16.2/12.4 against its 22.0/17.5 — the mid-bright population the reference
+    // gets from OPEN MEADOW between its stands. Lifting the canopy's own value
+    // does not touch it: the body floor went 0.42 -> 0.58 this round and the frame
+    // mean moved 0.001.
+    //
+    // The negative result above still binds — 12 587 conifers came back a mown
+    // lawn at %dark 18.2 — so this is a 15% trim, not a cut: ~30 000 conifers,
+    // which is where %dark lands on 32.5 without giving up the wooded read.
+    canopyTarget: 80000, coverTarget: 92000, pebbleTarget: 13000, heroes: 800, singles: 51000, moistScale: 90,
     // macro/meso are the WAVELENGTHS of the two noise scales that decide where
     // wood wants to be. At macro 0.0016 the pattern repeated every ~620 m —
     // wider than the whole visible frame — so any single shot landed entirely
@@ -1153,7 +1283,18 @@ const MIXES = {
     // and sep 38 leaves ~5 m of clear meadow between the skirts of adjacent
     // stands even when two land at the minimum separation. maxMembers 8 is
     // read straight off target_01, whose largest legible group is eight trees.
-    clump: { tries: 170000, sep: 26, radius: [7, 15], maxMembers: 12, base: 0.90, kMax: 4.6, gap: 4.5 },
+    // ROUND 15: `canopyTarget` IS NOT THE COUNT DIAL — the gap floor is. Taking
+    // canopyTarget 94 000 -> 80 000 and singles 60 000 -> 51 000, a nominal 15%
+    // cut, moved the placed conifers by 1.8% (35 735 -> 35 083) and the frame by
+    // nothing: every pass is already rejecting far more candidates than it
+    // accepts, so the target is a ceiling nobody reaches and `gap` alone decides
+    // how many fit. The dial that works is here.
+    //
+    // 4.5 -> 5.6 m between conifers inside a stand. A fir's skirt is 4.4-5.4 m
+    // across at these sizes, so 4.5 m let neighbours' hems overlap — which is the
+    // one thing the round-6 note says a stand must not do ("its stand of six still
+    // shows grass between every pair").
+    clump: { tries: 170000, sep: 26, radius: [7, 15], maxMembers: 12, base: 0.90, kMax: 4.6, gap: 5.6 },
     canopy: [
       // Sizes calibrated against target_01: the hero conifers there stand about
       // 20 m and 7-8 m across the skirt, roughly five car lengths tall. Our
@@ -1524,10 +1665,40 @@ export class PropScatter {
     // "further into shadow" physically means) and lerping red toward the green
     // channel by a measured amount. `mul` is the tier's value, `warm` its red
     // lift, `blue` the cool lift that keeps the shadow side from going olive.
+    // ---- ROUND 15: THE ANCHORS WERE SET IN THE WRONG COLOUR SPACE ----------
+    //
+    // Both anchors below were solved against sRGB ratios read off the target and
+    // then written into a LINEAR colour, which double-counts the gamma. A linear
+    // B/G of 0.26 on a green whose linear G is 0.09 prints sRGB (85, 42) — B/G
+    // 0.50 on the screen — before the sky ambient adds any blue at all. That is
+    // the whole "firs are too blue" note.
+    //
+    // Solved properly, from the green-dominant population split by luma decile
+    // (scratch/firdiag.mjs). Those deciles are the one place the canopy and the
+    // sward separate cleanly: 0.3-0.5 is meadow and matches the reference to a
+    // couple of values, 0.0-0.2 is fir.
+    //
+    //     decile   ours                       target
+    //     0.0      3.0% [ 11, 23, 13]         1.0% [  9, 28, 20]
+    //     0.1      8.9% [ 22, 45, 28]        13.9% [ 21, 45, 23]
+    //     0.2     13.7% [ 47, 73, 30]        11.0% [ 50, 71, 21]
+    //     0.3     15.3% [ 80, 99, 20]         9.7% [ 82,100, 16]   <- sward, matched
+    //
+    // Decile 0.2 is the lit fir face, and there ours carries 43% too much blue
+    // (B/G 0.41 against 0.30) and 9% too little red (0.64 against 0.70). Convert
+    // the target's sRGB ratios back through the transfer curve at that value and
+    // the ALBEDO wants linear B/G 0.11 and R/G 0.49 — and lower still on blue,
+    // because the hemisphere ambient is sky-coloured and adds its own.
     const tier = (c, mul, warm, blue) => {
       const o = c.clone().multiplyScalar(mul * (1 + j * 2.2));
-      o.r = lerp(o.r, o.g * 0.62, warm);
-      o.b = lerp(o.b, o.g * 0.26, blue);
+      // 0.80 -> 0.88 -> 0.98. Converting the target's per-decile sRGB back through
+      // the transfer curve gives a LINEAR R/G that climbs monotonically with value
+      // — 0.285 at decile 0.1, 0.577 at 0.2, 0.663 at 0.3 — and ours matched the
+      // dark end exactly (0.285) while the mid-lit fir sat at 0.467 against 0.577.
+      // A fir's lit face in target_01 is a warm olive green, and that 24% of
+      // missing red is the last of it.
+      o.r = lerp(o.r, o.g * 0.98, warm);
+      o.b = lerp(o.b, o.g * 0.11, blue);
       return o;
     };
     const alp = this.biome.id === 'alpine';
@@ -1612,11 +1783,30 @@ export class PropScatter {
     // green multiplies its contribution by ten. Red comes up with it (`warm`),
     // which RAISES luma and LOWERS saturation — and we are 0.012 over on
     // saturation, so that is the direction to be wrong in.
+    // ---- ROUND 15: THE WARM LIFT WAS RUNNING THE WRONG WAY ----------------
+    //
+    // The note below says the lift "falls off as the tier gets lighter, because
+    // in the reference it is the SHADOW side that is olive and the lit side that
+    // is greenest", and the ramp was built that way: warm 0.42 on the darkest
+    // rung down to 0.27 on the brightest. Measured off target_01 per luma decile
+    // and converted back to linear, its greens run the other way — R/G 0.285,
+    // 0.577, 0.663, 0.764, 0.846 as they brighten. The reference's shade is the
+    // COOL, chroma-heavy green and its lit face is the warm olive one. So the
+    // lift now rises with the rung, and by enough: ours had the mid-lit fir at
+    // linear R/G 0.467 against 0.577.
     const leafRamp = (alp ? [
-      tier(aL, 1.34, 0.42, 1.00),
-      tier(aL, 1.48, 0.38, 0.98),
-      tier(bL, 1.60, 0.32, 0.92),
-      tier(bL, 1.80, 0.27, 0.86),
+      // ...and the top two rungs went further, because they are what the `body`
+      // and `litc` colours are built from and the population that matters is
+      // still short. Green pixels at luma 0.25-0.55 with blue 36-60 — the lit fir
+      // face, and the metric this round is aimed at — measure R/G 0.72 against
+      // the reference's 0.90. Warming `leafShade` would reach them too but it also
+      // owns decile 0.1, which is already 0.51 against a target of 0.46, so the
+      // lift has to happen on the rungs the mid and lit ends lerp toward and
+      // nowhere else.
+      tier(aL, 1.34, 0.44, 1.00),
+      tier(aL, 1.48, 0.52, 0.98),
+      tier(bL, 1.60, 0.66, 0.92),
+      tier(bL, 1.80, 0.70, 0.86),
     ] : [
       shade(a, j + dir * 0.005, 0.045),
       shade(a, j + dir * 0.045, 0.02),
@@ -1662,9 +1852,21 @@ export class PropScatter {
        * the blue had collapsed to a third of the reference's, which is what makes
        * a lit needle read as acid rather than as sunlit green.
        */
-      c.multiplyScalar(2.60 * (1 + j * 1.6));
-      c.r = c.g * 0.78;
-      c.b = c.g * 0.30;
+      /**
+        * 2.60 -> 3.30. The measured note this serves is the value RANGE inside one
+        * tree: the reference's own fir spans p10 34 to p90 133 and ours spanned
+        * 56-95. With `firPad` the lit rung is now spent on a real population — the
+        * 13% of a tier's area that the flat outer shelf and the crown put at
+        * ny >= 0.9 — so raising it lands on facets the camera sees instead of on
+        * the handful of steep crown triangles `firFrond` had up there.
+        */
+      c.multiplyScalar(3.30 * (1 + j * 1.6));
+      c.r = c.g * 0.82;
+      // ...and 0.30 was the same colour-space error as `tier`'s anchors: a
+      // linear B/G of 0.30 on the brightest rung prints sRGB B/G near 0.55, and
+      // the reference's own brightest green decile runs 0.10-0.14. Ambient will
+      // put the visible blue back; the albedo must not.
+      c.b = c.g * 0.13;
       return c;
     })();
     /**
@@ -1705,9 +1907,38 @@ export class PropScatter {
        * blue AHEAD of green — a spruce lit by nothing but sky. Here red and blue
        * are both a fraction of green and green is the largest channel.
        */
-      c.multiplyScalar(0.75);
-      c.r = c.g * 0.30;
-      c.b = c.g * 0.57;
+      /**
+       * ROUND 15. `0.57` blue was the single largest non-road contributor to the
+       * frame's excess blue and it is the same gamma double-count as the two
+       * anchors above: it was solved to land a SRGB B/G of 0.78 on the target's
+       * darkest in-tree decile, but written into a linear colour, so on screen
+       * the shadow flanks came out at B/G 0.63 where the reference's equivalent
+       * decile is 0.51. Measured, green pixels at luma 0.25-0.55 with blue 36-60
+       * — a colour nothing but a lit fir face has — held 9.5% of that band
+       * against the reference's 0.8%.
+       *
+       * Target decile 0.1 is [21,45,23]: sRGB R/G 0.46, B/G 0.51, which converts
+       * back to a linear albedo of R/G 0.28 and B/G 0.325 BEFORE ambient. The
+       * ambient here is a large fraction of the light a shadow facet gets, so
+       * blue lands well under that.
+       *
+       * The value goes UP, not down. Our decile 0.0 holds 3.0% of the frame
+       * against the reference's 1.0% while its decile 0.1 holds 13.9% against our
+       * 8.9% — i.e. the reference's dark fir mass sits ON luma 0.1-0.2 and ours
+       * has fallen through the floor beneath it. 0.75 of the palette green was
+       * the floor; 1.05 puts the mass where the reference keeps it.
+       */
+      /**
+       * ...and 1.05 was still under the floor once `firPad` handed 28% of a
+       * tier's area to this rung instead of `firFrond`'s 16%. Shot at 1.05 the
+       * frame came back luma 0.363 against 0.379 with 4.5% of it under L 0.10
+       * against the reference's 1.05%: a canopy whose darkest quarter falls out
+       * of the bottom of the scale. The reference's own darkest in-tree decile is
+       * rgb(9,36,21) — dark, and nowhere near black.
+       */
+      c.multiplyScalar(1.68);
+      c.r = c.g * 0.33;
+      c.b = c.g * 0.22;
       return c;
     })();
 
@@ -2266,7 +2497,13 @@ export class PropScatter {
     // cluster pass can never make them (a copse of one is just a small copse),
     // and the hero pass only makes giants, so they get their own pass. It
     // deliberately prefers the OPEN ground the cluster pass skipped.
-    const SINGLE_GAP = 5.5;
+    // 5.5 -> 6.4. See the `clump.gap` note: this and it are the two numbers that
+    // actually set the conifer count, and the frame wants ~12% fewer. %dark was
+    // 36.0 against target_01's 32.5 with luma buckets 4-5 at 16.1/12.5 against
+    // its 22.0/17.5 — the mid-bright population the reference gets from open
+    // meadow, which cannot be bought by brightening the canopy (tried: the body
+    // floor went 0.42 -> 0.58 and the frame mean moved 0.001).
+    const SINGLE_GAP = 6.4;
     const singles = Math.round((mix.singles ?? 0) * D);
     let lone = 0;
     for (let i = 0; i < singles * 26 && lone < singles; i++) {
