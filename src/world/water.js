@@ -165,10 +165,16 @@ export const LAKE_COLORS = {
     //
     // The values below are the reference's own targets divided back through the
     // grade's measured response (green x0.75, blue x0.97, red +6).
-    deep: 0x00689d,
-    mid: 0x008bbc,
-    shallow: 0x00a0d3,
-    shore: 0x00b5e7,
+    // ...AND +9 LEVELS OF GREEN ACROSS THE RAMP. Measured over the blue-dominant
+    // pixel population (which is the only fair comparison — a frame mean is
+    // dominated by how much lake happens to be in shot): ours [6,96,175] against
+    // the reference's [4,103,174]. The blue and the red are landed; the green was
+    // seven levels short, and the grade's measured response on that channel is
+    // x0.75, so it takes nine at source.
+    deep: 0x00719d,
+    mid: 0x0094bc,
+    shallow: 0x00a9d3,
+    shore: 0x00bee7,
     // A shade off white. The bloom pass squares whatever the brightest pixel
     // in the frame is, and at 0xf2fbff the foam line was it — a 1.2 m lip came
     // back as a glowing three-metre band of haze along every near shore.
@@ -435,8 +441,18 @@ const CARVE = {
   // brown slab lying on a grass shoulder with the lake starting six metres
   // beyond the railing — visible in shots/i9/crop_deck.png. Cut to inside the
   // planks and the water runs under the timber, which is the whole picture.
-  NECK_IN: 4.0,
-  NECK_OUT: 7.6,
+  // MEASURED AGAINST THE DECK, not chosen. bridges.js builds a deck of fixed
+  // half width DECK_HW = 8.6 m centred on the route centreline (verified: the
+  // planks of all six decks on seed 4242 sit within 8 cm of it). Holding the
+  // apron up to 7.6 m put the waterline a metre INSIDE the deck's fascia, so
+  // the water was hidden under the timber and what the frame showed either side
+  // of the bridge was gravel, then verge, then meadow, then blue - a wooden ramp
+  // lying on a field. 8.8 m lands the waterline just outboard of the fascia, so
+  // there is blue immediately against the timber, which is the whole difference
+  // between a bridge and a ramp. It is still outboard of the rim that catches a
+  // car running wide.
+  NECK_IN: 4.6,
+  NECK_OUT: 8.8,
   // Spurs need the same courtesy as the main route. At 5/22 a branch road ran
   // straight into a tarn and stopped at the waterline like a slipway — visible
   // at the bottom of shots/i18/hero_alpine_t12.png.
@@ -549,6 +565,141 @@ function toneAt(x, z) {
   return Math.round(Math.max(0, Math.min(1, (t - 0.5) * 2.6 + 0.5)) * 5) / 5;
 }
 
+// ---------------------------------------------------------------------------
+// FLOW
+//
+// "A sense of FLOW where water is confined - a river reach or a neck between
+// basins should visibly move in one direction rather than just wobbling in
+// place."
+//
+// A travelling wave field cannot do that on its own, because a wave carries no
+// water: the whole lake would drift the same way at the same speed, which is
+// wind, not current. What distinguishes a neck from open water is GEOMETRY, so
+// the flow is measured off the geometry at build time and handed to the shader
+// as one vec2 per vertex, in metres per second. Nothing is computed per frame.
+//
+// HOW FAST - from the LOCAL CHANNEL HALF-WIDTH, which is the largest
+//   distance-to-real-land found anywhere within twenty-four metres. In the middle of
+//   a basin that is forty metres or more; in a twenty-metre neck it is ten,
+//   because there is nowhere within reach that is further from a bank than that.
+//   A max filter, separable, two passes, ~13 taps each.
+//
+//   THIS REPLACED A RUN-LENGTH MEASURE THAT DID NOT WORK, and the debug render
+//   is what caught it. min(runX, runZ) over the wet cells looks like the right
+//   confinement test and is not, for two reasons: the bed carries dry SHOAL
+//   crests out in the open water (see shoalField), and every one of them severs
+//   the run, so a big basin came back "narrow" in a wide halo round each shoal;
+//   and the runs are measured on the world axes, so anywhere the elliptical
+//   shore cuts a cell diagonally they both shorten together. Rendering fs to the
+//   red channel showed the whole near shore of a hundred-metre basin running at
+//   a metre a second, which is not a lake, it is a river. The max filter is
+//   immune to both: a small dry shoal only shortens the half-width in its own
+//   neighbourhood, which is exactly right - water does accelerate past an
+//   obstruction.
+//
+// WHICH WAY - ALONG the channel, which is a quarter turn from the gradient of
+//   the distance-to-shore field: that field ridges down the middle of a channel,
+//   so its gradient points at the nearest bank. The sign is settled globally
+//   from the basin's own long axis (L.tx, L.tz), so both banks of a neck carry
+//   the current the same way rather than describing a swirl.
+//
+// The result is smoothed over 5x5, because a 4 m grid left to itself hands the
+// shader a direction that flips cell to cell and the streaks come out a scribble.
+// ---------------------------------------------------------------------------
+const FLOW_MAX = 1.6;       // metres per second in the tightest neck
+// LADDERED ON THE RENDER, not chosen. At 34/10 the near ARM of hero_alpine's
+// basin - sixty-odd metres across - came back running at a metre a second over a
+// third of the visible water, and a sixty-metre arm of a tarn is a bay, not a
+// river. 21 m of half-width is a forty-two metre channel, which is the widest
+// thing on this map that a player would read as water going somewhere.
+// ...AND 21 WAS SO TIGHT THAT NOTHING FLOWED. Counting the lattice's own aFlow
+// attribute over every wet vertex on seed 4242: 2.5% of the surface carried any
+// current at all and the fastest cell on the map ran at 1.01 m/s of a possible
+// 1.6, mean 0.022. A feature that exists on a fortieth of the water is a feature
+// the client will never see. 28 m of local half-width is a fifty-six metre
+// channel, which on these basins is the difference between an arm of a tarn (no
+// current: the debug render at 34 had a whole sixty-metre bay running at a metre
+// a second) and a neck.
+const FLOW_OPEN = 28;       // local half-width, in metres, at which flow dies
+const FLOW_TIGHT = 9;       // ...and at which it is at full strength
+const FLOW_REACH = 6;       // cells the half-width max filter looks over (24 m)
+
+function flowField(depth, bank, M, cell, L) {
+  // DISTANCE TO REAL LAND, not distance to the nearest dry cell.
+  //
+  // The builder already has a distance transform (dW, used for the shore
+  // attribute) and reusing it here was wrong for the same reason the run lengths
+  // were: it is seeded on every dry cell, and the bed carries dry SHOAL crests
+  // out in the open water, so in a basin littered with them dW is small
+  // everywhere and the whole lake measured as a channel. This transform is
+  // seeded only where the ground is dry AND has a real bank behind it - the same
+  // test the foam uses to tell a shore from a mid-lake spit.
+  const dL = new Float32Array(M * M);
+  for (let k = 0; k < dL.length; k++) dL[k] = (depth[k] <= 0 && bank[k] >= 0.35) ? 0 : 1e5;
+  chamfer(dL, M, cell);
+
+  // Local channel half-width: a separable max of that field.
+  const tmp = new Float32Array(M * M);
+  const halfW = new Float32Array(M * M);
+  for (let j = 0; j < M; j++) {
+    for (let i = 0; i < M; i++) {
+      let m = 0;
+      const lo = Math.max(0, i - FLOW_REACH), hi = Math.min(M - 1, i + FLOW_REACH);
+      for (let q = lo; q <= hi; q++) if (dL[j * M + q] > m) m = dL[j * M + q];
+      tmp[j * M + i] = m;
+    }
+  }
+  for (let i = 0; i < M; i++) {
+    for (let j = 0; j < M; j++) {
+      let m = 0;
+      const lo = Math.max(0, j - FLOW_REACH), hi = Math.min(M - 1, j + FLOW_REACH);
+      for (let q = lo; q <= hi; q++) if (tmp[q * M + i] > m) m = tmp[q * M + i];
+      halfW[j * M + i] = m;
+    }
+  }
+
+  const raw = new Float32Array(M * M * 2);
+  for (let j = 0; j < M; j++) {
+    for (let i = 0; i < M; i++) {
+      const k = j * M + i;
+      if (depth[k] <= 0) continue;
+      const narrow = sstep(FLOW_OPEN, FLOW_TIGHT, halfW[k]);
+      if (narrow <= 0.002) continue;
+      const im = i > 0 ? i - 1 : i, ip = i < M - 1 ? i + 1 : i;
+      const jm = j > 0 ? j - 1 : j, jp = j < M - 1 ? j + 1 : j;
+      const gx = dL[j * M + ip] - dL[j * M + im];
+      const gz = dL[jp * M + i] - dL[jm * M + i];
+      let ax = -gz, az = gx;
+      const len = Math.hypot(ax, az);
+      if (len < 1e-3) { ax = L.tx; az = L.tz; } else { ax /= len; az /= len; }
+      if (ax * L.tx + az * L.tz < 0) { ax = -ax; az = -az; }
+      const spd = narrow * FLOW_MAX;
+      raw[k * 2] = ax * spd;
+      raw[k * 2 + 1] = az * spd;
+    }
+  }
+  const out = new Float32Array(raw.length);
+  for (let j = 0; j < M; j++) {
+    for (let i = 0; i < M; i++) {
+      let sx = 0, sz = 0, n = 0;
+      for (let dj = -2; dj <= 2; dj++) {
+        const jj = j + dj;
+        if (jj < 0 || jj >= M) continue;
+        for (let di = -2; di <= 2; di++) {
+          const ii = i + di;
+          if (ii < 0 || ii >= M) continue;
+          sx += raw[(jj * M + ii) * 2];
+          sz += raw[(jj * M + ii) * 2 + 1];
+          n++;
+        }
+      }
+      out[(j * M + i) * 2] = sx / n;
+      out[(j * M + i) * 2 + 1] = sz / n;
+    }
+  }
+  return out;
+}
+
 /**
  * 0 over most of the bed, 1 on the crest of a shoal.
  *
@@ -643,7 +794,34 @@ function shoalField(x, z) {
 // 8.9 against the reference's 10.9, which is the number that actually matters.
 // hero_alpine stays at 3.8 and no waterline fixes that: half of that frame is
 // carriageway, and its basin is behind the lens. See the report.
-const WATERLINE = 0.86;
+// ...AND RE-MEASURED AGAIN, BECAUSE THE CAMERA MOVED UNDER IT.
+//
+// 0.86 was laddered against the previous round's camera and landed the two
+// water-bearing presets on 10.2 and 8.9 per cent of frame. The camera has since
+// gained speed-scaled look-ahead and a pull-back, and hero_alpine now looks
+// down its own basin: measured on this bench, 13.6% blue against the reference's
+// 10.4. Wetted area goes as the square of this number, so 0.86 -> 0.78 is a lake
+// a fifth smaller and lands hero_alpine near eleven.
+// LADDERED, AND THE RESPONSE IS NOT SMOOTH. Measured on hero_alpine:
+//
+//   0.780 -> 8.1%   0.800 -> 8.2%   0.806 -> 13.4%   0.810 -> 13.1%   0.860 -> 13.6%
+//
+// against the reference's 10.4. There is nothing between 8 and 13, and comparing
+// the two renders across the step says why: the WETTED AREA moves smoothly, but
+// the near shelf's colour crosses the measure's own threshold. Below 0.803 the
+// shelf is wide and pale enough that it is no longer blue-DOMINANT and drops out
+// of the count entirely; above it the shelf is narrow and the water is cobalt
+// right up to the beach. So the measure is really reporting how much of the frame
+// is COBALT, and the only settings that get it to eleven are ones that put back
+// the broad turquoise haze three earlier rounds were spent removing.
+// 0.810 is chosen deliberately: 13.1% of frame, and the closest colour match on
+// the whole ladder ([6,98,170] against the reference's [4,103,174]).
+const WATERLINE = 0.810;
+
+// How close the water is allowed to the route centreline at a crossing. Tied to
+// bridges.js's DECK_HW (8.6 m) plus a fifth of a metre, so the blue starts just
+// outboard of the timber fascia rather than under it.
+const NECK_WATERLINE = 8.8;
 
 /**
  * ...AND THE SHELF WAS AUTHORED FOR A BASIN THAT NO LONGER EXISTS.
@@ -1698,7 +1876,10 @@ function keepOutOf(L, x, z) {
   const wide = CARVE.APRON_OUT + 6;
   if (!L.neck) return wide;
   const w = 1 - sstep(0.34, 0.78, Math.abs(((x - L.x) * L.tx + (z - L.z) * L.tz) / L.Ra));
-  return 6.4 + (wide - 6.4) * (1 - w);
+  // 8.8 m at the neck centre: the deck's own fascia is at 8.6 (DECK_HW in
+  // bridges.js), and a waterline held 6.4 m out was two metres inside it - i.e.
+  // under the planks, where nobody can see it. See NECK_OUT above.
+  return NECK_WATERLINE + (wide - NECK_WATERLINE) * (1 - w);
 }
 
 /**
@@ -1740,28 +1921,63 @@ function nearestLake(lakes, x, z) {
   return null;
 }
 
+// THE ONE WAVE FIELD, shared by the vertex swell, the colour bands, the glitter
+// and the foam, so that all four move together and at the same speed. Four
+// independent time terms is what "crawling noise" is made of.
+//
+// The direction is chosen against the CAMERA, not arbitrarily. The view yaw is
+// 45 degrees, so world (0.94, -0.34) comes out very nearly horizontal on screen:
+// a crest travelling along it crosses the frame sideways, which is the motion a
+// still sequence can actually be judged on and the motion a player reads as wind
+// over water. Travelling up or down the screen at this camera pitch is
+// foreshortened to about a third and reads as a shimmer.
+//
+// WAVELENGTH IS METRES. The capture camera is about twelve pixels per metre, so
+// the ten-metre crest spacing below is 120 px — three or four crests across the
+// visible width of a basin, which is a swell. The fields this shader used to
+// carry were 77 m and 312 m: half a feature and a fiftieth of one, both
+// indistinguishable from a constant, which is why five rounds of "add a drift"
+// changed nothing.
+const WAVE = /* glsl */ `
+  const vec2 WDIR = vec2(0.94, -0.34);   // world XZ, ~screen-horizontal
+  const vec2 WPER = vec2(0.34, 0.94);
+  const float WK = 0.098;                // 1/wavelength -> 10.2 m between crests
+  const float WSPD = 0.215;              // cycles/s -> 2.2 m/s of crest travel
+  const float WVEL = WSPD / WK;          // ...the same number in metres/second
+`;
+
 const VERT = /* glsl */ `
   attribute float aDepth;
   attribute float aShore;
   attribute float aTone;
   attribute float aBank;
+  attribute vec2 aFlow;
   varying float vDepth;
   varying float vShore;
   varying float vTone;
   varying float vBank;
+  varying vec2 vFlow;
   varying vec2 vWorld;
   varying vec3 vPos;
   uniform float uTime;
+${WAVE}
   void main() {
     vDepth = aDepth;
     vShore = aShore;
     vTone = aTone;
     vBank = aBank;
+    vFlow = aFlow;
     vec3 p = position;
-    // A slow swell, killed off in the shallows so the waterline stays put.
+    // The geometric swell, on the SAME crests the fragment shader shades. At a
+    // camera forty degrees off vertical fifteen centimetres of heave is barely
+    // two pixels, so this is not what sells the motion — but if it ran on its own
+    // wavelength and its own clock it would fight what does, and the surface
+    // would read as two unrelated things moving at once.
+    // Killed off in the shallows so the waterline itself never budges.
     float k = smoothstep(0.0, 2.5, aDepth);
-    p.y += sin(p.x * 0.055 + uTime * 0.9) * 0.10 * k
-         + sin(p.z * 0.041 - uTime * 0.7) * 0.08 * k;
+    float wa = dot(p.xz, WDIR);
+    p.y += sin((wa * WK - uTime * WSPD) * 6.2832) * 0.15 * k
+         + sin((dot(p.xz, WPER) * 0.024 + uTime * 0.16) * 6.2832) * 0.06 * k;
     vec4 wp = modelMatrix * vec4(p, 1.0);
     vWorld = wp.xz;
     vPos = wp.xyz;
@@ -1784,8 +2000,10 @@ const FRAG = /* glsl */ `
   varying float vShore;
   varying float vTone;
   varying float vBank;
+  varying vec2 vFlow;
   varying vec2 vWorld;
   varying vec3 vPos;
+${WAVE}
 
   float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   float noise(vec2 p){
@@ -1821,6 +2039,43 @@ const FRAG = /* glsl */ `
         // as a regular 45-degree zigzag of white piping round the whole lake.
         + (noise(vWorld * 0.46) - 0.5) * 1.05;
     float s = max(sg, 0.0);
+
+    // --- THE WAVE FIELD -----------------------------------------------------
+    // Computed once, here, because the colour bands, the glitter and the foam
+    // lip all key off it. That is the whole difference between water moving and
+    // three noise fields crawling: one set of crests, one speed, one direction.
+    float wAlong = dot(vWorld, WDIR);
+    float wCross = dot(vWorld, WPER);
+    // Crests are not ruled lines. A slow noise on the CROSSWIND axis bends them
+    // by up to eleven metres along their length, so a crest arrives at the shore
+    // as a curve at an angle rather than as a straight edge sweeping past — and
+    // two crests are never parallel.
+    // SIXTEEN METRES OF BEND, NOT ELEVEN. At eleven the crests in the open
+    // middle of hero_alpine's basin came out very nearly parallel and evenly
+    // spaced, which at this camera reads as corduroy — a texture laid over the
+    // water rather than the water's own surface. The bend is a third of the
+    // wavelength now, so no two crests in the frame are the same shape.
+    float bend = (noise(vec2(wCross * 0.030, wAlong * 0.008)) - 0.5) * 16.0;
+    float wph = (wAlong + bend) * WK - uTime * WSPD;
+    // Two components a bit over a third of an octave apart. A single sine is a
+    // grating; the beat between these two makes long crests and short ones, and
+    // makes the pattern take about twenty seconds to repeat rather than five.
+    float band = sin(wph * 6.2832) * 0.64
+               + sin(wph * 6.2832 * 0.43 + 1.7) * 0.36;
+    // ...and the swell is PATCHY. A lake seen from above is mostly glass with
+    // ruffled bands drifting over it; a surface where every square metre heaves
+    // by the same amount is an ocean, and an ocean at this scale reads as
+    // corduroy. The patch field itself drifts, slowly, crosswind.
+    // ...and the glassy stretches are BIGGER and there are MORE of them. A lake
+    // seen from above is mostly still, with the swell showing in patches; a
+    // surface that heaves everywhere at once is an ocean, and an ocean at ten
+    // metres per crest is corduroy. The patch field is 26 m across the wind (was
+    // 18) and its floor is 0.18 (was 0.28), so a good third of the open water is
+    // near-glass at any moment. It drifts, slowly, crosswind.
+    float wpatch = noise(vec2(wCross * 0.038, wAlong * 0.015) - vec2(0.0, uTime * 0.013));
+    band *= 0.18 + 1.20 * wpatch;
+    band = clamp(band, -1.0, 1.0);
+    float crest = smoothstep(0.28, 0.86, band);
 
     // --- shelf -> shallow -> mid -> deep ------------------------------------
     // Alpine tarns are 2-6 m deep, so a ramp authored for a nine-metre lake
@@ -1871,7 +2126,12 @@ const FRAG = /* glsl */ `
     // merged lake, where a shoal crest or a neighbouring basin's bank comes up -
     // and there, with the foam on top of it, it read as a pale plume lying
     // across open water rather than as a shore.
-    col = mix(col, uShore,   (1.0 - smoothstep(0.0, 1.1, s)) * 0.18 * vBank);
+    // A pale cyan collar right at the waterline, which is what the reference has
+    // under its foam — the blue does not run straight into the grass, it lightens
+    // over about a metre first. Narrower and STRONGER than the 1.1 m / 18% it was:
+    // at that strength it was a hint nobody could see, and now that the alpha fade
+    // is two metres instead of five there is no risk of it spreading.
+    col = mix(col, uShore,   (1.0 - smoothstep(0.0, 0.85, s)) * 0.34 * vBank);
 
     // THE DEEP END HAS TO KEEP MOVING, or the bed's relief is invisible.
     //
@@ -1931,29 +2191,100 @@ const FRAG = /* glsl */ `
     col.g *= 1.0 + (vTone - 0.5) * 0.13;
     col.b *= 1.0 - (vTone - 0.5) * 0.07;
 
-    // A weak sub-facet ripple under it, so a big facet is not itself flat. Kept
-    // small on purpose: at any strength it fights the facet edges, and the
-    // facets are the thing that reads.
-    vec2 p = vWorld * 0.30;                                // ~3.4 m
-    float w = noise(p + vec2(uTime * 0.16, uTime * 0.11));
-    w += 0.70 * noise(p * 2.2 - vec2(uTime * 0.23, 0.0));  // ~1.5 m
-    w /= 1.70;
-    col *= 0.955 + 0.090 * w;
+    // --- the surface, and everything on it, MOVES -----------------------------
+    // Every field below is sampled at a position that is advected: by the wind,
+    // at the crest speed, and additionally by the local current where the water
+    // is confined (see flowField in this file — a neck between two basins gets
+    // up to 1.75 m/s, the open middle of a basin gets nothing).
+    float fs = length(vFlow);
+    vec2 fd = vFlow / max(fs, 1e-4);
+    vec2 drift = WDIR * (uTime * WVEL * 0.34) + vFlow * uTime;
 
-    // WIND LANES.
+    // TRAVELLING WAVE BANDS. Posterised to five steps, because everything else
+    // in this world is cut paper and a smooth sinusoid reads as a different
+    // game. Signed about the mean, so a trough is as dark as a crest is pale
+    // rather than the whole surface being lifted.
+    // Killed in the shallows: on a shelf under half a metre the bed and the foam
+    // are already doing the work, and a band crossing a beach reads as a stain.
+    // MEASURED AMPLITUDE, NOT GUESSED AMPLITUDE. The first pass at this ran at
+    // 0.088 and the render came back with a mean frame-to-frame luma change of
+    // 0.66 levels over the whole lake — arithmetically present and visually
+    // absent, which is every previous round's mistake repeated. Debug-rendering
+    // the band field on its own (it is a clean diagonal swell at 120 px between
+    // crests, exactly as designed) and the depth field beside it says why: the
+    // basin is 0.5-5 m deep, so wamp was throttling the band to about two
+    // thirds over most of the water and the quantiser then swallowed the rest.
+    // The step between adjacent levels is what the eye reads, and at 0.20 with
+    // five levels that step is eight per cent — a clear cut-paper edge.
+    // AND THE NUMBER IS FOUR TIMES WHAT ARITHMETIC SAYS, because col here is
+    // LINEAR RADIANCE and the frame is graded, tone-mapped and gamma-encoded
+    // afterwards. Measured on one scanline of open water at three amplitudes
+    // (0.0 / 0.20 / 0.60): the display values went 74,157 -> 73,154 -> 70,149.
+    // A sixty per cent swing in the shader arrived as five per cent on screen —
+    // the 1/2.2 encoding divides it by two and the tone curve's shoulder takes
+    // most of the rest. That is why every previous round's "add a drift" was
+    // invisible at amplitudes that look reckless in the source. Laddered on the
+    // render (0.35 / 0.55 / 0.80): 0.35 is still a stain, 0.80 starts to mottle
+    // and read as noise rather than swell.
+    float bq = floor(band * 2.5) / 2.5;
+    float wamp = smoothstep(0.25, 1.5, d);
+    // ...AND BACK TO 0.44 ONCE THE CRESTS WERE BROKEN UP. With the bend at 16 m
+    // and a third of the water glassy, 0.52 measured 9.2 on the reference's own
+    // structure metric against its 7.3 — over, not under, and the surplus was
+    // reading as streak. 0.44 lands it at about 7.8.
+    col *= 1.0 + bq * 0.44 * wamp;
+    // A crest carries a little more sky and a little more light in the water, so
+    // it is a hue step as well as a value one — that is what stops the bands
+    // reading as cloud shadow sliding over a flat colour.
+    col.g += bq * 0.055 * wamp;
+    col.b += bq * 0.026 * wamp;
+
+    // THE FINE FACET TIER, AND IT HAS TO BE POSTERISED TOO.
+    //
+    // Measured against the reference over the water pixels only, the mean luma
+    // step between points 2.3 m apart is 7.3 there and was 3.9 here — the same
+    // total spread of tone, half the local structure, which is "reads as one
+    // flat fill" written as a number. The 8.7 m aTone facets cannot supply it
+    // (inside one facet there is nothing to see at 2.3 m) and the smooth noise
+    // that used to sit here could not either: a continuous field is an airbrush,
+    // and averaging it over a 28-pixel window is precisely what the measure does.
+    //
+    // Quantising a smooth field is what makes hard edges without a grid. The
+    // contours of the noise become the outlines of irregular chips two or three
+    // metres across — the reference's own idiom — and they cost one extra fetch.
+    // Advected at the lane speed, a third of the crest speed: this is the texture
+    // OF the surface, so it travels with the surface, more slowly than the waves
+    // running through it.
+    vec2 cp = (vWorld - drift * 0.55);
+    float chipN = noise(cp * 0.36) * 0.60 + noise(cp * 0.92 + 3.7) * 0.40;
+    float chip = floor(chipN * 4.0) / 4.0;
+    col *= 1.0 + (chip - 0.5) * 0.26 * smoothstep(0.15, 1.0, d);
+
+    // WIND LANES, DRIFTING.
     //
     // A lake seen from above is crossed by long stripes of ruffled and glassy
     // water lying across the wind, and that is the one piece of structure the
     // open middle of the reference tarn actually carries. Stretched about
-    // fourteen to one - forty-five metres along the wind, three and a bit
-    // across - and posterised to three steps so it reads as cut paper rather
-    // than as a gradient. Faded out in the shallows, where the foam and the bed
-    // are already doing the work and a stripe would only fight them.
-    vec2 lane = vec2(vWorld.x * 0.85 + vWorld.y * 0.53,
-                    -vWorld.x * 0.53 + vWorld.y * 0.85);
+    // fourteen to one — forty-five metres along the wind, three and a bit
+    // across — and posterised to three steps so it reads as cut paper rather
+    // than as a gradient. They travel at a THIRD of the crest speed: a lane is
+    // a patch of ruffled water, and a patch of ruffled water does not run as
+    // fast as the waves inside it. Two speeds in the same direction is what
+    // gives the surface depth instead of one sliding sheet.
+    vec2 lane = vec2(wAlong - uTime * WVEL * 0.33, wCross);
     float lanes = noise(vec2(lane.x * 0.022, lane.y * 0.30));
     lanes = floor(lanes * 3.0) / 3.0;
     col *= 1.0 + (lanes - 0.5) * 0.18 * smoothstep(0.6, 2.4, d);
+
+    // CURRENT STREAKS, where there is a current to show.
+    // Stretched twelve to one ALONG the flow and pulled downstream at the flow's
+    // own speed, so a neck reads as water going somewhere. Zero over open water,
+    // where fs is zero and this whole term multiplies out.
+    float sA = dot(vWorld, fd) - fs * uTime;
+    float sC = dot(vWorld, vec2(-fd.y, fd.x));
+    float streak = floor(noise(vec2(sC * 0.42, sA * 0.052)) * 3.0) / 3.0;
+    col *= 1.0 + (streak - 0.5) * 0.30
+                 * smoothstep(0.04, 0.45, fs) * smoothstep(0.25, 1.3, d);
 
     // And a broad drift over the whole body, so the two ends of a tarn are not
     // the same blue. Forty-five metres: about one and a half features across the
@@ -1975,7 +2306,20 @@ const FRAG = /* glsl */ `
     // zoom preset, and the bloom pass spreads that into a milky plume lying
     // across the water - unmistakable in shots/mine/wildlife.png at cycle 8,
     // where it read as smoke rather than as surf. A lip is centimetres.
-    float edge = 0.20 + chew * 0.42 + chew2 * 0.22;
+    // AND THE LIP BREATHES WITH THE SWELL.
+    //
+    // A frozen foam line is the loudest tell that the water is a decal, worse
+    // than a frozen surface — the eye forgives a still lake and does not forgive
+    // a still shore. So the width of the lip is modulated by the same wave field
+    // that shades the open water: a crest arriving fattens it by half again, a
+    // trough thins it to two thirds. Because the crest TRAVELS, the fat and thin
+    // stretches travel along the shore with it, which is what reads as the lake
+    // taking waves rather than as the lip pulsing on the spot.
+    // Note this is the wave phase at the SHORE, i.e. sampled where the fragment
+    // is: two hundred metres of shoreline therefore carry several waves' worth of
+    // lip at once, never one global throb.
+    float pulse = 0.5 + 0.5 * band;
+    float edge = (0.20 + chew * 0.42 + chew2 * 0.22) * (0.72 + 0.56 * pulse);
     // Dies off on BOTH sides of the waterline. Before it was keyed on an
     // unsigned distance, so every vertex the lattice carried past the shore
     // read as "zero metres from the water" and got the full lip — which on a
@@ -1998,7 +2342,13 @@ const FRAG = /* glsl */ `
     // is what the gate is for. So the gate stays and it opens earlier, and the
     // lip is allowed to be white where it is there at all.
     float gate = smoothstep(0.26, 0.66, chew * 0.75 + chew2 * 0.45);
-    float foam = clamp(lip + wash, 0.0, 1.0) * gate * vBank;
+    // The brightness pulses too, a little, and NOT in step with the width — the
+    // wash behind the lip lags the crest by about a fifth of a wavelength, which
+    // is what makes it read as water running up a beach and draining back rather
+    // than as one band getting thicker and thinner.
+    float lagPulse = 0.5 + 0.5 * sin((wph - 0.18) * 6.2832);
+    float foam = clamp(lip + wash, 0.0, 1.0) * gate * vBank
+               * (0.80 + 0.34 * mix(pulse, lagPulse, 0.5));
     // A LITTLE QUIETER. The lattice now fades over four metres of shore rather
     // than one and a half, so the lip sits inside a band that is already
     // half-transparent — and at 0.46 the bloom pass turned the sum into a
@@ -2013,14 +2363,23 @@ const FRAG = /* glsl */ `
     // foam line is its EDGE, not its area, and the bloom squares whatever the
     // brightest pixel is. 0.42 with a lip a third of a metre wide is a crisp
     // white collar; 0.58 with one two metres wide was a plume.
-    col = mix(col, uFoam, foam * 0.42);
+    // 0.48 now the lip is a third of a metre wide and the alpha fade behind it is
+    // two metres rather than five: what the eye reads as a foam line is its EDGE,
+    // and with the milky band gone there is room for the edge to be brighter.
+    col = mix(col, uFoam, foam * 0.48);
 
-    // --- sun glitter --------------------------------------------------------
-    // Sparse and restrained. At 1.1x this fed the bloom pass two soft white
-    // blobs the size of a car in every crossing frame, which read as smudges on
-    // the lens rather than as sun on water.
-    float glint = pow(max(0.0, noise(p * 1.7 + uTime * 0.22)), 26.0);
-    col += uSun * glint * 0.45 * smoothstep(0.6, 3.0, d);
+    // --- sun glitter, RIDING THE CRESTS -------------------------------------
+    // It used to be a noise field with a scalar time offset: the sparkles drifted
+    // diagonally at a speed unrelated to anything else on the surface, which is
+    // exactly how a speck of dust on the lens behaves. Sun on water sparkles
+    // where the surface TILTS toward the sun, and that is the crest — so the
+    // sparkle cells are advected at precisely the crest speed and then gated on
+    // the crest itself. A spark is now a point of light travelling on a wave: it
+    // appears as the crest builds, runs with it, and dies in the trough behind.
+    vec2 gp = (vWorld - WDIR * (uTime * WVEL)) * 1.35;
+    float spark = noise(gp) * 0.66 + noise(gp * 2.7 + 4.1) * 0.34;
+    float glint = pow(max(0.0, spark), 15.0) * crest;
+    col += uSun * glint * 0.62 * smoothstep(0.6, 3.0, d);
 
     // GLASSY OVER THE WHOLE SHELF, not merely at the lip.
     //
@@ -2105,7 +2464,25 @@ const FRAG = /* glsl */ `
     // lying across the water in the 0.6 zoom capture. (Gating the foam on vBank
     // changed the frame not at all, which is how this was found.) A metre and a
     // bit is enough out there, because there is no facetted bank to hide.
-    alpha *= smoothstep(-1.2, mix(1.3, 4.0, vBank), sg);
+    // ...AND FOUR METRES WAS A YELLOW HAZE, WHICH IS WORSE THAN A FACET EDGE.
+    //
+    // Cropping our shoreline and the reference's at 6x side by side settles it.
+    // The reference's waterline is a HARD edge: cobalt meets grey rock or green
+    // grass across two or three pixels, with a thin bright collar on some of it
+    // and none on the rest. Ours was a five-metre ramp of half-transparent water
+    // lying over pale beach and grass — sixty pixels of it at the capture camera —
+    // and because the ground under it is warm and the bloom pass squares the
+    // brightest thing it finds, what the frame actually showed was a soft
+    // YELLOW-GREEN glow all the way round every lake. That is not a shoreline, it
+    // is a light leak, and it was the loudest thing left in the frame.
+    //
+    // The facet error the four metres was hiding is real (an 8.7 m terrain facet
+    // on a 1:8 shelf moves the drawn waterline up to four metres sideways) but it
+    // is not what the fade fixes: the four octaves of noise on sg above, +-9 m of
+    // it, are what make this edge organic, and they work just as well over two
+    // metres as over five. Laddered on the render at 4.0 / 2.3 / 1.8 / 1.4 m: the
+    // haze shrinks with the width and the facet polygon does not come back.
+    alpha *= smoothstep(-0.4, mix(0.7, 1.8, vBank), sg);
     if (alpha < 0.02) discard;
 
     // Match the scene's exponential fog so the lake recedes correctly.
@@ -2215,7 +2592,7 @@ export class Water {
    * unmistakably wrong, so it is masked here too.
    */
   _buildPlanned(T, plan) {
-    const pos = [], dep = [], sho = [], ton = [], bnk = [];
+    const pos = [], dep = [], sho = [], ton = [], bnk = [], flw = [];
     const acc = this._rockAcc();
     const pads = {
       rng: new Rng(((getLakeContext(this.biome)?.seed ?? 1337) * 40503) ^ 0x1111),
@@ -2366,6 +2743,9 @@ export class Water {
         }
       }
 
+      // Metres per second, per cell, from the basin's own geometry.
+      const flow = flowField(depth, bank, M, cell, L);
+
       const F = {
         depth, shore, bank, VN: M, N: E, cell, x0, z0, level: L.level,
         keepOut: (x, z) => plan.dRoute(x, z) < (L.neck ? 13 : 15),
@@ -2389,6 +2769,7 @@ export class Water {
         dep.push(depth[j * M + i]);
         sho.push(Math.max(-60, Math.min(60, shore[j * M + i])));
         bnk.push(bank[j * M + i]);
+        flw.push(flow[(j * M + i) * 2], flow[(j * M + i) * 2 + 1]);
       };
       // ONE TONE PER TRIANGLE. See toneAt() — the same value on all three
       // vertices, so the varying is CONSTANT across the facet and the surface
@@ -2430,6 +2811,7 @@ export class Water {
     geo.setAttribute('aShore', new THREE.BufferAttribute(new Float32Array(sho), 1));
     geo.setAttribute('aTone', new THREE.BufferAttribute(new Float32Array(ton), 1));
     geo.setAttribute('aBank', new THREE.BufferAttribute(new Float32Array(bnk), 1));
+    geo.setAttribute('aFlow', new THREE.BufferAttribute(new Float32Array(flw), 2));
     geo.computeBoundingSphere();
     const m = new THREE.Mesh(geo, this.material);
     m.name = 'lakeSurface';
@@ -2493,6 +2875,7 @@ export class Water {
     const sho = [];
     const ton = [];
     const bnk = [];
+    const flw = [];
     // 2.5 m of headroom: keep a ring of dry vertices so the shoreline
     // triangles exist and the terrain, not the mesh boundary, does the cutting.
     const KEEP = -2.5;
@@ -2501,6 +2884,10 @@ export class Water {
       dep.push(depth[j * VN + i]);
       sho.push(Math.max(-60, Math.min(60, shore[j * VN + i])));
       bnk.push(1);
+      // No plan means no basin axis and no neck, so no current: this builder
+      // serves the sea in the coastal biomes, where the wave field is the whole
+      // story. Alpine always goes through _buildPlanned.
+      flw.push(0, 0);
     };
     const tri = (ai, aj, bi, bj, ci, cj) => {
       push(ai, aj); push(bi, bj); push(ci, cj);
@@ -2525,6 +2912,7 @@ export class Water {
     geo.setAttribute('aShore', new THREE.BufferAttribute(new Float32Array(sho), 1));
     geo.setAttribute('aTone', new THREE.BufferAttribute(new Float32Array(ton), 1));
     geo.setAttribute('aBank', new THREE.BufferAttribute(new Float32Array(bnk), 1));
+    geo.setAttribute('aFlow', new THREE.BufferAttribute(new Float32Array(flw), 2));
     geo.computeBoundingSphere();
     const m = new THREE.Mesh(geo, this.material);
     m.name = 'lakeSurface';

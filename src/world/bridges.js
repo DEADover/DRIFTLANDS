@@ -379,8 +379,8 @@ export function createBridges(ctx) {
     if (!P) return stub;
     const n = P.length;
 
-    if (plan) buildPlannedDecks({ plan, P, terrain, group, decks, colliders });
-    else buildFoundDecks({ P, terrain, level, group, decks, colliders });
+    if (plan) buildPlannedDecks({ plan, P, roads, terrain, group, decks, colliders });
+    else buildFoundDecks({ P, roads, terrain, level, group, decks, colliders });
 
     if (typeof window !== 'undefined' && window.__WATER) window.__WATER.decks = decks.length;
     if (!decks.length) return stub;
@@ -414,7 +414,17 @@ export function createBridges(ctx) {
           if (t > 1) { if (i < pts.length - 2) continue; t = 1; }
           const cx = p.x + ex * t, cz = p.z + ez * t;
           const dx = x - cx, dz = z - cz;
-          if (dx * dx + dz * dz <= hw2) return p.y + (q.y - p.y) * t;
+          if (dx * dx + dz * dz <= hw2) {
+            // THE DECK IS NO LONGER LEVEL ACROSS ITS WIDTH (see buildDeck), so
+            // the height the car stands on depends on how far off the centreline
+            // it is. Reporting the centreline height put the car up to a metre
+            // above or below the planks it was visibly driving on.
+            const nxm = p.nx + (q.nx - p.nx) * t, nzm = p.nz + (q.nz - p.nz) * t;
+            const il = 1 / (Math.hypot(nxm, nzm) || 1);
+            const off = dx * nxm * il + dz * nzm * il;
+            const cs = (p.cs ?? 0) + (((q.cs ?? 0) - (p.cs ?? 0)) * t);
+            return p.y + (q.y - p.y) * t + cs * off;
+          }
         }
       }
       return null;
@@ -460,7 +470,7 @@ export function createBridges(ctx) {
  * mean. A flat deck sited on the mean sinks below the carriageway at the crown
  * and the car drives through it.
  */
-function buildPlannedDecks({ plan, P, terrain, group, decks, colliders }) {
+function buildPlannedDecks({ plan, P, roads, terrain, group, decks, colliders }) {
   const n = P.length;
   // Is the ground beside the route here cut by more than half a metre? That is
   // the footprint of the neck, and it is what has to be spanned.
@@ -524,13 +534,13 @@ function buildPlannedDecks({ plan, P, terrain, group, decks, colliders }) {
       // The reference's bridge is a deck on legs; three and a half metres is
       // what it takes for the legs to be a visible part of the object rather
       // than something under it.
-      buildDeck({ idx, P, terrain, deckY: null, floor: c.level + 3.6, waterline: c.level, group, decks, colliders });
+      buildDeck({ idx, P, roads, terrain, deckY: null, floor: c.level + 3.6, waterline: c.level, group, decks, colliders });
     }
   }
 }
 
 /** The old behaviour, kept for any biome water.js has not planned. */
-function buildFoundDecks({ P, terrain, level, group, decks, colliders }) {
+function buildFoundDecks({ P, roads, terrain, level, group, decks, colliders }) {
   const n = P.length;
   const deckY = level + CLEARANCE;
   const covered = new Uint8Array(n);
@@ -565,12 +575,12 @@ function buildFoundDecks({ P, terrain, level, group, decks, colliders }) {
     for (let k = i; k < j; k++) { const g = (start + k) % n; idx.push(g); run += P[g].ds; }
     i = j;
     if (idx.length >= 6 && run >= MIN_SPAN && run <= 340) {
-      buildDeck({ idx, P, terrain, deckY, group, decks, colliders });
+      buildDeck({ idx, P, roads, terrain, deckY, group, decks, colliders });
     }
   }
 }
 
-function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null, group, decks, colliders }) {
+function buildDeck({ idx, P, roads = null, terrain, deckY, floor = -Infinity, waterline = null, group, decks, colliders }) {
   const kit = new Kit();
   const hw = DECK_HW;
   const THICK = 0.5;
@@ -656,7 +666,89 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
     }
   }
 
-  const L = (p, off) => [p.x + p.nx * off, p.y, p.z + p.nz * off];
+  // THE ROAD IS NOT LEVEL ACROSS ITS WIDTH AND THE DECK WAS. THAT IS THE
+  // "HALF WOOD, HALF SAND" BRIDGE.
+  //
+  // MEASURED, on seed 4242, sampling roads.heightAt() across the section at each
+  // of the six crossings (tools/../wb_sect in the round notes):
+  //
+  //   crossing (-6,-92):   road 38.52 at u=-8 rising to 40.15 at u=+8, deck 39.88
+  //   crossing (111,-533): road 23.35 at u=-6 rising to 24.54 at u=+6, deck 24.56
+  //   crossing (-255,202): road 52.18 .. 53.03,                        deck 53.28
+  //
+  // The carriageway carries the terrain's cross-slope and its superelevation
+  // (sectionY in roads.js: `sm.tilt * u - sm.bank * u`), so its two edges differ
+  // by 1.2-1.7 m across a seventeen-metre section. A DEAD LEVEL deck can only be
+  // flush with one of them. On the downhill side it stood over a metre above the
+  // gravel; on the uphill side the gravel came to within TWO CENTIMETRES of the
+  // planks at three crossings and 27 cm ABOVE them at the corner crossing — so
+  // the two surfaces interpenetrated and which one you saw was decided by
+  // sub-pixel depth. That is the ragged, curved wood/sand boundary running the
+  // length of the deck in the client's photograph: not an axis error (the planks
+  // are centred on the route centreline to within 8 cm, measured on all six
+  // decks) and not a width error. A cross-section error.
+  //
+  // So the deck takes the road's own cross-slope. Sampled at the two fascias,
+  // smoothed over +-9 stations (~10 m) so the planks read as one warped ribbon of
+  // timber rather than tracking every hummock, and then the whole station is
+  // lifted until no point of the carriageway within the deck's width is above
+  // the planks.
+  const roadY = (x, z) => {
+    const h = roads && typeof roads.heightAt === 'function' ? roads.heightAt(x, z) : null;
+    return typeof h === 'number' && Number.isFinite(h) ? h : null;
+  };
+  const CLEAR = 0.10;              // planks this far proud of the gravel
+  const MAX_CS = 0.22;             // never bank the deck more than 1:4.5
+  // roads.heightAt() returns null OFF the carriageway, and the deck is wider
+  // than the carriageway (8.6 m against 7.0 including the verge), so probing at
+  // the fascia came back null on both sides and every station measured a slope
+  // of exactly zero. Walk inward until the road answers.
+  const PROBE = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5];
+  const edgeY = (p, sign) => {
+    for (const f of PROBE) {
+      const off = sign * hw * f;
+      const r = roadY(p.x + p.nx * off, p.z + p.nz * off);
+      if (r != null) return { r, off };
+    }
+    return null;
+  };
+  for (const p of pts) {
+    const a = edgeY(p, -1), b = edgeY(p, 1);
+    p._cs = (a && b && b.off - a.off > 1e-3) ? (b.r - a.r) / (b.off - a.off) : 0;
+  }
+  {
+    const W = 9;
+    const cs = pts.map((_, k) => {
+      let sum = 0, c = 0;
+      for (let q = -W; q <= W; q++) { const t = pts[k + q]; if (t) { sum += t._cs; c++; } }
+      return c ? Math.max(-MAX_CS, Math.min(MAX_CS, sum / c)) : 0;
+    });
+    for (let k = 0; k < pts.length; k++) pts[k].cs = cs[k];
+  }
+  for (const p of pts) {
+    let need = -Infinity;
+    for (const off of [-hw, -hw * 0.5, 0, hw * 0.5, hw]) {
+      const r = roadY(p.x + p.nx * off, p.z + p.nz * off);
+      if (r == null) continue;
+      const want = r + CLEAR - p.cs * off;   // centre height that clears this point
+      if (want > need) need = want;
+    }
+    // ...but NOT at the abutments. The profile above eases the last RAMP metres
+    // back onto the road's own height precisely so the car does not hit a step
+    // getting on; lifting those stations to clear the carriageway would put the
+    // step back. The clearance is faded in with the same ease, so the deck
+    // leaves the road flush and only rises clear of it over the water.
+    if (Number.isFinite(need) && need > p.y) {
+      const e = Math.max(0, Math.min(1, Math.min(p.s, span - p.s) / Math.max(1, ramp)));
+      p.y += (need - p.y) * (e * e * (3 - 2 * e));
+    }
+  }
+
+  // Deck height at a lateral offset. Everything below goes through this, so the
+  // planks, the fascias, the kerbs, the rails, the posts and the pier tops all
+  // sit on one warped surface instead of four unrelated flat ones.
+  const dY = (p, off) => p.y + (p.cs ?? 0) * off;
+  const L = (p, off) => [p.x + p.nx * off, dY(p, off), p.z + p.nz * off];
   const Lo = (p, off, y) => [p.x + p.nx * off, y, p.z + p.nz * off];
 
   // --- deck planks ---------------------------------------------------------
@@ -667,12 +759,12 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
     const tone = (k % 5 === 0) ? TIMBER.deckDark : (k & 1 ? TIMBER.deck : TIMBER.deckAlt);
     kit.quad(L(p, -hw), L(p, hw), L(q, hw), L(q, -hw), tone);
     // underside
-    kit.quad(Lo(q, -hw, q.y - THICK), Lo(q, hw, q.y - THICK),
-             Lo(p, hw, p.y - THICK), Lo(p, -hw, p.y - THICK), TIMBER.beam);
+    kit.quad(Lo(q, -hw, dY(q, -hw) - THICK), Lo(q, hw, dY(q, hw) - THICK),
+             Lo(p, hw, dY(p, hw) - THICK), Lo(p, -hw, dY(p, -hw) - THICK), TIMBER.beam);
     // fascia beams, both edges
     for (const s of [1, -1]) {
-      kit.quad(Lo(p, hw * s, p.y), Lo(q, hw * s, q.y),
-               Lo(q, hw * s, q.y - THICK), Lo(p, hw * s, p.y - THICK),
+      kit.quad(Lo(p, hw * s, dY(p, hw * s)), Lo(q, hw * s, dY(q, hw * s)),
+               Lo(q, hw * s, dY(q, hw * s) - THICK), Lo(p, hw * s, dY(p, hw * s) - THICK),
                s > 0 ? TIMBER.beam : TIMBER.deckDark);
     }
   }
@@ -689,7 +781,7 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
     // solid turns the approach into a gate the car has to thread.
     for (const s of [1, -1]) {
       const px = p.x + p.nx * hw * s, pz = p.z + p.nz * hw * s;
-      kit.box(0.38, 1.55, 0.38, px, p.y + 0.62, pz, yaw, TIMBER.post);
+      kit.box(0.38, 1.55, 0.38, px, dY(p, hw * s) + 0.62, pz, yaw, TIMBER.post);
       // NO COLLIDER ON THE RAILING.
       //
       // game.js pushes the car out of a collider at (r + 1.4) m, so a post at
@@ -711,7 +803,7 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
     for (const s of [1, -1]) {
       const nx = (p.nx + q.nx) / 2, nz = (p.nz + q.nz) / 2;
       const rx = mx + nx * hw * s, rz = mz + nz * hw * s;
-      const my = (p.y + q.y) / 2;
+      const my = (dY(p, hw * s) + dY(q, hw * s)) / 2;
       kit.box(len, 0.22, 0.16, rx, my + 1.12, rz, yaw, TIMBER.rail);
       kit.box(len, 0.18, 0.13, rx, my + 0.62, rz, yaw, TIMBER.rail);
       // A kerb board sitting ON the deck just inboard of the posts. From a
@@ -719,7 +811,8 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
       // deck's own outline is the only thing separating timber from meadow;
       // the kerb gives that outline a shadow and a second tone.
       const kx = mx + nx * (hw - 0.55) * s, kz = mz + nz * (hw - 0.55) * s;
-      kit.box(len, 0.34, 0.55, kx, my + 0.17, kz, yaw, TIMBER.deckDark);
+      const ky = (dY(p, (hw - 0.55) * s) + dY(q, (hw - 0.55) * s)) / 2;
+      kit.box(len, 0.34, 0.55, kx, ky + 0.17, kz, yaw, TIMBER.deckDark);
     }
   }
 
@@ -741,7 +834,7 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
       terrain.heightAt(p.x + p.nx * (hw + 2.7), p.z + p.nz * (hw + 2.7)),
       terrain.heightAt(p.x - p.nx * (hw + 2.7), p.z - p.nz * (hw + 2.7)),
     );
-    if (p.y - THICK - outer < 1.6) continue;  // too near the abutment to bother
+    if (Math.min(dY(p, -hw), dY(p, hw)) - THICK - outer < 1.6) continue;  // near the abutment
     sincePy = 0;
     // Piles sit just PROUD of the deck edge. Tucked inboard they are invisible
     // from a camera looking 58 degrees down — and a bridge whose supports you
@@ -763,12 +856,12 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
     // frame (shots/i11/crop_deck.png).
     const wl = waterline != null ? waterline : p.yT;
     const splay = hw + 2.7;
-    const braceY = Math.min(p.y - THICK - 0.35, wl + 0.55);
+    const braceY = Math.min(Math.min(dY(p, -hw), dY(p, hw)) - THICK - 0.35, wl + 0.55);
     for (const s of [1, -1]) {
       const topOff = (hw - 0.5) * s, footOff = splay * s;
       const tx = p.x + p.nx * topOff, tz = p.z + p.nz * topOff;
       const fx = p.x + p.nx * footOff, fz = p.z + p.nz * footOff;
-      kit.leg([tx, p.y - THICK + 0.1, tz], [fx, braceY - 0.2, fz], 0.95, TIMBER.pile);
+      kit.leg([tx, dY(p, topOff) - THICK + 0.1, tz], [fx, braceY - 0.2, fz], 0.95, TIMBER.pile);
       // and on down to the bed, plumb
       const bed = terrain.heightAt(fx, fz) - 1.0;
       if (braceY - bed > 0.8) {
@@ -777,7 +870,7 @@ function buildDeck({ idx, P, terrain, deckY, floor = -Infinity, waterline = null
       // Inner leg: upright, carries the load, mostly hidden — cheap and right.
       const ix = p.x + p.nx * hw * 0.40 * s, iz = p.z + p.nz * hw * 0.40 * s;
       const ifoot = terrain.heightAt(ix, iz) - 1.1;
-      const ih = p.y - THICK - ifoot;
+      const ih = dY(p, ix === p.x && iz === p.z ? 0 : hw * 0.40 * s) - THICK - ifoot;
       if (ih > 1.0) kit.box(0.55, ih, 0.55, ix, ifoot + ih / 2, iz, yaw, TIMBER.pile);
     }
     // Cross beam tying the trestle together, at the waterline where it reads.
