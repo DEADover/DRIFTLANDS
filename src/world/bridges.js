@@ -710,7 +710,10 @@ function buildDeck({ idx, P, roads = null, terrain, deckY, floor = -Infinity, wa
     const h = roads && typeof roads.heightAt === 'function' ? roads.heightAt(x, z) : null;
     return typeof h === 'number' && Number.isFinite(h) ? h : null;
   };
-  const CLEAR = 0.10;              // planks this far proud of the gravel
+  // Planks this far proud of the gravel. 0.10 was not enough: measured on the
+  // shipped build, the road drew ABOVE the deck at 58 of 150 deck stations, by
+  // up to 0.30 m, which is the sand-over-planks patch the client photographed.
+  const CLEAR = 0.30;
   const MAX_CS = 0.22;             // never bank the deck more than 1:4.5
   // roads.heightAt() returns null OFF the carriageway, and the deck is wider
   // than the carriageway (8.6 m against 7.0 including the verge), so probing at
@@ -740,7 +743,12 @@ function buildDeck({ idx, P, roads = null, terrain, deckY, floor = -Infinity, wa
   }
   for (const p of pts) {
     let need = -Infinity;
-    for (const off of [-hw, -hw * 0.5, 0, hw * 0.5, hw]) {
+    // Sample DENSELY across the deck. Five points at hw ~ 8.6 m are 4.3 m apart,
+    // and the carriageway is crowned — so its maximum fell between samples and
+    // the lift was computed against a height the road never reached. Step ~0.7 m.
+    const STEPS = Math.max(12, Math.ceil((hw * 2) / 0.7));
+    for (let i = 0; i <= STEPS; i++) {
+      const off = -hw + (2 * hw * i) / STEPS;
       const r = roadY(p.x + p.nx * off, p.z + p.nz * off);
       if (r == null) continue;
       const want = r + CLEAR - p.cs * off;   // centre height that clears this point
