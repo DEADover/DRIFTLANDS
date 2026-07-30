@@ -59,6 +59,10 @@ if (shotId) {
   window.__GAME = game;
   game.loadBiome(params.get('biome') ?? 'alpine');
 
+  // The music module knows nothing about the HUD and the HUD knows nothing about
+  // where audio comes from; this line is the whole of the coupling.
+  game.music.onTrack?.((t) => game.hud?.setTrack(t));
+
   const kb = new KeyboardInput();
 
   /**
@@ -74,6 +78,9 @@ if (shotId) {
     started = true;
     titleEl?.classList.add('gone');
     game.audio.start?.();
+    // Same gesture, same moment: a browser will not let any audio play before
+    // one, and the race beginning is exactly when the music should.
+    game.music.start?.();
     window.removeEventListener('keydown', onAnyKey);
   };
   const onAnyKey = (e) => { if (e.code !== 'Tab') start(); };

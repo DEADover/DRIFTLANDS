@@ -43,6 +43,13 @@ const CHAIN_WINDOW = 2.6;   // seconds between slides that still counts as a cha
 const PAYOUT_MIN = 110;     // below this a slide is not worth announcing
 const TRACE_SPAN = 420;     // metres across the route ribbon
 
+/** Filenames are user input and land in innerHTML; never trust one. */
+function escapeHtml(v) {
+  return String(v).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
 export class Hud {
   constructor(root) {
     this.root = root;
@@ -51,6 +58,7 @@ export class Hud {
     const q = (s) => root.querySelector(s);
     this.el = {
       hud: q('[data-hud]'),
+      now: q('[data-now]'),
       place: q('[data-place]'),
       pOver: q('[data-pover]'),
       pRule: q('[data-prule]'),
@@ -517,6 +525,23 @@ export class Hud {
   }
 
   // ---------------------------------------------------------- screenshot mode
+  /**
+   * Announce a track change, then fade out.
+   *
+   * Called by main.js from the music module's own callback, so the HUD never
+   * has to know where the audio came from — it is handed a name and a position
+   * in the list and nothing else.
+   */
+  setTrack(t) {
+    const el = this.el.now;
+    if (!el) return;
+    if (!t) { el.classList.remove('show'); return; }
+    el.innerHTML = `<i>${t.index + 1}/${t.count}</i>${escapeHtml(t.name)}`;
+    el.classList.add('show');
+    clearTimeout(this._nowTimer);
+    this._nowTimer = setTimeout(() => el.classList.remove('show'), 4200);
+  }
+
   setVisible(on) {
     this.visible = !!on;
     this.el.hud.style.opacity = this.visible ? '1' : '0';
@@ -714,6 +739,17 @@ const TEMPLATE = `
   }
 
   /* ------------------------------------------------------------------- help */
+  /* NOW PLAYING. Announces a track change and then gets out of the way — at
+     this camera height the frame is the game, not a media player. */
+  .hud .nowPlaying {
+    position:absolute; left:calc(24px * var(--s)); bottom:calc(96px * var(--s));
+    font-size:calc(13px * var(--s)); font-weight:700; letter-spacing:.04em;
+    color:#fff; text-shadow:0 calc(2px * var(--s)) calc(8px * var(--s)) rgba(0,0,0,.55);
+    opacity:0; transition:opacity .45s ease; pointer-events:none; white-space:nowrap;
+  }
+  .hud .nowPlaying.show { opacity:.92; }
+  .hud .nowPlaying i { font-style:normal; opacity:.6; padding-right:calc(8px * var(--s)); }
+
   .hud .help {
     position:absolute; right:calc(40px * var(--s)); bottom:calc(34px * var(--s));
     text-align:right; font-size:calc(10px * var(--s)); line-height:2;
@@ -757,6 +793,9 @@ const TEMPLATE = `
 
   <div class="help" data-help>
     <u>W A S D</u><s>drive</s>&nbsp;&nbsp;&nbsp;<u>SPACE</u><s>handbrake</s><br>
-    <u>R</u><s>reset</s>&nbsp;&nbsp;<u>M</u><s>map</s>&nbsp;&nbsp;<u>N</u><s>mute</s>&nbsp;&nbsp;<u>H</u><s>hide</s>
+    <u>R</u><s>reset</s>&nbsp;&nbsp;<u>M</u><s>map</s>&nbsp;&nbsp;<u>N</u><s>mute</s>&nbsp;&nbsp;<u>H</u><s>hide</s><br>
+    <u>[ ]</u><s>track</s>&nbsp;&nbsp;<u>P</u><s>pause</s>&nbsp;&nbsp;<u>- =</u><s>volume</s>
   </div>
+
+  <div class="nowPlaying" data-now></div>
 </div>`;

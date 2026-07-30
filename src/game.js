@@ -18,6 +18,7 @@ import { SkidMarks } from './fx/skidmarks.js';
 import { ParticleSystem } from './fx/particles.js';
 import { createFeel } from './fx/feel.js';
 import { createAudio } from './audio/audio.js';
+import { createMusic } from './audio/music.js';
 import { Hud } from './ui/hud.js';
 import { resolveCollisions } from './core/collision.js';
 
@@ -51,6 +52,9 @@ export class Game {
 
     this.feel = createFeel({ camera: this.camera, vehicle: this.vehicle, particles: this.particles });
     this.audio = createAudio();
+    // The player's own soundtrack, from the music/ folder. Separate from the
+    // engine synth on purpose — see the note at the top of audio/music.js.
+    this.music = createMusic();
 
     this.hud = uiRoot ? new Hud(uiRoot) : null;
     this.worldGroup = new THREE.Group();

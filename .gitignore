@@ -2,3 +2,7 @@ node_modules/
 dist/
 shots/
 .DS_Store
+
+# The player's own soundtrack: local, large, and not ours to commit.
+music/*
+!music/README.md
