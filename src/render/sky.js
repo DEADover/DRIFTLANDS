@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { sunElevationFor } from './renderer.js';
+import { RENDER_CLOCK } from './camera.js';
 
 /**
  * SKY DOME + fog.
@@ -78,7 +79,25 @@ const FRAG = /* glsl */ `
       float e = smoothstep(lo, lo + 0.035, n);
       float lit = smoothstep(lo + 0.10, lo + 0.135, n);
       vec3 cc = mix(uCloudLo, uCloudHi, lit);
-      float fade = smoothstep(0.035, 0.30, d.y);
+      // THE CLOUDS BELONG IN THE HORIZON BAND, AND THE OLD FADE PUT THEM EVERYWHERE
+      // BUT THERE.
+      //
+      // smoothstep(0.035, 0.30, d.y) faded the forms OUT at the horizon and up to
+      // full strength by 17 degrees of altitude. That is the right shape for a game
+      // you look up in. Ours is not: MEASURED across hero_alpine, lake_bridge,
+      // wildlife and a five-frame sequence, the sky is 0% of every frame — the
+      // ground fills it edge to edge, exactly as ART_DIRECTION section 2 asks. The
+      // only sky that can ever appear is the thin band just above the horizon over
+      // a crest, and the old ramp guaranteed that band would be the one empty part
+      // of the dome.
+      //
+      // So: full strength from 1 to 6 degrees, and thinned above ~27 degrees. The
+      // second half matters for the client's constraint as much as the first — the
+      // one place a cloud form must NOT be dense is straight up, because that is
+      // the part of the dome the camera would have to be looking through to see the
+      // road, and it is also where a form would sit visually on top of the play
+      // area if the pitch ever eased.
+      float fade = smoothstep(0.02, 0.10, d.y) * (1.0 - smoothstep(0.45, 0.95, d.y) * 0.75);
       col = mix(col, cc, e * fade * 0.92);
     }
 
@@ -97,13 +116,19 @@ const FRAG = /* glsl */ `
   }
 `;
 
-/** Cloud coverage per biome. 0 = clear. Kept low: emptiness is the composition. */
+/**
+ * Cloud coverage per biome. 0 = clear. Kept low: emptiness is the composition.
+ * `drift` is how fast the forms move across the dome, in field units per second —
+ * it was a uniform that NOTHING EVER WROTE, so the sky's clouds have been frozen
+ * since they were added. It is driven off the same RENDER_CLOCK as the ground
+ * shadows in post.js so the two cannot disagree about how windy it is.
+ */
 const CLOUDS = {
-  'Alpine Meadows': { cover: 0.42, scale: 0.55, glow: 1.0 },
-  'Ember Woodland': { cover: 0.50, scale: 0.42, glow: 1.5 },
-  'Vermilion Mesa': { cover: 0.16, scale: 0.70, glow: 0.9 },
-  'Cobalt Coast': { cover: 0.58, scale: 0.38, glow: 2.0 },
-  'Glacier Pass': { cover: 0.30, scale: 0.60, glow: 1.2 },
+  'Alpine Meadows': { cover: 0.42, scale: 0.55, glow: 1.0, drift: 0.010 },
+  'Ember Woodland': { cover: 0.50, scale: 0.42, glow: 1.5, drift: 0.008 },
+  'Vermilion Mesa': { cover: 0.16, scale: 0.70, glow: 0.9, drift: 0.006 },
+  'Cobalt Coast': { cover: 0.58, scale: 0.38, glow: 2.0, drift: 0.014 },
+  'Glacier Pass': { cover: 0.30, scale: 0.60, glow: 1.2, drift: 0.012 },
 };
 
 export class Sky {
@@ -153,10 +178,11 @@ export class Sky {
       Math.sin(p.sunAzimuth) * Math.cos(el)
     );
 
-    const cl = CLOUDS[p.name] ?? { cover: 0.35, scale: 0.55, glow: 1.0 };
+    const cl = CLOUDS[p.name] ?? { cover: 0.35, scale: 0.55, glow: 1.0, drift: 0.010 };
     u.uCloud.value = cl.cover;
     u.uCloudScale.value = cl.scale;
     u.uSunGlow.value = cl.glow;
+    this._drift = cl.drift ?? 0.010;
     // A low sun makes a bigger, softer disc; a high sun a small hard one.
     u.uSunSize.value = THREE.MathUtils.lerp(1.6, 0.85, THREE.MathUtils.clamp(el / 0.9, 0, 1));
 
@@ -170,6 +196,9 @@ export class Sky {
 
   follow(camPos) {
     this.mesh.position.copy(camPos);
+    // Same deterministic clock as the ground shadows, for the same reason: a wall
+    // clock here would make every screenshot a different picture.
+    this.material.uniforms.uWind.value = RENDER_CLOCK.t * (this._drift ?? 0.010);
   }
 }
 

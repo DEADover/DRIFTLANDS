@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { GRADES, gradeFor } from './grade.js';
+import { sunElevationFor } from './renderer.js';
+import { RENDER_CLOCK } from './camera.js';
 
 /**
  * POST-PROCESSING — owned by the render builder.
@@ -356,6 +358,92 @@ const MEADOW_NOISE = /* glsl */ `
   }
 `;
 
+/**
+ * CLOUD SHADOWS — the client asked for clouds; the constraint is that they must
+ * not get in the way. At a camera 40 degrees off vertical, ANY volume floating
+ * between the lens and the ground covers the gameplay, so the clouds go on the
+ * GROUND, as the shadows they cast. It costs the player nothing — a shadow is
+ * behind the car, not in front of it — and it is the reading of weather that
+ * actually changes the picture, because it gives the meadow large-scale moving
+ * light instead of one flat exposure.
+ *
+ * WHY THIS IS NOT `dapple` WITH A BIGGER NUMBER, WHICH IS THE WHOLE JOB.
+ *
+ * `dapple` remaps its noise with `smoothstep(0.0, 1.0, n)` — the FULL range. Its
+ * lobes are therefore pure gradients: every pixel of a 24 m lobe is a different
+ * value and there is no boundary anywhere. Over a faceted meadow that is
+ * indistinguishable from defocus blur, which is exactly why it had to be cut
+ * from 0.55 to 0.12. A shadow is not a gradient. It is a REGION with an EDGE.
+ *
+ * So this thresholds instead of remapping: the picture is the ISO-CONTOUR of a
+ * warped fbm, resolved over ~2 m of ground, with a second step inside it. Two
+ * flat tones and a silhouette — the same cut-paper discipline as the sky dome,
+ * and the same discipline as the rest of the geometry. The field's VALUES are
+ * discarded; only where they cross the cut matters, so the function is tuned for
+ * a lumpy level set (a strong low-frequency domain warp, then octaves down to
+ * 1/10 of the lobe) rather than for a nice-looking height map.
+ *
+ * PROJECTED ALONG THE SUN RAY, not straight down. A cloud at altitude H shadows
+ * the point P whose ray to the sun passes through it, i.e. the field is sampled
+ * at P.xz - (S.xz/S.y) * P.y (+ a constant that H only slides). One line, and it
+ * buys two real things: the shadow slides correctly across a hillside instead of
+ * being painted flat onto it, and a conifer's crown can be in shade while its
+ * base is in sun, which is the cue that says the shadow comes from ABOVE.
+ *
+ * MEAN-NEUTRAL BY CONSTRUCTION. `uCloudSun` is set so the brightening of the
+ * sunlit ground exactly pays for the darkening of the shaded ground at the
+ * measured coverage (see `cloudCover` in grade.js). The frame mean does not move
+ * and the whole amplitude is spent on RANGE — which is the second thing this
+ * buys, because a sunlit-turf population lifted above the road's ceiling is
+ * where the missing highlight tail has to come from.
+ */
+const CLOUD_SHADOW = /* glsl */ `
+  uniform float uCloudShade;   // how much darker shaded ground is. 0 = off
+  uniform float uCloudSun;     // matching lift on the sunlit ground (mean-neutral)
+  uniform float uCloudScale;   // cycles per metre
+  uniform float uCloudCut;     // iso-value of the silhouette; decides coverage
+  uniform float uCloudEdge;    // edge width in field units (~2 m at cut 0.5)
+  uniform float uCloudCore;    // fraction of the depth that lives in the inner step
+  uniform float uCloudRim;     // extra light on the turf just outside the edge
+  uniform vec2  uCloudDrift;   // metres the field has travelled: wind x time
+  uniform vec2  uCloudSkew;    // -S.xz / S.y, the sun-ray projection
+  uniform vec3  uCloudTint;    // colour of the light that is left in shade
+
+  /**
+   * Cumulus silhouette. Read this as a level-set generator, not a height field.
+   * The warp is a full cell wide at 1.7x the lobe frequency, which is what makes
+   * the contour wander and bulge instead of drawing an oval; the fourth octave at
+   * ~1/10 the lobe size is what puts the small scallops on the edge.
+   */
+  float cloudField(vec2 p) {
+    vec2 w = vec2(vnoise(p * 1.7 + 21.3), vnoise(p * 1.7 + 47.9)) - 0.5;
+    p += w * 0.9;
+    float n  = vnoise(p) * 0.50;
+    n += vnoise(p * 2.13 + 5.7) * 0.25;
+    n += vnoise(p * 4.31 + 13.1) * 0.15;
+    n += vnoise(p * 9.70 + 31.7) * 0.10;
+    return n;
+  }
+
+  /**
+   * .x = 0 in full sun, 1 in the darkest part of a cloud's shadow, two flat tones.
+   * .y = the narrow band of turf just OUTSIDE the silhouette, 1 hard against the
+   *      edge and 0 a few metres clear of it.
+   */
+  vec2 cloudMask(vec3 wp) {
+    vec2 q = (wp.xz + uCloudSkew * wp.y + uCloudDrift) * uCloudScale;
+    float h = cloudField(q);
+    float cov  = smoothstep(uCloudCut, uCloudCut + uCloudEdge, h);
+    // The inner step is as crisp as the outer one — two FLAT tones with a
+    // boundary between them, the same cut-paper discipline as the sky dome and
+    // as the geometry. A wide inner ramp would put the gradient back.
+    float k    = uCloudCut + uCloudEdge * 2.2;
+    float core = smoothstep(k, k + uCloudEdge * 1.4, h);
+    float rim  = smoothstep(uCloudCut - uCloudEdge * 2.4, uCloudCut, h);
+    return vec2(cov * (1.0 - uCloudCore) + core * uCloudCore, rim);
+  }
+`;
+
 // --------------------------------------------------------------- composite
 const COMPOSITE_FRAG = /* glsl */ `
   precision highp float;
@@ -363,6 +451,7 @@ const COMPOSITE_FRAG = /* glsl */ `
   ${DEPTH_UTIL}
   ${TONEMAP}
   ${MEADOW_NOISE}
+  ${CLOUD_SHADOW}
   uniform sampler2D tScene;
   uniform sampler2D tAO;
   uniform sampler2D tBloom;
@@ -515,9 +604,27 @@ const COMPOSITE_FRAG = /* glsl */ `
     }
 
     // ---- broken light (linear, world-anchored — see MEADOW_NOISE above)
-    if (uDapple > 0.0001 && d < 0.9999) {
+    float cmask = 0.0;
+    if ((uDapple > 0.0001 || uCloudShade > 0.0001) && d < 0.9999) {
       vec3 vp = viewPos(vUv, d);
       vec3 wp = (uInvView * vec4(vp, 1.0)).xyz;
+
+      // ---- CLOUD SHADOW, first, because it is the biggest light term here and
+      // everything else is texture on top of it. See CLOUD_SHADOW above.
+      if (uCloudShade > 0.0001) {
+        vec2 mr = cloudMask(wp);
+        cmask = mr.x;
+        // mr.y is the turf just CLEAR of a shadow — the brightest ground in a
+        // cumulus field, because it gets the sun plus the light bouncing off the
+        // cloud's lit flank. It is also, conveniently, exactly the population the
+        // missing highlight tail has to come from, and it is light landing on an
+        // already-warm albedo rather than a global exposure lift, so it does not
+        // move the road.
+        float shade = mix(1.0 + uCloudSun + uCloudRim * mr.y, 1.0 - uCloudShade, cmask);
+        col *= shade * mix(vec3(1.0), uCloudTint, cmask);
+      }
+
+      if (uDapple > 0.0001) {
       float n = dappleField(wp.xz * uDappleScale);
       // SYMMETRIC about 1.0. An asymmetric swing (tried first: 1-a .. 1+0.55a)
       // dimmed the whole frame by 0.225a and cost as much brightness at the top
@@ -530,6 +637,7 @@ const COMPOSITE_FRAG = /* glsl */ `
       vec3 warm = vec3(1.0 + uDappleWarm, 1.0 + uDappleWarm * 0.22, 1.0 - uDappleWarm * 0.85);
       vec3 cool = vec3(1.0 - uDappleWarm * 0.85, 1.0, 1.0 + uDappleWarm * 1.05);
       col *= shade * mix(cool, warm, v);
+      }
 
       // BRUSH SCALE. The lobes above are 24 m across and do nothing about the
       // real "rendered, not painted" tell, which is that a 15 m terrain facet is
@@ -807,7 +915,12 @@ const COMPOSITE_FRAG = /* glsl */ `
       if (uDebug < 1.5) col = vec3(ao);
       else if (uDebug < 2.5) col = vec3(fract(dist * 0.02));
       else if (uDebug < 3.5) col = texture2D(tBloom, vUv).rgb * 4.0;
-      else col = vec3(texture2D(tAO, vUv).b);
+      else if (uDebug < 4.5) col = vec3(texture2D(tAO, vUv).b);
+      // ?debugpost=cloud prints the shadow mask itself. Its MEAN over the frame
+      // is cloudCover in grade.js — the number the mean-neutral sun lift is
+      // computed from — so this view is not a curiosity, it is how that number
+      // is measured (tools/measure.mjs on the debug shot reports it as mean luma).
+      else col = vec3(cmask);
     }
 
     // ---- dither (kills banding in the sky ramp)
@@ -847,11 +960,11 @@ class Pass {
   get u() { return this.material.uniforms; }
 }
 
-/** Dev-only: ?debugpost=ao|depth|bloom renders an intermediate buffer. */
+/** Dev-only: ?debugpost=ao|depth|bloom|ground|cloud renders an intermediate buffer. */
 const DEBUG = (() => {
   try {
     const v = new URLSearchParams(location.search).get('debugpost');
-    return { ao: 1, depth: 2, bloom: 3, ground: 4 }[v] ?? 0;
+    return { ao: 1, depth: 2, bloom: 3, ground: 4, cloud: 5 }[v] ?? 0;
   } catch { return 0; }
 })();
 
@@ -1011,6 +1124,17 @@ export function createPostFX(ctx) {
     uDapple: { value: 0.0 },
     uDappleWarm: { value: 0.0 },
     uDappleFine: { value: 0.0 },
+    // Cloud shadows. See CLOUD_SHADOW above and `cloud*` in grade.js.
+    uCloudShade: { value: 0.0 },
+    uCloudSun: { value: 0.0 },
+    uCloudScale: { value: 1 / 90 },
+    uCloudCut: { value: 0.54 },
+    uCloudEdge: { value: 0.030 },
+    uCloudCore: { value: 0.34 },
+    uCloudRim: { value: 0.0 },
+    uCloudDrift: { value: new THREE.Vector2() },
+    uCloudSkew: { value: new THREE.Vector2() },
+    uCloudTint: { value: new THREE.Vector3(1, 1, 1) },
     uDebug: { value: DEBUG },
   });
 
@@ -1093,6 +1217,41 @@ export function createPostFX(ctx) {
       u.uDappleFine.value = g.dappleFine ?? 0;
       u.uGrain.value = g.grain ?? 0.0022;
       u.uDappleScale.value = 1 / (g.dappleMetres ?? 34);
+
+      // ---- cloud shadows
+      const shade = g.cloudShade ?? 0;
+      u.uCloudShade.value = shade;
+      u.uCloudScale.value = 1 / (g.cloudMetres ?? 90);
+      u.uCloudCut.value = g.cloudCut ?? 0.54;
+      u.uCloudEdge.value = g.cloudEdge ?? 0.030;
+      u.uCloudCore.value = g.cloudCore ?? 0.34;
+      u.uCloudRim.value = g.cloudRim ?? 0;
+      u.uCloudTint.value.fromArray(g.cloudTint ?? [1, 1, 1]);
+      // MEAN-NEUTRALITY IS A CEILING HERE, NOT THE SETTING.
+      //
+      // `shade * cover / (1 - cover)` is the lift on the sunlit ground that pays
+      // EXACTLY for the darkening of the shaded ground at the measured coverage,
+      // so the frame mean does not move at all. Shipping the whole of it was
+      // wrong twice over. Physically, a cloud does not brighten the ground it is
+      // not over; it only takes light away. And measured, our frame mean is 0.390
+      // against the reference's 0.379, so the small net dimming a partly-paid
+      // shadow produces is a debt this picture already owed.
+      //
+      // `cloudLift` is the fraction paid back. 1.0 = exactly mean-neutral (the
+      // right default for a biome already sitting on its target mean); alpine
+      // pays 0.45 and spends the rest on the mean.
+      const cover = THREE.MathUtils.clamp(g.cloudCover ?? 0.30, 0, 0.8);
+      u.uCloudSun.value = shade * (cover / Math.max(1 - cover, 0.2)) * (g.cloudLift ?? 1);
+      this._wind = g.cloudWind ?? [0, 0];
+
+      // The sun-ray projection. Same elevation the light rig clamped to, so the
+      // cloud shadows fall the same way the shadow map's do — if these disagreed
+      // a tree's cast shadow would point one way and the cloud's the other, which
+      // is the one error in this effect that would be impossible to unsee.
+      const el = sunElevationFor(palette);
+      const az = palette?.sunAzimuth ?? 2.35;
+      const cot = Math.cos(el) / Math.max(Math.sin(el), 0.15);
+      u.uCloudSkew.value.set(-Math.cos(az) * cot, -Math.sin(az) * cot);
       bright.u.uThreshold.value = g.bloomThreshold;
       aoPass.u.uIntensity.value = g.aoIntensity;
       aoPass.u.uR2.value = g.aoWide ?? 8.0;
@@ -1130,6 +1289,12 @@ export function createPostFX(ctx) {
       farU.value = cam.far;
       // World reconstruction for the broken-light term: view -> world.
       composite.u.uInvView.value.copy(cam.matrixWorld);
+
+      // Cloud drift. The clock is the render layer's own fixed-step accumulator
+      // (camera.js) precisely so that a shot at ?t=4 is the same picture every
+      // time — a wall clock here would make every screenshot unrepeatable.
+      const w = this._wind ?? [0, 0];
+      composite.u.uCloudDrift.value.set(w[0] * RENDER_CLOCK.t, w[1] * RENDER_CLOCK.t);
 
       // -------------------------------------------------------------- 2. AO
       aoPass.u.uAspect.value.set(1 / cam.aspect, 1);

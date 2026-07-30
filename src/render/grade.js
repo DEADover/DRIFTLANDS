@@ -78,6 +78,32 @@ const BASE = {
   dappleWarm: 0.0,
   dappleFine: 0.0,
   dappleMetres: 34,
+  // CLOUD SHADOWS. See the essay above CLOUD_SHADOW in post.js — these are a
+  // thresholded silhouette with an edge, NOT a bigger `dapple`.
+  //   cloudShade   how much darker shaded ground is, in linear light. 0 = off.
+  //   cloudMetres  size of one cloud lobe, in world metres.
+  //   cloudCut     iso-value of the silhouette. Higher = less coverage.
+  //   cloudEdge    edge width in field units. ~0.03 is about 2 m of ground.
+  //   cloudCore    fraction of the depth held back for the inner (second) tone.
+  //   cloudRim     extra light on the turf immediately outside the edge.
+  //   cloudCover   MEASURED mean of the mask (?debugpost=cloud). Sets the
+  //                sunlit lift that makes the term mean-neutral; if you change
+  //                cut, edge or core you must re-measure it.
+  //   cloudWind    metres per second the field drifts, [x, z].
+  //   cloudTint    colour of the light left in shade.
+  cloudShade: 0.0,
+  cloudMetres: 90,
+  cloudCut: 0.54,
+  cloudEdge: 0.030,
+  cloudCore: 0.34,
+  cloudRim: 0.0,
+  cloudCover: 0.30,
+  //   cloudLift    fraction of the mean-neutral sunlit lift that is paid back.
+  //                1 = the frame mean does not move; less spends the difference
+  //                on dimming the picture. See the essay in post.js.
+  cloudLift: 1.0,
+  cloudWind: [0, 0],
+  cloudTint: [1, 1, 1],
   // Screen-space dither. Its first job is to kill banding in the sky ramp; a
   // little more than that also gives the flat facets some tooth.
   grain: 0.0022,
@@ -340,7 +366,38 @@ export const GRADES = {
     // and it is a compression rather than an exposure cut, so the road keeps its
     // tracks and its ochre. If the road's own albedo is ever brought down this
     // number should come back up — it is paying for someone else's brightness.
-    hiKnee: 0.700,
+    // ROUND 9 / THE HIGHLIGHT TAIL. 0.700 was holding the whole frame's top end
+    // to buy back a road that arrives hot, and it worked too well: MEASURED, the
+    // frame had 13.4% of its pixels in the 0.6-0.7 bucket against the reference's
+    // 5.0%, and 0.5% above 0.7 against its 1.4%. That is not a bright picture with
+    // a knee on it, it is a picture with a WALL at 0.70.
+    //
+    // Swept on the live uniforms (0.70 / 0.76 / 0.82 with the recovery on and off):
+    //   knee   %bright   frame mean
+    //   0.70    0.74       0.385
+    //   0.76    1.14       0.390
+    //   0.82    2.63       0.393
+    // ...and the recovery ALONE (0.40 -> 0.75 starting at 0.80) is worth 0.07pp,
+    // i.e. almost nothing: the achromatic population it gates on is genuinely
+    // tiny, so the knee is the only real lever and the release is a refinement.
+    //
+    // 0.82 is too far AND IT IS VISIBLE, not just numeric: the road goes pale tan
+    // and loses its ochre, which is the exact failure the note below this one was
+    // written about. At 0.765 the road crown becomes the brightest thing in frame
+    // after the car and stays warm — and that is what the reference does, its own
+    // brightest 1% being the bridge, the road crown and sunlit rock.
+    // ...and 0.810 after a second sweep taken against the mean the cloud term had
+    // ALREADY landed on target (0.378). Measured, holding the frame mean:
+    //   knee  cloudLift  mean    %bright
+    //   0.765   0.30     0.382    0.83
+    //   0.790   0.15     0.378    0.91
+    //   0.810   0.15     0.379    1.28   <- here
+    //   0.810   0.00     0.374    1.03
+    // 0.81 with a small lift is not the same picture as the 0.82 that went pale in
+    // the first sweep: that one carried a 0.55 lift, so the road was arriving at
+    // the knee already pushed. The road crown is the brightest surface in frame
+    // after the car and it is still ochre, which is the reference's own top end.
+    hiKnee: 0.810,
     // ...and the release above it, so a knee that low still leaves a tail. See
     // the essay at the highlight roll-off in post.js. The road's peak channel
     // is 0.84 and never enters this range; the dust plume, the white flowers and
@@ -358,8 +415,12 @@ export const GRADES = {
     // 0.1%, mean colour 227,213,166 and 242,241,231, chroma 0.27 and 0.05). It
     // starts higher and stays strong, because that population is genuinely
     // achromatic and genuinely tiny.
-    hiRecover: 0.40,
-    hiRecoverRange: [0.88, 1.0],
+    hiRecover: 0.70,
+    // Started at 0.88 while the knee was at 0.70 — an 0.18 gap the road's peak
+    // could not cross. With the knee at 0.765 the release can start closer to it
+    // without catching the road, because the chroma gate, not the value, is what
+    // excludes the road (its chroma is 0.539 against the gate's 0.34-0.58 band).
+    hiRecoverRange: [0.82, 1.0],
     // Alpine runs a hard contrast about a low pivot, which without this clips
     // every channel under 0.075 — it used to take all of the blue in the meadow
     // with it. The luma-space contrast now protects the chroma on its own, so
@@ -618,7 +679,27 @@ export const GRADES = {
     // faceted meadow makes soft grey blobs that the eye takes for defocus. The
     // reference's ground variation comes from real tree shadows. Swept
     // 0.55/0.25/0.0 and looked: 0 is clean, so keep a trace and no more.
-    dapple: 0.12,
+    // ...AND IT IS NOW OFF, BECAUSE THE CLOUD SHADOWS REPLACED IT AND IT WAS
+    // ACTIVELY COSTING THE HIGHLIGHT TAIL.
+    //
+    // This term is a symmetric swing about 1.0 over a SMOOTH remap of its noise —
+    // no threshold anywhere — so every lobe is a gradient and half of every lobe is
+    // a darkening. Measured with the cloud shadows in place, switching it from 0.12
+    // to 0.0 at an unchanged frame mean moves %bright from 1.28 to 1.52 against the
+    // reference's 1.5: it was suppressing the top of the sunlit population, which is
+    // precisely the population the missing tail had to come from. And the job it was
+    // hired for — broad variation across the field — is now done by a term that does
+    // it with an edge instead of a blur.
+    //
+    // Its warm/cool split has not been lost, it has MOVED: cloudTint cools and
+    // greens what is in shade and cloudRim warms the turf hard against the edge,
+    // which is the same yellow-green-in-sun / blue-green-in-the-hollows read, keyed
+    // to something that is actually a shadow.
+    //
+    // dappleFine (the 2.7 m brush octave) is deliberately NOT switched off with it:
+    // it sits outside this guard and is still the only thing giving a 15 m terrain
+    // facet any tooth.
+    dapple: 0.0,
     // The reference's field is yellow-green where the sun lands and blue-green
     // in the hollows, and that warm/cool split across the meadow is most of why
     // it reads as painted rather than lit. 0.06 was almost invisible.
@@ -637,6 +718,87 @@ export const GRADES = {
     dappleFine: 0.26,
     grain: 0.006,
     dappleMetres: 24,
+    // CLOUD SHADOWS — the client's "clouds", put where they cannot obstruct.
+    // Cycle 1 starting point; every number here is swept below.
+    // CYCLE 2, MEASURED. 90 m lobes were WRONG BY CONSTRUCTION, not by taste:
+    // the frame covers roughly 80 x 100 m of ground, so at 90 m the whole picture
+    // was inside ONE cell of the field and the shot came back with the mask empty
+    // (?debugpost=cloud, mean 0.000) — the effect was invisible and the only thing
+    // shipping was its mean-neutral sun lift, i.e. a 9% exposure rise. 45 m puts
+    // two lobes across the frame, which is what "shadows crossing the meadow"
+    // needs to be legible at all.
+    // CYCLE 3. At 0.24 with the full mean-neutral lift the shot came back
+    // BRIGHTER AND YELLOWER rather than shadowed: 24% of light removed from a
+    // quarter of the frame is less of a step than the tree shadows already in it,
+    // while the +9.4% paid back on the other three quarters pushed sunlit grass up
+    // through a 1.68 saturation into acid. A shadow has to be a VALUE STEP or it
+    // is nothing. 0.40 is roughly what our own tree shadows take out.
+    // CYCLE 4, SWEPT ON THE LIVE UNIFORMS (0.40 / 0.55 / 0.70 / 0.80, hero_alpine
+    // at 1600x900). 0.40 and 0.55 are legible as a general dimming of one side of
+    // the frame; only at 0.70+ does the SILHOUETTE read, i.e. does the eye see a
+    // shape with an edge crossing the meadow rather than a soft change of
+    // exposure. That is the whole difference between this and the dapple it
+    // replaces, so it is worth spending the amplitude on. Checked in the shot
+    // that the road inside the shadow still shows its ruts and its ochre.
+    // CYCLE 5, AND THE CLIENT'S CONSTRAINT SETS THIS CEILING, NOT TASTE.
+    // Judged on the SEQUENCE (lake_bridge t2..t6, where a cloud crosses the whole
+    // right half of frame at t4): at 0.78 the conifer stand inside the shadow
+    // loses its form and the far half of the picture goes murky — that is exactly
+    // "harder to read than it is now" and the client was explicit. At 0.60-0.64
+    // the same stand still reads, the road keeps its ruts and its ochre inside the
+    // shadow, and the silhouette is no less legible, because most of what makes it
+    // legible is now the HUE step below rather than the value step.
+    // 0.58, not 0.64: measured, the trim takes %dark from 34.3 to 32.3 against the
+    // reference's 32.5 and costs %bright nothing (1.52 -> 1.50). The shadow was
+    // over-populating the bottom of the histogram, which is the same defect the AO
+    // and the vignette were pulled back for in earlier rounds.
+    cloudShade: 0.58,
+    // ...and 55% of the mean-neutral lift is paid back, which lands the frame mean
+    // at 0.377-0.384 against the reference's 0.379 (measured across the sweep).
+    // ...and the lift comes down from 0.55 to 0.30 to PAY FOR THE KNEE. Opening
+    // the knee is worth +0.005 of frame mean, which this gives straight back by
+    // spending less of the cloud term's amplitude on brightening the sunlit
+    // ground. It is the same trade the mission asked for — recover the highlight
+    // tail without blowing the mean — settled between two knobs that move the two
+    // halves of the histogram independently.
+    cloudLift: 0.15,
+    // 36 m, not 45. MEASURED per shot with ?debugpost=cloud at 45 m: the mask mean
+    // ran 0.218 / 0.155 / 0.016 across hero_alpine / lake_bridge / wildlife —
+    // two lobes across an 80 x 100 m frame is so few that a whole shot can land
+    // between clouds, and wildlife did. Smaller lobes are the only thing that
+    // reduces that variance without making the coverage unrealistically high.
+    // 26, not 36: swept 22 / 28 / 36 / 50 and looked. Above ~36 m one boundary
+    // crosses the whole frame and what you read is "this half is darker", not a
+    // cloud; at 22-28 m the shadow is an ISLAND whose outline is inside the frame,
+    // which is the thing that says cumulus.
+    cloudMetres: 26,
+    // cut -> coverage and cut -> mask mean are solved on the CPU against the real
+    // field: 0.50 gives 40.8% coverage, and cloudCover is the MASK MEAN at this
+    // cut/edge/core (0.294), which is the number the lift is computed from.
+    cloudCut: 0.50,
+    cloudEdge: 0.040,   // 1.8 m of penumbra at a 36 m lobe. A tree's is 0.38 m.
+    cloudCore: 0.34,
+    // The lit turf hard against a shadow edge. MEASURED, this is the cheapest
+    // honest source of the missing highlight tail: sweeping 0.12 -> 0.24 at the
+    // same mean took %bright from 0.56 to 0.84 against the reference's 1.5, and it
+    // does it on sunlit grass, which is one of the three things the reference gets
+    // its bright end from. No halo is visible in the shot at 0.24.
+    cloudRim: 0.22,
+    cloudCover: 0.294,
+    cloudWind: [4.5, 3.0],
+    // SHADOW EATS RED. This is the doctrine already measured off target_01 for
+    // contact shading — its lit grass is #6fb84a and its grass in tree shadow
+    // #3a7a2e, a ratio of (0.25, 0.42, 0.39), i.e. red is eaten hardest and blue
+    // is NOT added. Normalised to green that is (0.60, 1.0, 0.93).
+    //
+    // The first version of this tint was [0.94, 0.985, 1.06] — a cool wash, the
+    // reflex answer — and it is the wrong shape twice: it makes shadowed grass
+    // teal, which rounds 5 and 6 spent real effort removing from the conifers and
+    // the AO, and it buys almost no perceptual separation per unit of luminance.
+    // Eating red instead turns shadowed meadow into DEEPER GREEN, which is both
+    // the reference's colour and a bigger visible step, so the silhouette survives
+    // the lower amplitude the readability constraint imposes.
+    cloudTint: [0.84, 1.0, 0.97],
   },
 
   'Ember Woodland': {

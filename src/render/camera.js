@@ -38,6 +38,25 @@ import * as THREE from 'three';
  * wheel does not shove the frame. The frame is world-fixed: it must NOT rotate
  * with the car.
  */
+
+/**
+ * THE RENDER CLOCK — a deterministic, shared "how long has the world been
+ * running" that the render layer can read without asking the game for it.
+ *
+ * post.js needs a time to drift cloud shadows across the ground and sky.js needs
+ * one to drift the cloud forms. Neither may use `performance.now()`: the
+ * screenshot harness runs a fixed number of FIXED-STEP frames and then grabs a
+ * frame, so a wall-clock time would make every shot a different picture and
+ * every A/B comparison meaningless. It also may not read the game's own
+ * `simTime`, which lives in game.js.
+ *
+ * ChaseCamera.update is called exactly once per simulated frame with the frame's
+ * dt, so accumulating there gives the same number the sim has, from a file the
+ * render layer owns. `?t=` in the harness lands on an exact multiple of the
+ * fixed step, so `shots/seq` frames are reproducible to the pixel.
+ */
+export const RENDER_CLOCK = { t: 0 };
+
 export class ChaseCamera {
   constructor(aspect) {
     this.baseFov = 26;
@@ -110,6 +129,7 @@ export class ChaseCamera {
   update(dt, car, opts = {}) {
     const speed = car.velocity.length();
     const step = Math.min(dt, 1 / 30);
+    RENDER_CLOCK.t += step;
 
     // Lead the car by where it is going — but let the lead itself ease in, so
     // stabs of throttle or a spin do not jolt the frame.
