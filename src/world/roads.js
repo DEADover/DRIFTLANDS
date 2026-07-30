@@ -2376,9 +2376,16 @@ const G_FAST = 200;       // ...and this is as wide as a "fast corner" gets
 const G_ALWAYS = 55;      // this tight and it gets one whether it drops or not
 const G_DROP = 2.0;       // metres the ground must fall away to earn one
 const G_CLIFF = 9.0;      // ...and a RAVINE is a hazard whether it bends or not
+// A fall this deep beside the carriageway earns steel on the outside of any real
+// bend, with no budget attached. See rule 1b for the measurement behind it.
+const G_SEVERE = 6.0;
 // Where to ask. Five samples out to 26 m, because the terrain mesh is faceted
 // at ~10 m and one probe measures the facet it happens to land on.
-const G_PROBES = [4, 8, 13, 19, 26];
+// The first three are new. The nearest probe used to be 4 m beyond the verge,
+// so a bank that starts at the edge of the shoulder and is over by 4 m was
+// invisible to the rule that exists to find banks — and an embankment carrying
+// the road across a valley floor is exactly that shape.
+const G_PROBES = [1.5, 2.5, 4, 8, 13, 19, 26];
 // Hard ceiling on the share of barrier bays that may be steel, per route side.
 const G_BUDGET = 0.06;
 const G_APPROACH = 30;    // guardrail this far back from a bridge deck
@@ -2449,20 +2456,112 @@ function bridgeDecks(node) {
 }
 
 /**
+ * THE FOOTPRINT OF A BRIDGE, NOT THE SQUARE IT FITS IN.
+ *
+ * `bridgeDecks` returns an axis-aligned bounding box per span, and `deckDistances`
+ * used it to decide which stations are "on the deck" — stations that the barrier
+ * layout then skips entirely, on the correct principle that bridges.js owns its
+ * own railings.
+ *
+ * For a bridge that runs diagonally the box is enormous compared with the deck:
+ * a 100 m span at 45 degrees fits in a square roughly 70 m on a side, and every
+ * route station inside that square was declared to be on the bridge. So a band
+ * of ordinary road around each diagonal span got no barrier FROM ANYONE — roads
+ * skipped it as the bridge's business, and the bridge only rails its own planks.
+ *
+ * MEASURED, by walking the route and taking the drop on the drawn surface either
+ * side of the carriageway: four clusters, 16 stations, radii 54-133 m — all
+ * inside the 140 m the module's own rule calls a corner — with falls of 7.7 to
+ * 12.6 m and NOTHING on either verge. Three of them are the approaches to
+ * diagonal spans.
+ *
+ * So the test is now the deck's real plan-view footprint, rasterised from the
+ * triangles that are actually drawn. A 2 m cell is finer than a bay is long, and
+ * building it costs one pass over a few thousand triangles, once.
+ */
+const DECK_CELL = 2.0;
+function bridgeFootprint(node) {
+  const cells = new Set();
+  try {
+    let root = node;
+    while (root.parent) root = root.parent;
+    const v = new THREE.Vector3();
+    root.traverse((o) => {
+      if (o.name !== 'bridge' || !o.geometry) return;
+      const pos = o.geometry.attributes?.position;
+      if (!pos) return;
+      const m = o.matrixWorld;
+      for (let i = 0; i < pos.count; i += 3) {
+        // Triangle, projected to the ground plane.
+        const px = [], pz = [];
+        for (let k = 0; k < 3; k++) {
+          v.fromBufferAttribute(pos, i + k).applyMatrix4(m);
+          px.push(v.x); pz.push(v.z);
+        }
+        const x0 = Math.min(...px), x1 = Math.max(...px);
+        const z0 = Math.min(...pz), z1 = Math.max(...pz);
+        // Stamp the triangle's own cells. Vertex cells are always stamped so a
+        // sliver triangle — and the deck is full of them — can never fall
+        // between two cell centres and leave a hole in the middle of a span.
+        for (let k = 0; k < 3; k++) {
+          cells.add(`${Math.floor(px[k] / DECK_CELL)},${Math.floor(pz[k] / DECK_CELL)}`);
+        }
+        for (let cx = Math.floor(x0 / DECK_CELL); cx <= Math.floor(x1 / DECK_CELL); cx++) {
+          for (let cz = Math.floor(z0 / DECK_CELL); cz <= Math.floor(z1 / DECK_CELL); cz++) {
+            const mx = (cx + 0.5) * DECK_CELL, mz = (cz + 0.5) * DECK_CELL;
+            // Point in triangle, by sign of the three edge cross products.
+            const d1 = (mx - px[1]) * (pz[0] - pz[1]) - (px[0] - px[1]) * (mz - pz[1]);
+            const d2 = (mx - px[2]) * (pz[1] - pz[2]) - (px[1] - px[2]) * (mz - pz[2]);
+            const d3 = (mx - px[0]) * (pz[2] - pz[0]) - (px[2] - px[0]) * (mz - pz[0]);
+            const neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+            const pp = (d1 > 0) || (d2 > 0) || (d3 > 0);
+            if (!(neg && pp)) cells.add(`${cx},${cz}`);
+          }
+        }
+      }
+    });
+  } catch { cells.clear(); }
+  return cells;
+}
+
+/**
  * Distance along the route, in metres, from every station to the nearest bridge
  * deck. Two sweeps each way so it wraps properly on a closed loop.
  */
-function deckDistances(route, decks) {
+function deckDistances(route, decks, foot = null) {
   const S = route.samples;
   const n = S.length;
   const ds = route.ds;
   const closed = route.closed !== false;
+  // The real footprint when we have it; the bounding boxes only as a fallback,
+  // for the eager layout that runs before any bridge mesh exists.
   const over = (x, z) => {
+    if (foot && foot.size) {
+      const cx = Math.floor(x / DECK_CELL), cz = Math.floor(z / DECK_CELL);
+      // One cell of slack, so a wheel on the very edge of the last plank still
+      // counts as the bridge's business rather than the road's.
+      for (let u = -1; u <= 1; u++) {
+        for (let v = -1; v <= 1; v++) if (foot.has(`${cx + u},${cz + v}`)) return true;
+      }
+      return false;
+    }
     for (const d of decks) if (x >= d[0] && x <= d[2] && z >= d[1] && z <= d[3]) return true;
     return false;
   };
   const onDeck = new Uint8Array(n);
-  for (let i = 0; i < n; i++) onDeck[i] = (S[i].wet || over(S[i].x, S[i].z)) ? 1 : 0;
+  // ON A DECK MEANS ON A DECK.
+  //
+  // `S[i].wet` — the route sample sitting below the waterline — used to count
+  // too, and it is a different fact entirely. A crossing is approached on a
+  // causeway that runs low across the valley floor for tens of metres before a
+  // single plank appears, and every one of those stations was declared the
+  // bridge's business and skipped by the barrier layout. bridges.js only rails
+  // its own planks, so nobody railed the causeway.
+  //
+  // MEASURED: at each place the client marked, the nearest steel WAS a guardrail
+  // — 20.6, 24.5 and 31.6 m away, with a 7.7 to 12.6 m drop still running the
+  // whole way. The run stopped where the `wet` flag started.
+  for (let i = 0; i < n; i++) onDeck[i] = over(S[i].x, S[i].z) ? 1 : 0;
   const wetD = new Float64Array(n).fill(1e9);
   for (let i = 0; i < n; i++) if (onDeck[i]) wetD[i] = 0;
   for (let pass = 0; pass < 2; pass++) {
@@ -2553,6 +2652,9 @@ function splinterGeom() {
  *
  * Returns { group, segments, hit, update, reset } — see the module contract.
  */
+/** Per-station guardrail decisions from the last compile; diagnostics only. */
+let DECISIONS = [];
+
 function buildBarriers(routes, terrain, seed, cols, waterLevel) {
   const group = new THREE.Group();
   group.name = 'road-barriers';
@@ -2645,6 +2747,7 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
    * witness points say the ground moved. Frame one, then never again.
    */
   const compile = () => {
+    DECISIONS = [];
   const strip = new Strip();
   const segs = [];
   const pans = [];
@@ -2653,6 +2756,7 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
   // Bridge decks, as world-space XZ rectangles. Empty on the eager build (the
   // bridges do not exist yet) and populated on the settled rebuild.
   const decks = bridgeDecks(group);
+  const foot = bridgeFootprint(group);
   routes.forEach((route, ri) => {
     const S = route.samples;
     const n = S.length;
@@ -2689,7 +2793,7 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
     // so: it is read-only, it is the only source that is actually right, and if
     // bridges.js ever stops naming its decks 'bridge' this degrades to no
     // approach guardrails rather than to wrong ones.
-    const { onDeck, wetD } = deckDistances(route, decks);
+    const { onDeck, wetD } = deckDistances(route, decks, foot);
 
     for (const side of [1, -1]) {
       // --- 1. march the stations -----------------------------------------
@@ -2752,6 +2856,23 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
           if (side === outside && (r < G_ALWAYS || (r < G_SHARP && costlyToLeave(p)))) {
             e.guard = true; e.spec = true;
           }
+          // 1b. A SEVERE DROP, on the outside of any real bend, is not a matter
+          // of taste and is never rationed.
+          //
+          // Rule 1 asks whether it is "costly to leave", which G_DROP sets at
+          // 2.0 m — a threshold that treats a two-metre bank and a twelve-metre
+          // one as the same fact, and then hands both to the same budget. The
+          // client marked places where steel was missing and every one of them
+          // was this: MEASURED by walking the route and taking the drop on the
+          // DRAWN surface either side of the carriageway, four clusters at radii
+          // 54-133 m — all inside the 140 m this module itself calls a corner —
+          // with falls of 7.7 to 12.6 m and nothing on either verge.
+          //
+          // A fall like that is the difference between a spin and the end of the
+          // run, so it gets steel whether or not the coverage budget has room.
+          else if (side === outside && r < G_SHARP && p.bank > G_SEVERE) {
+            e.guard = true; e.spec = true;
+          }
           // 2. A FAST corner above a real ravine — too wide for rule 1 to call
           // sharp, but the car arrives at it flat out. Only a CANDIDATE: see the
           // budget below. Left un-rationed once, this world's roads run round
@@ -2773,6 +2894,10 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
           }
         }
         st.push(e);
+        // DIAGNOSTICS. Every question about "why is there no rail here" so far
+        // has been answered by guesswork, and four guesses in a row were wrong.
+        // The decision is cheap to keep; keeping it makes the next one a query.
+        DECISIONS.push(e);
       }
 
       // --- 2. ration the steel --------------------------------------------
@@ -3235,6 +3360,8 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
       };
     },
     breakSpeed: BREAK_SPEED,
+    /** Diagnostics: what the layout decided at every station of the last compile. */
+    get decisions() { return DECISIONS; },
   };
 }
 
@@ -3457,6 +3584,7 @@ function auditSlopes(routes, terrain, opts = {}) {
  */
 function auditBarriers(routes, terrain, group, segments) {
   const decks = bridgeDecks(group);
+  const foot = bridgeFootprint(group);
   const guards = segments.filter((s) => s.kind === 'guard');
   // Bucket the steel so the proximity test is O(1) per station rather than O(n).
   const CELL = 16;
@@ -3493,7 +3621,7 @@ function auditBarriers(routes, terrain, group, segments) {
     const S = route.samples;
     const n = S.length;
     if (n < 8) return;
-    const { onDeck, wetD } = deckDistances(route, decks);
+    const { onDeck, wetD } = deckDistances(route, decks, foot);
     for (const side of [1, -1]) {
       // Walked at the barrier's own bay pitch, so a "missing" run is countable
       // in bays and directly comparable with what compile() emits.

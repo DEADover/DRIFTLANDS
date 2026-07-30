@@ -148,9 +148,9 @@ if (report.guardGaps) {
   line('STEEL OWED AND MISSING — independent of roads.audit()');
   line(`  stations walked ${g.checked}   dangerous-and-unsteeled ${g.dangerous}`);
   line(`  with NOTHING at all ${g.nothingAtAll}   with timber only ${g.timberOnly}`);
-  line('    trouble   fall    radius  entry   protected by      at');
+  line('    fall    radius   this side      | other side fall / has     at');
   for (const r of g.runs) {
-    line(`  ${String(r.trouble).padStart(8)}  ${f(r.fall, 1).padStart(5)} m  ${String(r.radius).padStart(5)} m  ${f(r.entry, 0).padStart(4)}   ${String(r.protectedBy).padEnd(12)}  (${r.x}, ${r.z})  x${r.stations}`);
+    line(`  ${f(r.fall, 1).padStart(5)} m  ${String(r.radius).padStart(5)} m  ${String(r.protectedBy).padEnd(12)} | ${f(r.otherFall ?? 0, 1).padStart(5)} m ${String(r.otherBy ?? '?').padEnd(8)}  (${r.x}, ${r.z})  x${r.stations}`);
   }
 }
 

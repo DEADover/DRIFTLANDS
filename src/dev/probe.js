@@ -347,9 +347,17 @@ export function auditGuardGaps(game, {
     const s = game.roads.sample(i / stations);
     if (s) S.push(s);
   }
+  // CURVATURE OVER THE SAME BASELINE roads.js USES.
+  //
+  // A three-point stencil at ~4 m spacing is mostly sampling noise: it invented
+  // an 82 m radius where roads.js, which smooths curvature over 24 m, sees an
+  // open sweep. Comparing a noisy derivative against a smoothed one is how you
+  // manufacture a disagreement out of nothing, so this differentiates over the
+  // same 24 m and the two are then arguing about the same road.
+  const W = Math.max(1, Math.round(12 / (3577 / S.length)));
   const gaps = [];
-  for (let i = 1; i < S.length - 1; i++) {
-    const a = S[i - 1], b = S[i], c = S[i + 1];
+  for (let i = W; i < S.length - W; i++) {
+    const a = S[i - W], b = S[i], c = S[i + W];
     let dh = c.heading - a.heading;
     while (dh > Math.PI) dh -= 2 * Math.PI;
     while (dh < -Math.PI) dh += 2 * Math.PI;
@@ -393,12 +401,34 @@ export function auditGuardGaps(game, {
     const n = nearest(ex, ez);
     const covered = n.d <= reach;
     if (covered && n.kind === 'guard') continue;         // steel present: fine
+
+    // THE OTHER SIDE, ALWAYS. roads.js decides `outside` from its own smoothed
+    // curvature and its own sign convention; this audit derives the side from
+    // the raw heading. If those two disagree, an audit that only ever looks at
+    // one side reports a missing rail that is standing on the opposite verge —
+    // so record both and let the reader see it.
+    let oEdge = 0;
+    for (let u = 2; u <= 26; u += 0.5) {
+      if (!game.roads.isOnRoad(b.x - rx * side * u, b.z - rz * side * u)) { oEdge = u; break; }
+    }
+    const ox = b.x - rx * side * oEdge, oz = b.z - rz * side * oEdge;
+    const oTop = surf(ox, oz);
+    let oFall = 0;
+    if (oTop) {
+      for (let u = 1; u <= look; u += 1) {
+        const d2 = surf(ox - rx * side * u, oz - rz * side * u);
+        if (d2) oFall = Math.max(oFall, oTop.y - d2.y);
+      }
+    }
+    const on = nearest(ox, oz);
     gaps.push({
       x: +ex.toFixed(1), z: +ez.toFixed(1),
       radius: Math.round(radius), fall: +fall.toFixed(1), fallAt,
       entry: +entry.toFixed(1),
       protectedBy: covered ? n.kind : 'nothing',
       nearestBay: covered ? +n.d.toFixed(1) : null,
+      otherFall: +oFall.toFixed(1),
+      otherBy: on.d <= reach ? on.kind : 'nothing',
       trouble: +(fall * entry).toFixed(0),
     });
   }
