@@ -243,9 +243,18 @@ export class Game {
    */
   surfaceHeight(x, z) {
     const deck = this.bridges.heightAt(x, z);
-    if (deck !== null && deck !== undefined) return deck;
     const road = this.roads.heightAt?.(x, z);
-    if (road !== null && road !== undefined) return road;
+    // TOPMOST, not deck-wins. Over the last few metres of a span the deck is
+    // deliberately eased back down onto the road's own height so the car does
+    // not hit a step getting on, which means the ribbon is legitimately drawn
+    // ABOVE the planks there — by up to 0.46 m, measured. Preferring the deck
+    // put the wheels that far under the surface at every abutment: after the
+    // terrain and road queries were made exact, those six stations were the
+    // entire remaining sink (max 0.608 m, and every one of the worst patches
+    // was labelled road-drawn / bridge-physics).
+    if (deck != null && road != null) return Math.max(deck, road);
+    if (deck != null) return deck;
+    if (road != null) return road;
     // `drawnHeightAt`, not `heightAt`. The second is the analytic field the
     // landforms are authored in; the first is the flat-shaded triangle actually
     // on screen at this point. Measured against a raycast into the mesh, the
@@ -257,12 +266,17 @@ export class Game {
 
   groundAt(x, z) {
     const deck = this.bridges.heightAt(x, z);
-    if (deck !== null && deck !== undefined) {
+    const road = this.roads.heightAt?.(x, z);
+
+    // Whichever is drawn on top wins — see surfaceHeight. `onBridge` follows the
+    // surface the wheels are actually resting on, not merely whether a deck
+    // exists here, so the abutment ramp reports 'road' while the car is still on
+    // gravel and flips to 'bridge' the moment the planks come up to meet it.
+    if (deck != null && (road == null || deck >= road)) {
       return { height: deck, normal: UP.clone(), onBridge: true };
     }
 
-    const road = this.roads.heightAt?.(x, z);
-    if (road !== null && road !== undefined) {
+    if (road != null) {
       // Normal from the surface we are actually on, sampled wide enough to
       // ignore facet tooth but tight enough to keep real banking.
       const e = 2.2;
