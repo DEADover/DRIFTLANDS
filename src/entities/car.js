@@ -284,7 +284,16 @@ const WHEEL_R = 0.46;
  * disagreeing by half a metre, the overpayment disappears, and this should come
  * down to a couple of centimetres.
  */
-const SEAT_TOL = 0.06;
+const SEAT_TOL = 0.02;
+
+/**
+ * How far a wheel may extend below its static position to reach the ground.
+ *
+ * A real rally car has ~0.20 m of droop; this is the visual equivalent. Bounded
+ * on purpose: past the stroke the wheel stays in the air, which is what should
+ * happen when the car is cocked over a crest or hanging a wheel off a verge.
+ */
+const DROOP_MAX = 0.20;
 /** Scratch vector for per-wheel ground queries; avoids a per-frame allocation. */
 const _wp = new THREE.Vector3();
 
@@ -313,6 +322,8 @@ export class CarView {
     this.suspension = this.wheels.map(() => 0);
     /** Low-passed rigid lift that seats the deepest wheel (see update()). */
     this._seatLift = 0;
+    /** Low-passed per-wheel spring extension toward the ground (see update()). */
+    this._droop = [0, 0, 0, 0];
     this.wheelSpin = 0;
     this._roll = 0;
     this._pitch = 0;
@@ -457,15 +468,38 @@ export class CarView {
         const need = sampleHeight(_wp.x, _wp.z) - (_wp.y - WHEEL_R) - SEAT_TOL;
         if (need > lift) lift = need;
       }
-      if (lift > 0) {
-        // Smoothed, or facet-to-facet steps in the mesh arrive as a jolt. The
-        // rise is quick because ground can only push, and it is bounded because
-        // this is a correction, not a suspension.
-        this._seatLift += (Math.min(lift, 0.55) - this._seatLift) * k(30);
-        this.root.position.y += this._seatLift;
-      } else {
-        this._seatLift += (0 - this._seatLift) * k(12);
-        this.root.position.y += this._seatLift;
+      // Smoothed, or facet-to-facet steps in the mesh arrive as a jolt. The rise
+      // is quick because ground can only push; the release is slower.
+      const want = lift > 0 ? Math.min(lift, 0.55) : 0;
+      this._seatLift += (want - this._seatLift) * k(lift > 0 ? 30 : 12);
+      this.root.position.y += this._seatLift;
+
+      /**
+       * DROOP — the springs take up what the rigid body cannot.
+       *
+       * Seating the deepest wheel is the right thing to do with a RIGID car, and
+       * it necessarily leaves the other three in the air: a 4.2 x 1.9 m
+       * rectangle resting on a faceted surface touches at one corner and hangs
+       * at the rest. Measured with the ground query now exact, that was a median
+       * 0.109-0.154 m of daylight under the other wheels — real rigid-body
+       * behaviour, and it reads on screen as a hovering car.
+       *
+       * A real car does not hover, because its suspension extends. So extend it:
+       * each wheel is allowed to drop toward its own ground, within a bounded
+       * travel. This is NOT the per-wheel correction pass that had to be deleted.
+       * That one moved wheels to make up for a chassis placed by a different
+       * rule, so the two fought every frame. This runs after the chassis is
+       * final, only ever extends, and is clamped to a real suspension stroke —
+       * past the stroke the wheel stays in the air, which is exactly what should
+       * happen when a car is cocked over a crest.
+       */
+      this.root.updateMatrixWorld(true);
+      for (let i = 0; i < 4; i++) {
+        this.wheels[i].getWorldPosition(_wp);
+        const gap = (_wp.y - WHEEL_R) - sampleHeight(_wp.x, _wp.z);
+        const droop = clamp(gap, 0, DROOP_MAX);
+        this._droop[i] += (droop - this._droop[i]) * k(18);
+        this.wheels[i].position.y -= this._droop[i];
       }
     }
 

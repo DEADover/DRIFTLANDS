@@ -246,7 +246,13 @@ export class Game {
     if (deck !== null && deck !== undefined) return deck;
     const road = this.roads.heightAt?.(x, z);
     if (road !== null && road !== undefined) return road;
-    return this.terrain.heightAt(x, z);
+    // `drawnHeightAt`, not `heightAt`. The second is the analytic field the
+    // landforms are authored in; the first is the flat-shaded triangle actually
+    // on screen at this point. Measured against a raycast into the mesh, the
+    // analytic field is 0.115 m out on average and 3.29 m out at worst, while
+    // the drawn query is exact to 1.2e-12 m. Every metre of that difference used
+    // to arrive as a wheel inside the hill.
+    return this.terrain.drawnHeightAt(x, z);
   }
 
   groundAt(x, z) {
@@ -268,9 +274,30 @@ export class Game {
       return { height: road, normal: n, onBridge: false, onRoad: true };
     }
 
+    /**
+     * HEIGHT FROM THE TRIANGLE, SLOPE FROM THE HILLSIDE.
+     *
+     * `drawnNormalAt` returns the true face normal, and for placing a wheel that
+     * is exactly right. As the gradient the CAR fights it is wrong: the facets
+     * are metres across and their normals are piecewise constant, so a car that
+     * spans 4.2 m gets handed the tilt of whichever single triangle its navel
+     * happens to be over. Off-road that repeatedly reads steeper than the
+     * hillside really is, and `_stepVertical`'s bleed above 0.53 then stops the
+     * car dead on ground it should have coasted down.
+     *
+     * MEASURED (tools/collide-live.mjs, 90 s of autopilot in alpine): with the
+     * face normal the run spent 51.8% of its time under 3 m/s and ended
+     * stationary at (-128, 414) on a facet reading 0.693. Central differences
+     * over a 2.5 m baseline average several facets — about the span of the
+     * wheelbase, which is the right scale for "how steep is this for a car".
+     */
+    const e = 2.5;
+    const D = this.terrain.drawnHeightAt.bind(this.terrain);
     return {
-      height: this.terrain.heightAt(x, z),
-      normal: this.terrain.normalAt(x, z),
+      height: D(x, z),
+      normal: new THREE.Vector3(
+        D(x - e, z) - D(x + e, z), 2 * e, D(x, z - e) - D(x, z + e)
+      ).normalize(),
       onBridge: false,
       onRoad: false,
     };

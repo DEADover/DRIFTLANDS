@@ -1653,6 +1653,25 @@ function sectionY(sm, u) {
 }
 
 /**
+ * THE GROUND THE RIBBON IS BUILT AGAINST — the surface that is DRAWN, never the
+ * analytic field.
+ *
+ * Everything below this line puts a vertex, a post foot or a query answer at a
+ * height that has to agree with a triangle on screen, and `terrain.heightAt` is
+ * not that triangle: it is the smooth field the terrain mesh SAMPLES. Measured
+ * on the shipped build, over 4000 random points the mesh sat 0.115 m from the
+ * field on average and 3.29 m from it at worst. Every one of those metres was a
+ * green tongue across the ochre, a post in mid-air, or a wheel underground.
+ *
+ * Route PLANNING still uses the analytic field, and must: the cost grid, the
+ * corner injection and the wet test are choosing where landforms are, not
+ * touching them.
+ */
+function groundY(terrain, x, z) {
+  return terrain.drawnHeightAt(x, z);
+}
+
+/**
  * DRAPE. The carriageway is a designed surface — crown, camber, ruts, the bench
  * tilt — but the ground underneath it is a jittered mesh with ~10 m triangles,
  * and a designed plane WILL be speared by it: a high vertex two metres off the
@@ -1663,23 +1682,30 @@ function sectionY(sm, u) {
  * the carriageway quads are 3 m by 2 m, so a high ground vertex can sit BETWEEN
  * two road stations, above the quad that spans them, and shows as a green tongue
  * lying across the ochre. Taking the worst ground within a couple of metres
- * closes the gap the interpolation leaves; on a 1:10 slope it costs 0.16 m of
- * extra height, which is inside the ±0.45 m the car's raw-terrain ground
- * contact can absorb.
+ * closes the gap the interpolation leaves.
+ *
+ * THE OLD COMMENT HERE CLAIMED THE LIFT WAS FREE. It said the extra height "is
+ * inside the ±0.45 m the car's raw-terrain ground contact can absorb", and that
+ * was the bug: the physics asked `heightAt`, which returned `sectionY` — the
+ * DESIGN plane, with no drape in it at all — so the lift was not absorbed, it
+ * was simply invisible to the car. Measured across the carriageway, u = -6..+6,
+ * the wheel sat 0.13-0.27 m under the drawn gravel with a p95 of 0.88 m. The
+ * lift is real and it is sometimes a metre; the query below now goes through
+ * these same vertices, so it cannot be surprised by it again.
  *
  * MODULE LEVEL ON PURPOSE. This used to be a closure inside buildRibbonMesh, so
  * `auditSlopes` had to approximate the carriageway with max(sectionY, ground) —
  * and where the ground rose sharply just outside the carriageway the drape's
  * 1.7 m neighbour sample lifted the real edge vertex two metres above the
  * approximation. The audit duly reported a 60 degree "wall" between an edge that
- * was not there and a shoulder that was. One function, two callers.
+ * was not there and a shoulder that was. One function, three callers.
  */
 function drapeY(terrain, sm, u) {
   const cu = capU(sm, u);
   const px = sm.x + sm.nx * cu, pz = sm.z + sm.nz * cu;
-  let g = terrain.heightAt(px, pz);
+  let g = groundY(terrain, px, pz);
   for (const [ax, az] of [[sm.nx, sm.nz], [-sm.nx, -sm.nz], [sm.tx, sm.tz], [-sm.tx, -sm.tz]]) {
-    const h = terrain.heightAt(px + ax * 1.7, pz + az * 1.7);
+    const h = groundY(terrain, px + ax * 1.7, pz + az * 1.7);
     if (h > g) g = h;
   }
   return Math.max(sectionY(sm, cu), g + LIFT);
@@ -1707,7 +1733,12 @@ function drapeY(terrain, sm, u) {
  * step) and `auditSlopes` reports the residual.
  */
 function apronProfile(terrain, sm, side, base, yEdge, cap, wobble) {
-  const gAt = (uu) => terrain.heightAt(sm.x + sm.nx * side * uu, sm.z + sm.nz * side * uu);
+  // The toe of a batter has to LAND on the ground, and "the ground" is the
+  // triangle, not the field it was sampled from. Landing on the analytic value
+  // left the last facet floating or buried by the chord sag of whatever terrain
+  // cell it daylighted into — a visible step at the exact place this march
+  // exists to remove one.
+  const gAt = (uu) => groundY(terrain, sm.x + sm.nx * side * uu, sm.z + sm.nz * side * uu);
   // A/B HARNESS. Set globalThis.__ROAD_LEGACY_BATTER before the world builds
   // and the ribbon is built with the model the client rejected: march at 1.2 m
   // for at most 5 m, then THREE facets that interpolate to the ground whether it
@@ -1791,6 +1822,69 @@ function apronProfile(terrain, sm, side, base, yEdge, cap, wobble) {
     else { last[1] = g; last[2] = 1; }
   }
   return { pts, landed, benches };
+}
+
+/**
+ * THE WHOLE DRAWN CROSS-SECTION OF ONE STATION, AS ONE MONOTONE TABLE.
+ *
+ * Assembled from the three things the mesh is actually built out of, in the
+ * order the mesh draws them: the left batter walked back in from its toe, the
+ * carriageway row (post-LIP-clamp, so it is the row that got emitted), and the
+ * right batter walked out to its toe. Every entry is stored at `capU`'s lateral
+ * position, because `st()` puts the VERTEX there — inside a bend the nominal
+ * offsets and the drawn ones are different numbers and the query has to use the
+ * drawn one.
+ *
+ * WHY A TABLE AND NOT A FUNCTION. The old `heightAt` re-derived the surface from
+ * `sectionY`, which knows nothing about the drape, the lip clamp, the shoulder
+ * grading or the batter; measured across the carriageway that was 0.13-0.27 m of
+ * sink, and at u = ±8..9 — the shoulder, one metre outside where the old query
+ * gave up and returned null — it was 0.41-0.55 m mean, 8.9 m worst, with 76-84%
+ * of samples reporting a different SURFACE from the one on screen. Interpolating
+ * the emitted vertices cannot drift from them, so that class of bug is gone
+ * rather than reduced.
+ */
+function buildProfile(sm, row, sides) {
+  const L = sides[-1].pts, R = sides[1].pts;
+  const NB = row.u.length;
+  const n = L.length + NB + R.length;
+  const U = new Float64Array(n), Y = new Float64Array(n);
+  let p = 0;
+  for (let q = L.length - 1; q >= 0; q--) { U[p] = capU(sm, -L[q][0]); Y[p] = L[q][1]; p++; }
+  for (let j = 0; j < NB; j++) { U[p] = row.u[j]; Y[p] = row.y[j]; p++; }
+  for (let q = 0; q < R.length; q++) { U[p] = capU(sm, R[q][0]); Y[p] = R[q][1]; p++; }
+  // capU can flatten several outer stations onto the same lateral position on
+  // the inside of a hairpin, so the table is non-DECREASING, not increasing.
+  // The search below treats a zero-width span as a step and takes the outer
+  // value, which is the sliver the mesh actually shows there.
+  for (let q = 1; q < n; q++) if (U[q] < U[q - 1]) U[q] = U[q - 1];
+  return { u: U, y: Y };
+}
+
+/** Scratch for the two stations `heightAt` blends between. */
+const _secA = { y: 0, reach: 0 };
+const _secB = { y: 0, reach: 0 };
+
+/**
+ * Height of the drawn cross-section at signed lateral offset `u`, plus how far
+ * out this side draws anything at all. Returns false — with `y` clamped to the
+ * nearest end of the profile — when `u` is past the toe.
+ */
+function drawnSection(sm, u, out) {
+  const P = sm._prof;
+  if (!P) { out.y = 0; out.reach = 0; return false; }
+  const U = P.u, Y = P.y, n = U.length;
+  out.reach = u < 0 ? -U[0] : U[n - 1];
+  if (u <= U[0]) { out.y = Y[0]; return u === U[0]; }
+  if (u >= U[n - 1]) { out.y = Y[n - 1]; return u === U[n - 1]; }
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) {
+    const m = (lo + hi) >> 1;
+    if (U[m] <= u) lo = m; else hi = m;
+  }
+  const d = U[hi] - U[lo];
+  out.y = d > 1e-9 ? Y[lo] + (Y[hi] - Y[lo]) * ((u - U[lo]) / d) : Y[hi];
+  return true;
 }
 
 class Strip {
@@ -1967,7 +2061,7 @@ function buildRibbonMesh(ctx, route, colours, name) {
       const vAbs = sm.hw * hm + sm.verge * rg;
       const v = side * vAbs;
       const yE = edgeY[i * 2 + (side > 0 ? 1 : 0)];
-      const gv = terrain.heightAt(sm.x + sm.nx * capU(sm, v), sm.z + sm.nz * capU(sm, v));
+      const gv = groundY(terrain, sm.x + sm.nx * capU(sm, v), sm.z + sm.nz * capU(sm, v));
       // shoulder height: half way from the carriageway edge down to the ground,
       // and never below the ground it is standing on
       // A QUARTER OF THE WAY DOWN, NOT HALF. The shoulder used to fall half way
@@ -2006,12 +2100,19 @@ function buildRibbonMesh(ctx, route, colours, name) {
       const cap = sm.wet ? 1.2 : Math.max(SKIRT_MIN, (side > 0) === (sm.k > 0) ? inner : APRON_MAX);
       const wob = clamp(1 + ragged(sm, side) * 0.30, 0.72, 1.3);
       const ap = apronProfile(terrain, sm, side, vAbs, yV, cap, wob);
-      sides[side] = { e, yE, v, yV, cut: yE + 0.5 < terrain.heightAt(sm.x + sm.nx * capU(sm, v), sm.z + sm.nz * capU(sm, v)), ...ap };
+      // Same sample as `gv` above, and it has to be the same NUMBER too: a face
+      // painted as a cutting while its geometry was built against a different
+      // ground is how the two disagree in the first place.
+      sides[side] = { e, yE, v, yV, cut: yE + 0.5 < gv, ...ap };
     }
     APRON.push(sides);
     sm._apron = sides;   // diagnostics: auditSlopes reads this
     // ...and so is the finished carriageway row, clamp and all.
     sm._row = { u: rowU.subarray(i * NB, i * NB + NB), y: rowY.subarray(i * NB, i * NB + NB) };
+    // The two caches above, spliced into the single monotone table `heightAt`
+    // reads. Built here and only here, so the query cannot be looking at a road
+    // the builder did not emit.
+    sm._prof = buildProfile(sm, sm._row, sides);
   }
 
   // Scratch, so the inner loop allocates nothing.
@@ -2748,19 +2849,65 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
         // road's own shoulder (below), so where the lake laps against the fill
         // the fence ends up standing on the embankment at road level — which is
         // exactly where a fence beside a reservoir road is.
-        const roadYAt = (uu) =>
-          lerp(sectionY(e.a, capU(e.a, uu)), sectionY(e.b, capU(e.b, uu)), e.t);
+        // THE RAIL IS BOLTED TO THE CARRIAGEWAY AS BUILT, NOT AS DESIGNED.
+        //
+        // `sectionY` is the design plane; the emitted ribbon is `drapeY` of it,
+        // which lifts the edge above the ground by up to 0.67 m at the contact
+        // patches. A beam referenced to the design plane sinks into the road it
+        // is protecting by exactly that lift. So the reference is the drawn edge
+        // vertex, carried outboard of it on the design section's own camber
+        // (the post stands past the last vertex the ribbon emits).
+        const roadEdgeY = (sm, uu) => {
+          const ap = sm._apron;
+          if (!ap) return sectionY(sm, capU(sm, uu));
+          const s = ap[uu < 0 ? -1 : 1];
+          return s.yE + (sectionY(sm, capU(sm, uu)) - sectionY(sm, s.e));
+        };
+        const roadYAt = (uu) => lerp(roadEdgeY(e.a, uu), roadEdgeY(e.b, uu), e.t);
+        // ...AND THE POST STANDS ON WHAT IS DRAWN UNDER IT.
+        //
+        // This used to read `terrain.heightAt` — neither the terrain mesh nor,
+        // where G_OFFSET actually puts the post, the surface it is standing on
+        // at all: 1.35 m outboard of the verge is the road's OWN batter, a metre
+        // of fill above the hillside. Measured on the shipped build, 8.8% of
+        // posts floated clear of the drawn ground (worst 10.9 m, at (412, 193))
+        // and 31.3% were buried more than 0.6 m in it. Ask the earthworks first
+        // and the terrain only outside them.
+        const footGround = (px, pz) => {
+          const ua = (px - e.a.x) * e.a.nx + (pz - e.a.z) * e.a.nz;
+          const ub = (px - e.b.x) * e.b.nx + (pz - e.b.z) * e.b.nz;
+          const oa = drawnSection(e.a, ua, _secA);
+          const ob = drawnSection(e.b, ub, _secB);
+          return (oa || ob) ? lerp(_secA.y, _secB.y, e.t) : groundY(terrain, px, pz);
+        };
         const off0 = guard ? G_OFFSET : 2.15;
         let off = off0, x = 0, z = 0, g = 0, ok = false;
+        // Best offset that clears the water but leaves the post standing on
+        // nothing — kept so this walk can never delete a bay that the old rule
+        // would have placed. `audit()` owes 221 bay-stations and misses none;
+        // trading a floating post for a hole in a guardrail is not a fix.
+        let bx = 0, bz = 0, bg = 0, bo = 0, bok = false;
         for (; off > 0.5; off -= 0.45) {
           const uu = side * (e.hw + e.verge + off);
           x = e.cx + e.nx * uu; z = e.cz + e.nz * uu;
+          const grd = footGround(x, z);
           // A post never sinks more than FOOT_DROP below the carriageway. It
           // keeps the fence following the ground over ordinary undulation, and
           // stops it walking down a bank or disappearing under a lake.
-          g = Math.max(terrain.heightAt(x, z) - 0.14, roadYAt(uu) - FOOT_DROP);
-          if (g > waterLevel + 0.25) { ok = true; break; }
+          g = Math.max(grd - 0.14, roadYAt(uu) - FOOT_DROP);
+          if (g <= waterLevel + 0.25) continue;
+          if (!bok) { bok = true; bx = x; bz = z; bg = g; bo = off; }
+          // ...but FOOT_DROP is a floor, not a foundation. Inside a hairpin the
+          // batter is capped to stop neighbouring sections overlapping, so it can
+          // stop a few centimetres short of where G_OFFSET wants the post and the
+          // next drawn thing is the hillside eleven metres below. Measured: the
+          // worst four posts in this world hung 10.4-11.4 m in the air, all of
+          // them at (389..412, 186..193). Walking one step further in puts the
+          // foot back on the road's own earthworks, which is where a fence beside
+          // a fill embankment actually stands.
+          if (g - grd < 0.5) { ok = true; break; }
         }
+        if (!ok && bok) { x = bx; z = bz; g = bg; off = bo; ok = true; }
         if (!ok) { prev = null; continue; }
         const u = side * (e.hw + e.verge + off);
         // Timber is gated by the coverage noise; steel is a deliberate act and
@@ -2977,7 +3124,7 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
         // A touch proud of the turf: a splinter lying flat is 0.86 x 0.15 m and
         // the grass swallowed most of them at rest, which threw away the whole
         // point of debris — the wreckage is the evidence of the gap.
-        const gy = terrain.heightAt(p.px, p.pz) + 0.10;
+        const gy = groundY(terrain, p.px, p.pz) + 0.10;
         if (p.py <= gy) {
           p.py = gy;
           if (Math.abs(p.vy) < 1.6) {
@@ -3120,7 +3267,11 @@ function auditSlopes(routes, terrain, opts = {}) {
       const ap = sm._apron;
       if (!ap) continue;
       stations++;
-      const gr = (u) => terrain.heightAt(sm.x + sm.nx * u, sm.z + sm.nz * u);
+      // The comment below says "the VISIBLE surface" and it now means it: the
+      // batter is built against the drawn terrain, so auditing it against the
+      // analytic field would attribute facets to whichever of the two happened
+      // to be higher at that sample rather than to whichever one the camera sees.
+      const gr = (u) => groundY(terrain, sm.x + sm.nx * u, sm.z + sm.nz * u);
 
       // --- assemble the profile, most negative offset first -----------------
       const prof = [];   // [signed u, y, 'road' | 'land']
@@ -3879,7 +4030,23 @@ export function createRoadNetwork(ctx) {
   group.add(furniture.group);
 
   // ---- queries ----
-  const index = new RoadIndex(26);
+  // THE INDEX HAS TO BE ABLE TO REACH THE TOE OF THE EARTHWORKS.
+  //
+  // `nearest` scans the 3x3 block of cells around the query point, so it is only
+  // GUARANTEED to find a station within one cell width. At 26 m that was fine
+  // for a query that gave up at hw + verge (~7 m); now that the answer covers
+  // the batter — which marches up to APRON_MAX past the verge — a point 30 m out
+  // would have found the station in some cells and not in others, which is the
+  // same "sometimes road, sometimes terrain" flicker in a new place. Size the
+  // cell from the profiles that were actually built.
+  let reachMax = 0;
+  for (const r of routes) {
+    for (const sm of r.samples) {
+      const P = sm._prof;
+      if (P) reachMax = Math.max(reachMax, -P.u[0], P.u[P.u.length - 1]);
+    }
+  }
+  const index = new RoadIndex(Math.max(26, Math.ceil(reachMax + 3)));
   for (const r of routes) index.add(r);
 
   const isOnRoad = (x, z) => {
@@ -3896,29 +4063,104 @@ export function createRoadNetwork(ctx) {
     const h = index.nearest(x, z);
     return !!h && h.d <= h.sm.hw + h.sm.verge + 6.0;
   };
+  /**
+   * THE HEIGHT OF THE ROAD, MEANING THE HEIGHT OF THE TRIANGLES.
+   *
+   * Two things changed here and they are the whole of this round's road fix.
+   *
+   * 1. It reads the emitted cross-section (`drawnSection`, fed by the row and
+   *    apron caches the mesh builder writes) instead of `sectionY`. `sectionY`
+   *    is the DESIGN plane; the built ribbon is `drapeY` of it, which lifts a
+   *    vertex above the ground rather than let the terrain spear the road, by up
+   *    to a couple of metres. The query knew nothing about that lift, so the
+   *    physics put the wheel on the design plane and the player watched it sink
+   *    into the gravel: mean 0.125 m, p95 0.415 m, max 0.674 m over the road.
+   *
+   * 2. It answers over the WHOLE drawn footprint, not just `hw + verge`. Past
+   *    that it used to return null, the physics fell through to the terrain, and
+   *    the surface still being DRAWN there was the road's own shoulder and
+   *    batter — up to nine metres of it above the ground it was standing on.
+   *    Binned by lateral offset, u = ±8..9 was the worst place in the world to
+   *    put a wheel: 0.41-0.55 m mean sink, 8.9 m worst, and 76-84% of samples
+   *    with the physics on a different surface from the renderer. That band is
+   *    the outside edge of the carriageway — where a rally driver spends the
+   *    corner — which is why this reads to the player as "the car falls through
+   *    the edge of the road".
+   *
+   * Null now means one thing only: roads.js draws nothing here, so ask the
+   * terrain.
+   */
   const heightAt = (x, z) => {
     const h = index.nearest(x, z);
-    if (!h || h.d > h.sm.hw + h.sm.verge) return null;
+    if (!h) return null;
     const a = h.sm;
-    const u = (x - a.x) * a.nx + (z - a.z) * a.nz;
+    const ua = (x - a.x) * a.nx + (z - a.z) * a.nz;
 
-    // Longitudinal position between this station and the next one along.
+    // Longitudinal position between this station and the next one along. The
+    // ribbon is a quad strip, so between two stations the surface — and its
+    // outer edge — are linear in exactly this parameter.
     const route = a._route;
+    let b = null, t = 0;
     if (route && a._k !== undefined) {
       const arr = route.samples;
-      const ds = route.ds || 3;
-      const t = ((x - a.x) * a.tx + (z - a.z) * a.tz) / ds;   // -0.5..0.5 typically
-      const dir = t >= 0 ? 1 : -1;
-      const j = a._k + dir;
-      const b = (j >= 0 && j < arr.length) ? arr[j]
-              : (route.closed ? arr[((j % arr.length) + arr.length) % arr.length] : null);
-      if (b) {
-        const ub = (x - b.x) * b.nx + (z - b.z) * b.nz;
-        const w = Math.min(1, Math.abs(t));
-        return sectionY(a, u) * (1 - w) + sectionY(b, ub) * w;
-      }
+      t = ((x - a.x) * a.tx + (z - a.z) * a.tz) / (route.ds || 3);   // -0.5..0.5 typically
+      const j = a._k + (t >= 0 ? 1 : -1);
+      b = (j >= 0 && j < arr.length) ? arr[j]
+        : (route.closed ? arr[((j % arr.length) + arr.length) % arr.length] : null);
     }
-    return sectionY(a, u);
+
+    const okA = drawnSection(a, ua, _secA);
+    if (!b) return okA ? _secA.y : null;
+    const ub = (x - b.x) * b.nx + (z - b.z) * b.nz;
+    const okB = drawnSection(b, ub, _secB);
+    if (!okA && !okB) return null;
+
+    const w = Math.min(1, Math.abs(t));
+    // The toe of the earthworks wanders by a metre or two from station to
+    // station, so the footprint boundary is interpolated along the quad exactly
+    // as the height is. Testing it against either station alone puts a step in
+    // the answer where the mesh has a sliver.
+    const reach = _secA.reach * (1 - w) + _secB.reach * w;
+    if (Math.abs(ua) * (1 - w) + Math.abs(ub) * w > reach) return null;
+    const y = _secA.y * (1 - w) + _secB.y * w;
+
+    // ...AND THE ANSWER IS THE TOPMOST DRAWN SURFACE, NOT THE RIBBON'S OWN
+    // VERTEX.
+    //
+    // In a cutting the lip clamp deliberately lets the hillside win the last of
+    // the carriageway edge — "a ragged green tongue biting into the ochre", which
+    // is what an unsurfaced road's boundary does — and the shoulder is capped at
+    // 1:2 rather than hoisted to meet the cut face. Both are correct as pictures
+    // and both mean the terrain triangle, not the ribbon, is the thing a wheel
+    // would touch. Measured: 31 of 2400 contact patches had the drawn terrain
+    // standing over the ribbon, by 1.27 m on average and 2.15 m at (-90, 285),
+    // and every one of them was a place the car fell through the road into the
+    // hill. `auditSlopes` has always profiled the road as the higher of the two;
+    // now the query does too, and for the same reason.
+    const g = groundY(terrain, x, z);
+    return g > y ? g : y;
+  };
+
+  /**
+   * Outermost lateral offset at which roads.js still draws a surface, at the
+   * station nearest (x, z). bridges.js asked for this by name: its deck is wider
+   * than the carriageway and it needs to know where the road's own surface stops
+   * rather than guessing a half width.
+   *
+   * Signed input, unsigned answer, taken on the side the point is on — the two
+   * sides of a station rarely reach the same distance. Exactly on the centre
+   * line it returns the SMALLER of the two, which is the only width that is
+   * covered on both sides.
+   */
+  const outerEdgeAt = (x, z) => {
+    const h = index.nearest(x, z);
+    const P = h && h.sm._prof;
+    if (!P) return null;
+    const n = P.u.length;
+    const u = (x - h.sm.x) * h.sm.nx + (z - h.sm.z) * h.sm.nz;
+    if (u > 0) return P.u[n - 1];
+    if (u < 0) return -P.u[0];
+    return Math.min(-P.u[0], P.u[n - 1]);
   };
   const surfaceAt = (x, z) => {
     const h = index.nearest(x, z);
@@ -4451,6 +4693,13 @@ export function createRoadNetwork(ctx) {
     lookAhead,
     spawn,
     heightAt,
+    /**
+     * Outermost lateral offset (metres, unsigned) at which this module still
+     * draws a surface at the station nearest (x, z), or null off the network.
+     * `heightAt` answers everywhere inside it and null everywhere outside it, so
+     * the two are the same boundary described two ways.
+     */
+    outerEdgeAt,
     surfaceAt,
     length: main.length,
     colliders: furniture.colliders,

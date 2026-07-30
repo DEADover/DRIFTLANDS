@@ -7,9 +7,26 @@ import { HeightFns, hash01, clamp, smoothstep } from './landforms.js';
  * CONTRACT (game.js and the world builders depend on this):
  *   new Terrain({size, segments, seed}, palette, biome)
  *   .build()             -> THREE.Mesh, add it to the scene
- *   .heightAt(x, z)      -> number   analytic, safe at 120 Hz
- *   .normalAt(x, z, eps) -> Vector3  central differences
+ *   .heightAt(x, z)      -> number   analytic DESIGN field, safe at 120 Hz
+ *   .normalAt(x, z, eps) -> Vector3  central differences on the design field
+ *   .drawnHeightAt(x, z) -> number   the triangle that is actually on screen
+ *   .drawnNormalAt(x, z) -> Vector3  that triangle's face normal
  *   .mesh, .size, .segments
+ *
+ * TWO HEIGHTS, ON PURPOSE — read this before using either.
+ *
+ *   `heightAt` is the analytic field. Every world builder plans against it
+ *   (routes, lakes, prop scatter, landmark pads) and it must keep returning the
+ *   smooth field, because it is what DECIDES where the landforms are. It is not,
+ *   and never was, the height of the surface the player can see.
+ *
+ *   `drawnHeightAt` is that surface: the exact plane of the exact triangle
+ *   build() emitted, jitter, axis warp, alternating diagonal and all. Anything
+ *   that has to TOUCH the ground — a wheel, a fence post, the toe of an
+ *   embankment — asks this one. Measured on the shipped build before it existed,
+ *   the gap between the two ran to 2.14 m on a ridge (mean 1.28 m over the
+ *   terrain-borne contact patches), which is the whole of the "the car sinks
+ *   into the ground" complaint on bare terrain and most of it on the road.
  *
  * INTERNAL contract with biomes.js (the two files are owned together):
  *   biome.height(x, z, seed) -> number
@@ -61,6 +78,181 @@ export class Terrain {
     return new THREE.Vector3(hL - hR, 2 * eps, hD - hU).normalize();
   }
 
+  // -------------------------------------------------------------------------
+  // THE DRAWN SURFACE
+  //
+  // `heightAt` is a smooth field; the mesh is flat triangles through samples of
+  // it on a warped, jittered lattice. Inside a cell the two disagree by the sag
+  // of the chord — tens of centimetres on open ground, over two metres across a
+  // ridge — and every one of those centimetres is a wheel below the picture.
+  // These three methods answer with the plane of the triangle that is on
+  // screen, so nothing has to guess.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Invert the axis warp: given axis(s), recover s.
+   *
+   * axis(s) = a·s + (1-a)·s³ is strictly increasing on [-1, 1] (its derivative
+   * never falls below `a`), so Newton from s = y walks straight down to the one
+   * real root — three or four steps at a = 0.6. It only has to be good enough
+   * to name the right lattice column; the barycentric test below is what
+   * actually decides which triangle the point is in.
+   */
+  _axisInv(y) {
+    const a = this._lat.a;
+    if (a >= 1) return y;
+    const k = 1 - a;
+    let s = y;
+    for (let n = 0; n < 24; n++) {
+      const f = a * s + k * s * s * s - y;
+      const step = f / Math.max(a + 3 * k * s * s, 1e-9);
+      s -= step;
+      if (Math.abs(step) < 1e-13) break;
+    }
+    return s;
+  }
+
+  /**
+   * Height of lattice vertex `idx` AS DRAWN, memoised.
+   *
+   * Not simply `vy[idx]`, because water.js `carveLakes()` runs after build(),
+   * swaps `heightAt` for the carved field and re-drapes every mesh vertex in
+   * place to match — same x and z, new y. Reading the live `heightAt` therefore
+   * tracks the mesh through the carve; the cache is dropped wholesale the first
+   * time the function identity changes, which is exactly when the mesh moved.
+   *
+   * Math.fround because build() stores the vertex in a Float32Array: the drawn
+   * corner is the float32 of this number, and rounding here is the difference
+   * between agreeing with the triangle to 1e-6 m and to 1e-4 m.
+   */
+  _cornerY(idx) {
+    if (this._dyFn !== this.heightAt) {
+      this._dyFn = this.heightAt;
+      this._dyOk.fill(0);
+    }
+    if (!this._dyOk[idx]) {
+      this._dy[idx] = Math.fround(this.heightAt(this._lat.vx[idx], this._lat.vz[idx]));
+      this._dyOk[idx] = 1;
+    }
+    return this._dy[idx];
+  }
+
+  /**
+   * Barycentric test of one triangle in the XZ plane. On a hit the corner
+   * indices and weights are left in scratch fields — no object is allocated,
+   * because this runs a dozen-odd times per wheel per frame.
+   */
+  _tri(a, b, c, x, z) {
+    const { vx, vz } = this._lat;
+    const ax = vx[a], az = vz[a], bx = vx[b], bz = vz[b], cx = vx[c], cz = vz[c];
+    const den = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+    if (den === 0) return -Infinity;
+    const inv = 1 / den;
+    const w0 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) * inv;
+    const w1 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) * inv;
+    const w2 = 1 - w0 - w1;
+    const m = Math.min(w0, w1, w2);
+    if (m > this._bm) {
+      this._bm = m;
+      this._ta = a; this._tb = b; this._tc = c;
+      this._w0 = w0; this._w1 = w1; this._w2 = w2;
+    }
+    return m;
+  }
+
+  /**
+   * Both triangles of cell (i, j), split on the SAME diagonal build() chose.
+   * `(i + j) & 1` is the whole of it, and getting it backwards costs the full
+   * chord sag of the cell — which on a 10 m facet is the bug this file is
+   * fixing, not a rounding difference.
+   */
+  _cell(i, j, x, z) {
+    const VN = this._lat.VN;
+    const i00 = j * VN + i, i10 = i00 + 1, i01 = i00 + VN, i11 = i01 + 1;
+    if ((i + j) & 1) {
+      if (this._tri(i00, i01, i10, x, z) >= 0) return true;
+      if (this._tri(i10, i01, i11, x, z) >= 0) return true;
+    } else {
+      if (this._tri(i00, i11, i10, x, z) >= 0) return true;
+      if (this._tri(i00, i01, i11, x, z) >= 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Find the drawn triangle under (x, z). Returns false only when the point is
+   * off the mesh entirely.
+   *
+   * WHY A 3x3 SEARCH AND NOT A LOOKUP. The axis warp inverts exactly, so the
+   * REGULAR lattice cell is known in closed form — but pass B then slides every
+   * interior vertex by up to jitter/N in warp space, which is 0.2 of a cell.
+   * A point can therefore sit inside the quad one column over. ±1 is provably
+   * enough (the displacement is bounded), and the cached cell means the walk
+   * almost never happens twice for the same wheel.
+   */
+  _locate(x, z) {
+    const L = this._lattice();
+    const N = L.N;
+    this._bm = -Infinity;
+    if (this._li >= 0 && this._cell(this._li, this._lj, x, z)) return true;
+
+    let ci = Math.floor((this._axisInv(x / L.half) + 1) * 0.5 * N);
+    let cj = Math.floor((this._axisInv(z / L.half) + 1) * 0.5 * N);
+    if (!(ci >= 0)) ci = 0; else if (ci > N - 1) ci = N - 1;
+    if (!(cj >= 0)) cj = 0; else if (cj > N - 1) cj = N - 1;
+
+    for (let dj = 0; dj <= 2; dj++) {
+      const j = cj + (dj === 0 ? 0 : dj === 1 ? -1 : 1);
+      if (j < 0 || j > N - 1) continue;
+      for (let di = 0; di <= 2; di++) {
+        const i = ci + (di === 0 ? 0 : di === 1 ? -1 : 1);
+        if (i < 0 || i > N - 1) continue;
+        if (this._cell(i, j, x, z)) { this._li = i; this._lj = j; return true; }
+      }
+    }
+    // Nothing contained it. Outside the map there is no triangle at all; just
+    // inside the rim the best near-miss is the right answer, and the plane it
+    // names is the one the ray would have hit.
+    if (this._bm < -0.05) return false;
+    this._li = ci; this._lj = cj;
+    return true;
+  }
+
+  /**
+   * Height of the triangle that is actually drawn at (x, z). Falls back to the
+   * analytic field off the mesh, where there is nothing to disagree with.
+   */
+  drawnHeightAt(x, z) {
+    if (!this._locate(x, z)) return this.heightAt(x, z);
+    return this._cornerY(this._ta) * this._w0
+      + this._cornerY(this._tb) * this._w1
+      + this._cornerY(this._tc) * this._w2;
+  }
+
+  /**
+   * That triangle's face normal, oriented upward.
+   *
+   * Flat-shaded terrain has no other normal: the smooth `normalAt` is the
+   * gradient of a field the mesh only samples, and a car taking its roll from
+   * it sits visibly off the facet it is standing on.
+   */
+  drawnNormalAt(x, z, out) {
+    const v = out ?? new THREE.Vector3();
+    if (!this._locate(x, z)) return v.copy(this.normalAt(x, z));
+    const { vx, vz } = this._lat;
+    const a = this._ta, b = this._tb, c = this._tc;
+    const ax = vx[a], ay = this._cornerY(a), az = vz[a];
+    const e1x = vx[b] - ax, e1y = this._cornerY(b) - ay, e1z = vz[b] - az;
+    const e2x = vx[c] - ax, e2y = this._cornerY(c) - ay, e2z = vz[c] - az;
+    v.set(
+      e1y * e2z - e1z * e2y,
+      e1z * e2x - e1x * e2z,
+      e1x * e2y - e1y * e2x,
+    );
+    if (v.y < 0) v.negate();
+    return v.normalize();
+  }
+
   /** Prepared colour swatches, with graceful fallback to the legacy fields. */
   _swatches() {
     const p = this.palette;
@@ -83,15 +275,31 @@ export class Terrain {
     };
   }
 
-  build() {
+  /**
+   * THE VERTEX LATTICE, built once and kept.
+   *
+   * It used to live inside build() as three local arrays, which meant the only
+   * record of where the drawn vertices ended up was the position buffer — and
+   * nothing could ask "what is the height of the triangle at (x, z)?" without
+   * raycasting the scene. Hoisting it here changes not one number in the mesh
+   * (build() still reads exactly these arrays) and gives `drawnHeightAt` a cell
+   * it can regenerate the corners of in O(1).
+   *
+   * PASS B IS SEQUENTIAL AND THAT IS WHY THIS IS A TABLE, NOT A FUNCTION. The
+   * slope gate for vertex (i, j) reads its four lattice neighbours, and by the
+   * time it runs, (i-1, j) and (i, j-1) have ALREADY been jittered while
+   * (i+1, j) and (i, j+1) have not. So a vertex's position depends on the whole
+   * rectangle below-left of it. Recomputing one cell on demand would have to
+   * replay that cone; storing the lattice costs 1.2 MB at N=320 and replays
+   * nothing.
+   */
+  _lattice() {
+    if (this._lat) return this._lat;
     const N = this.segments;
-    const S = this.size;
-    const half = S / 2;
+    const half = this.size / 2;
     const seed = this.seed;
     const B = this.biome;
-    const cols = this._swatches();
 
-    // --- vertex lattice ----------------------------------------------------
     // Axis warp: s -> s*(a + (1-a)s^2). The derivative is `a` at the centre and
     // 3-2a at the rim, so with a = 0.6 the drivable interior gets ~1.7x the
     // facet density of the rim without spending a single extra triangle.
@@ -143,6 +351,23 @@ export class Terrain {
         vy[idx] = B.height(x, z, seed);
       }
     }
+
+    this._lat = { N, VN, half, a, vx, vy, vz };
+    // Corner heights AS DRAWN, filled lazily by _cornerY (see there for why they
+    // are not just vy).
+    this._dy = new Float32Array(VN * VN);
+    this._dyOk = new Uint8Array(VN * VN);
+    this._dyFn = null;
+    this._li = -1; this._lj = -1;
+    return this._lat;
+  }
+
+  build() {
+    const N = this.segments;
+    const seed = this.seed;
+    const B = this.biome;
+    const cols = this._swatches();
+    const { VN, vx, vy, vz } = this._lattice();
 
     // --- triangles ---------------------------------------------------------
     const triCount = N * N * 2;
