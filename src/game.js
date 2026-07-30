@@ -545,7 +545,15 @@ export class Game {
     v.position.z = THREE.MathUtils.clamp(v.position.z, -lim, lim);
 
     if (v.isDrifting) {
-      this.driftScore += v.driftAngle * v.speed * dt * 6 * (this.feel.chainMultiplier ?? 1);
+      // 1.8, down from 6, because the chain ceiling went from x6 to x100.
+      //
+      // Left alone, a maxed chain would have scored sixteen times faster than
+      // before and made every other part of the stage irrelevant by arithmetic
+      // rather than by design. Cutting the base moves the reward decisively into
+      // CONTINUITY: a casual slide now banks about a third of what it used to,
+      // and a chain held to the top of the ladder banks five times the old
+      // maximum. That spread is the point of raising the ceiling at all.
+      this.driftScore += v.driftAngle * v.speed * dt * 1.8 * (this.feel.chainMultiplier ?? 1);
       if (!this._wasDrifting) { this.feel.event('driftStart'); this.audio.event('driftStart'); }
     } else {
       if (this._wasDrifting) {

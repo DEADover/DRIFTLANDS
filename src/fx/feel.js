@@ -27,6 +27,24 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const lerp = (a, b, t) => a + (b - a) * t;
 
 // Escalating chain: each step is a small, legible reward for keeping it lit.
+/**
+ * THE CHAIN LADDER — how long you have kept it sideways, and what that is worth.
+ *
+ * The ceiling was x6 at nine seconds, and x6 is a number you reach and then have
+ * nothing left to reach for. It is now x100 at forty-five, which changes what the
+ * scoreboard is FOR: not "did you drift" but "how long did you dare hold it".
+ *
+ * The rungs are geometric, not linear, so every step feels like the same
+ * proportional jump and the last one — 60 to 100 — is the payoff the whole run
+ * was building to. Forty-five seconds of continuously linked sliding, with only
+ * CHAIN_GRACE of straight line allowed between drifts, is a genuine trophy on a
+ * stage with this many corners; a casual run never sees the top of this table.
+ *
+ * The base scoring rate came DOWN at the same time (game.js) and had to: with the
+ * ceiling raised sixteenfold, leaving the rate alone would have made a maxed
+ * chain worth more than the rest of the stage put together by accident rather
+ * than by design.
+ */
 const CHAIN_STEPS = [
   { at: 0.0, mul: 1.0 },
   { at: 1.1, mul: 1.5 },
@@ -34,6 +52,14 @@ const CHAIN_STEPS = [
   { at: 4.0, mul: 3.0 },
   { at: 6.2, mul: 4.0 },
   { at: 9.0, mul: 6.0 },
+  { at: 12.0, mul: 8.0 },
+  { at: 15.5, mul: 11.0 },
+  { at: 19.5, mul: 15.0 },
+  { at: 24.0, mul: 20.0 },
+  { at: 29.0, mul: 28.0 },
+  { at: 34.5, mul: 40.0 },
+  { at: 40.5, mul: 60.0 },
+  { at: 45.0, mul: 100.0 },
 ];
 const CHAIN_GRACE = 0.85;      // s of straight-line allowed between linked drifts
 
@@ -153,9 +179,18 @@ export function createFeel(ctx = {}) {
       for (let i = 0; i < CHAIN_STEPS.length; i++) if (chainTime >= CHAIN_STEPS[i].at) step = i;
       if (step > chainStep) {
         // Stepping up the chain is the payoff beat: a snap of FOV and a nudge.
-        fovPunch += 0.7 + step * 0.22;
-        camera?.addShake?.(0.10 + step * 0.03);
-        this._burst(v, 10 + step * 6, 1.1 + step * 0.25);
+        //
+        // SCALED BY HOW FAR UP THE LADDER YOU ARE, not by the rung's index. These
+        // three lines used to read `step * 0.22` and friends, which was fine at
+        // six rungs and absurd at fourteen: the top step would have fired a
+        // 3.56 degree FOV punch against the 1.8 it was tuned for, half a unit of
+        // camera shake against 0.25, and 88 particles against 40. The fraction
+        // keeps the top of the ladder feeling exactly as it did, however many
+        // rungs get added underneath it.
+        const t = step / (CHAIN_STEPS.length - 1);
+        fovPunch += 0.7 + t * 1.1;
+        camera?.addShake?.(0.10 + t * 0.15);
+        this._burst(v, 10 + Math.round(t * 30), 1.1 + t * 1.25);
       }
       chainStep = step;
       this.chainMultiplier = CHAIN_STEPS[step].mul;

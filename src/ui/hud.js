@@ -319,7 +319,7 @@ export class Hud {
       txt = fmt(Math.round(this.liveShown));
       const ph = (this.liveShown % 100) / 100;         // small tick every 100 pts
       sc = 1 + 0.035 * Math.pow(1 - ph, 6) + clamp01(score / 2400) * 0.09;
-      multTxt = '×' + mult.toFixed(1);
+      multTxt = '×' + (mult >= 10 ? mult.toFixed(0) : mult.toFixed(1));
       multVis = mult > 1.04 ? 1 : 0;
       y = lerp(12, 0, easeOut(clamp01((score - 25) / 90)));
     } else if (paying) {
@@ -335,7 +335,7 @@ export class Hud {
       sc = 1 + 0.28 * (1 - easeOut(slam)) + 0.05 * (1 - count);
       vis = 1 - easeOut(lift);
       y = -36 * easeOut(lift);
-      multTxt = '×' + this.payMult.toFixed(1);
+      multTxt = '×' + (this.payMult >= 10 ? this.payMult.toFixed(0) : this.payMult.toFixed(1));
       multVis = this.payMult > 1.04 ? seg(pay, 0.05, 0.28) : 0;
       if (slam < 1) col = mixHex('#ffffff', col, easeOut(slam));   // white-hot flash
       bankVis = seg(pay, 0.7, 0.95) * (1 - easeOut(seg(pay, 1.4, 1.9)));
