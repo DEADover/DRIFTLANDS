@@ -57,7 +57,7 @@ const flatGround = () => ({ height: 0, normal: { x: 0, y: 1, z: 0 }, onRoad: tru
 /**
  * A run of contiguous bays along +x, centred on the origin, exactly as roads.js
  * lays them: BAY = 4.4 m pitch, half = 2.2, outward normal toward -z (the car's
- * side). BREAK_SPEED = 7 m/s is roads.js's own constant.
+ * side). BREAK_SPEED = 3.5 is roads.js's own constant (a load, not a speed).
  */
 function railWorld(kind, bays = 7, zLine = 0) {
   const segments = [];
@@ -74,7 +74,9 @@ function railWorld(kind, bays = 7, zLine = 0) {
       hit(id, speed) {
         const s = segments[id];
         if (!s || s.kind !== 'fence' || s.broken) return false;
-        if (!(speed >= 7)) return false;
+        // Mirrors roads.js BREAK_SPEED. It is a LOAD now, not a closing speed:
+        // core/collision.js hands over normal + a share of tangential drag.
+        if (!(speed >= 3.5)) return false;
         s.broken = true; broken.push({ id, speed });
         return true;
       },
@@ -227,12 +229,37 @@ add('trunk T-bone front axle 25 m/s', {
 });
 
 // ===========================================================================
-// 5. TIMBER FENCE — holds at 5 m/s, smashes at 12 m/s (roads.js BREAK_SPEED 7)
+// 5. TIMBER FENCE — a nudge holds, everything else takes the bay with it
+//
+// THE HOLD CASE MOVED FROM 5 m/s TO 2.5, ON PURPOSE. The client's note was that
+// timber should break more easily "and even on a side collision", so 5 m/s —
+// 18 km/h, squarely into a wooden fence — is no longer a speed anything should
+// survive. What must still hold is a genuine nudge, and 2.5 m/s is 9 km/h: the
+// speed you touch a fence at while turning the car round. Below that it scrapes.
+//
+// The angle sweep in tools/collide-fence.mjs is the real evidence for this
+// section; these two cases only pin the ends of it.
 // ===========================================================================
-add('fence head-on 5 m/s (holds)', {
-  car: makeCar(0, -6, -Math.PI / 2, 0, 5),
+add('fence nudge 2.5 m/s (holds)', {
+  // Started close: at 2.5 m/s a 6 m run-up does not reach the rail inside the
+  // measurement window, and 'never touched it' is not the same result as 'held'.
+  car: makeCar(0, -3.4, -Math.PI / 2, 0, 2.5),
   world: railWorld('fence'),
-  expect: (r, c, w) => r.contacts > 0 && w.barriers.broken.length === 0 && r.residual < 0.02,
+  maxT: 2.5,
+  // NOT 'an event fired': fence.eventSpeed is 3.0 m/s, so a 2.5 m/s nudge is
+  // correctly below the bang threshold and reports no event at all. What has to
+  // be true is that the timber STOPPED the car and no bay came out.
+  expect: (r, c, w) => r.vOut < 1.0 && w.barriers.broken.length === 0 && r.residual < 0.02,
+});
+// The case the client actually described: arriving sideways at a shallow angle.
+// On the old rule this produced closing 6.5 against a 7 m/s threshold and broke
+// NOTHING — the car scrubbed the whole run and came out with the fence intact.
+add('fence 15deg slide 25 m/s (breaks a run)', {
+  car: makeCar(-16, -3.4, (15 * Math.PI) / 180,
+    25 * Math.cos((15 * Math.PI) / 180), 25 * Math.sin((15 * Math.PI) / 180)),
+  world: railWorld('fence', 13),
+  maxT: 2.2,
+  expect: (r, c, w) => w.barriers.broken.length >= 3 && r.vOut > 25 * 0.80,
 });
 add('fence head-on 12 m/s (breaks)', {
   car: makeCar(0, -6, -Math.PI / 2, 0, 12),

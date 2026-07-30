@@ -197,6 +197,10 @@ export const MATERIALS = {
     // away — so the lever arm still gives the shunt a little rotation (0.4 rad/s
     // for a 12 m/s corner-first break) instead of a pure scalar multiply.
     breakCost: 0.25, breakSpin: 0.10, breakSpinCap: 0.60,
+    // Share of the tangential drag that counts toward snapping a post. See the
+    // long note at the break test: a shallow-angle slide is how a fence is
+    // actually met, and at 0 it was unbreakable that way.
+    tangentialBreak: 0.55,
     edgeCarry: 1.0,          // a rail line, not a point: see `guard`
   },
 
@@ -741,9 +745,30 @@ export function resolveCollisions(vehicle, world, dt) {
       const already = _done.has(_cand.obj);
 
       // -- does the bay break? ------------------------------------------------
+      //
+      // TIMBER FAILS FROM LOAD, NOT FROM CLOSING SPEED.
+      //
+      // This used to hand roads.js the normal closing component and nothing else,
+      // which meant a fence could only ever be broken by driving squarely into
+      // it. That is close to the one way a player never hits a barrier in a
+      // drifting game: you arrive sideways, at a shallow angle, already crossed
+      // up, and the normal component of that is 2-3 m/s while the car is carrying
+      // twenty along the rail. Measured on the old code, a 25 m/s slide into a
+      // timber fence at 15 degrees produced closing 6.5 and did not break a
+      // single bay — the car scraped the whole run and came out the other side
+      // with the fence intact.
+      //
+      // A post does not care which way the load arrives; it snaps in bending
+      // either way. So the severity handed over is the normal load plus a share
+      // of the tangential drag. The share is less than one because sliding along
+      // a rail really is gentler than hitting it square — the load is spread down
+      // the beam and into several posts instead of arriving at one — but it is
+      // nowhere near zero, which is what it effectively was.
       let broke = false;
-      if (!already && mat.breakable && closing > 0 && B?.hit) {
-        broke = B.hit(_cand.seg.id, closing) === true;
+      if (!already && mat.breakable && B?.hit) {
+        const tan = Math.abs(cvx * -nz + cvz * nx);
+        const load = closing + tan * (mat.tangentialBreak ?? 0);
+        if (load > 0) broke = B.hit(_cand.seg.id, load) === true;
       }
 
       if (broke) {

@@ -2385,10 +2385,22 @@ const G_APPROACH = 30;    // guardrail this far back from a bridge deck
 const G_ABUTMENT = 4.0;   // ...but stop short of the bridge's own wing walls
 const G_MINRUN = 3;       // bays; anything shorter is a kink, not a corner
 
-// Above this closing speed a timber bay is knocked out. Below it the car just
-// scrapes along the rails. 7 m/s is 25 km/h — a nudge while parking survives,
-// anything that reads as a mistake does not.
-const BREAK_SPEED = 7;
+// Above this much LOAD a timber bay is knocked out. Below it the car just
+// scrapes along the rails.
+//
+// It was 7 m/s, and it was measured against the closing speed along the contact
+// normal alone — which in a drifting game is the wrong quantity almost every
+// time. The way a player actually meets a fence is sideways, at a shallow angle,
+// with the car already crossed up; the normal component of that is a couple of
+// metres per second while the car is carrying twenty along the rail. So a 1180 kg
+// car could scrub the full length of a timber fence at 90 km/h and not take out
+// one bay, which is not what timber does.
+//
+// core/collision.js now hands over the whole load — normal plus a share of the
+// tangential drag — so this number is a load, not a speed, and it is lower
+// because a fence is not a wall: 3.5 means a shove at walking pace holds and
+// anything that reads as a mistake takes the bay with it.
+const BREAK_SPEED = 3.5;
 const DEBRIS_POOL = 168;
 const DEBRIS_LIFE = 5.4;
 const DEBRIS_FADE = 1.0;
