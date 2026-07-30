@@ -929,12 +929,49 @@ export function resolveCollisions(vehicle, world, dt) {
           vx += tx * give; vz += tz * give;
         }
         // REDIRECT, NEVER ADD. Taking a component off the normal and handing the
-        // same magnitude to the tangent is not energy-neutral when the车 already
+        // same magnitude to the tangent is not energy-neutral when the car already
         // had tangential speed — measured, the 15 deg rail glance came out at
         // 106% of entry, i.e. the barrier was accelerating the car. Cap the
         // result at what we walked in with.
         const now = Math.hypot(vx, vz);
         if (now > was && now > 1e-6) { const k = was / now; vx *= k; vz *= k; }
+
+      }
+
+      /**
+       * AND IT MUST STILL COME OFF THE OBSTACLE.
+       *
+       * Zeroing the approach is not the same as leaving. `restitution` promises
+       * a separation of e * closing, and at dead centre it delivers it: a 25 m/s
+       * square hit on a trunk exits at 0.75 m/s. Move the same hit 0.20 m off
+       * centre and a lever arm appears, so part of the impulse goes into
+       * rotation and the CENTRE OF MASS is still closing when this rule fires —
+       * which then took the residue out and left exactly nothing.
+       *
+       * MEASURED, the trunk offset sweep at 25 m/s: 0.00 m exited at 3% of
+       * entry, 0.10 m at 1%, and 0.20 m and 0.30 m at 0.00 m/s — a 0.68 m strip
+       * across the middle of a 2.14 m bumper where the car simply welded itself
+       * to the bark. That reads as exactly the hard-stop bug this module was
+       * written to replace, and it is worse than the dead-centre case it sits
+       * beside, which is absurd on its face.
+       *
+       * So the promise is kept at every offset, not only at zero: restore the
+       * separation restitution said there would be. Scaled by `carry` like
+       * everything else here — a folded corner cannot push off as hard as a
+       * solid nose.
+       *
+       * NOT ON A SHED CONTACT. There the corner has folded and the obstacle is
+       * inside it; there is no surface left to push off, and the car's exit speed
+       * is carried by going PAST the trunk rather than off it. Applying the
+       * guarantee there overwrote that: measured, the 0.40 m offset fell from
+       * 3.03 m/s to 1.14 m/s and every offset from 0.40 to 1.20 collapsed onto
+       * exactly `restitution * closing * carry`, flattening the curve this
+       * module exists to produce.
+       */
+      const sep = willShed ? 0 : mat.restitution * closing * carry;
+      if (sep > 1e-4) {
+        const vnNow = vx * nx + vz * nz;
+        if (vnNow < sep) { vx += nx * (sep - vnNow); vz += nz * (sep - vnNow); }
       }
 
       // -- shed the folded corner ---------------------------------------------
