@@ -314,9 +314,35 @@ export class CarView {
     this.tails = built.tails;
     this.bodyMat = built.bodyMat;
 
+    /**
+     * TWO NODES, BECAUSE THEY ARE TWO DIFFERENT THINGS.
+     *
+     *   chassis — where the car IS. Carries the ground pose only, and the wheels
+     *             are on it, so a wheel moves when and only when the ground
+     *             under the car moves.
+     *   body    — how the car LOOKS. Carries dive, squat and roll into a slide,
+     *             plus the spring ride height. Purely cosmetic, and the wheels
+     *             are NOT on it.
+     *
+     * They used to be one node, with the wheels under it, and that was quietly
+     * expensive: a cosmetic lean rotated the wheels too. Measured, +0.30 rad of
+     * weight-transfer roll — a value with no physical meaning at all, chosen for
+     * how it reads — moved the four wheels by -0.42, +0.47, -0.49 and +0.41 m in
+     * world Y, nearly a tyre diameter of spread. The old code compensated the
+     * node's TRANSLATION on each wheel and never its ROTATION, so the seating
+     * lift then levitated the whole car to put the deepest wheel back on the
+     * ground. With the lean zeroed and nothing else changed, that lift never
+     * fired at all over 60 s of driving and the wheel-to-wheel disagreement
+     * collapsed from a 0.378 m median to 0.037 m: nine tenths of the problem was
+     * self-inflicted here, and no amount of work on the ground queries could
+     * have touched it.
+     */
     this.chassis = new THREE.Group();
-    // Reparent everything under a chassis node so we can lean and bounce it.
-    while (this.root.children.length) this.chassis.add(this.root.children[0]);
+    this.body = new THREE.Group();
+    while (this.root.children.length) this.body.add(this.root.children[0]);
+    // The wheels ride with the ground, not with the lean.
+    for (const w of this.wheels) this.chassis.add(w);
+    this.chassis.add(this.body);
     this.root.add(this.chassis);
 
     this.suspension = this.wheels.map(() => 0);
@@ -401,7 +427,7 @@ export class CarView {
     // descents rather than uniformly.
     const gp = pose?.pitch ?? 0;
     const gr = pose?.roll ?? 0;
-    this.chassis.rotation.z = this._pitch + gp;
+    this.chassis.rotation.z = gp;
     // The ground ROLL was mirrored too, and it hid behind the pitch error until
     // that one was fixed. Same test, same evidence: with `+ gr` the four wheels
     // showed a clean left-to-right gradient (FL +0.114, FR +0.031, RL -0.078,
@@ -409,11 +435,15 @@ export class CarView {
     // the ride-height solve about which side of the car the roll lifts. With
     // `- gr`: p95 0.817 -> 0.546 m, max 1.835 -> 1.510, deeper than 0.10 m
     // 45.4% -> 39.6%. Better on every aggregate, so it is not a wash.
-    this.chassis.rotation.x = this._roll - gr;
+    this.chassis.rotation.x = -gr;
 
-    // Body rides on the springs: dive, squat and terrain bounce.
+    // Weight transfer and the springs move the BODY over the wheels, which is
+    // what they do on a real car. Nothing here reaches the contact patches, so
+    // none of it can lift a tyre off the road any more.
+    this.body.rotation.z = this._pitch;
+    this.body.rotation.x = this._roll;
     this._bodyY += (ride - this._bodyY) * k(20);
-    this.chassis.position.y = clamp(this._bodyY, -0.30, 0.30);
+    this.body.position.y = clamp(this._bodyY, -0.30, 0.30);
 
     // ---- wheels ------------------------------------------------------------
     const spinRate = (Math.abs(v.longSpeed ?? v.speed) * (1 + (v.wheelSpinBoost ?? 0) * 1.6)) / 0.46;
@@ -433,8 +463,9 @@ export class CarView {
       this.suspension[i] += (corner - this.suspension[i]) * k(12);
       const w = this.wheels[i];
       w.rotation.set(0, i < 2 ? steerVis : 0, 0);
-      // Wheels stay planted: undo the body's vertical move, add corner load.
-      w.position.y = 0.46 - this.chassis.position.y + this.suspension[i];
+      // No "undo the body's vertical move" term any more: the body moves on its
+      // own node now, so there is nothing here to cancel.
+      w.position.y = 0.46 + this.suspension[i];
       this.hubs[i].rotation.z = -this.wheelSpin;
     }
 
