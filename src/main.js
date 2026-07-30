@@ -88,6 +88,7 @@ if (shotId) {
   const respawn = () => {
     const s = game.roads.spawn?.() ?? game.findSpawn();
     game.vehicle.reset(s.x, s.z, s.heading);
+    game.resetPose();            // vertical + pose state lives on the game, not the vehicle
     game.skid.clear();
     game.particles.clear();
     game.driftScore = 0;

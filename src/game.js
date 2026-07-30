@@ -443,6 +443,24 @@ export class Game {
     return { height: p.y, normal: UP.clone(), onBridge: p.onBridge, pose: p };
   }
 
+  /**
+   * Forget where the car was standing.
+   *
+   * `vehicle.reset()` moves the car; it knows nothing about the vertical state
+   * that lives up here. Without this, a respawn keeps the pre-respawn altitude
+   * and vertical velocity, so `_stepVertical` believes the car is still falling
+   * from wherever it was rescued from and fires a landing event, complete with
+   * camera shake, the instant it arrives. The pose filters keep the old tilt too.
+   */
+  resetPose() {
+    this._carY = undefined;
+    this._carVY = 0;
+    this._pose = undefined;
+    this._poseY = undefined;
+    this._poseCache = undefined;
+    this.carView?.resetSeating?.();
+  }
+
   surfaceAt(x, z) {
     if (this.bridges.heightAt(x, z) != null) return { grip: 1.0, kind: 'bridge' };
     if (this.roads.isOnRoad(x, z)) return { grip: this.roads.gripAt(x, z), kind: 'road' };

@@ -378,6 +378,15 @@ export class CarView {
    *        query, used to seat each wheel individually. Optional so the view
    *        still works standalone, but the game always supplies it.
    */
+  /** Drop the seating filters; used on respawn so the car does not arrive mid-lift. */
+  resetSeating() {
+    this._seatLift = 0;
+    this._droop = [0, 0, 0, 0];
+    this._bodyY = 0;
+    this._roll = 0;
+    this._pitch = 0;
+  }
+
   update(dt, v, ground, sampleHeight) {
     const k = (rate) => 1 - Math.exp(-rate * Math.max(dt, 1e-5));
 

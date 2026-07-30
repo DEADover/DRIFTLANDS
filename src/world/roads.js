@@ -3618,7 +3618,14 @@ function buildFurniture(ctx, routes, colours) {
         const u = outside * (sm.hw + sm.verge + 2.2);
         const x = sm.x + sm.nx * u, z = sm.z + sm.nz * u;
         boards.push({ x, z, y: sectionY(sm, capU(sm, u)) - 0.55, r: heading });
-        colliders.push({ x, z, r: 0.7 });
+        // TAGGED. core/collision.js infers a material from the radius when none
+        // is declared, and its rule is `r < 0.95 -> trunk` — correct for every
+        // other producer in the world, because props.js only ever makes a solid
+        // collider for a tree over 13.5 m tall. This one is a plywood signboard
+        // standing 2.2 m outside the verge, exactly where a car running wide
+        // goes, and untagged it hit like a mature fir: 25 m/s down to 3.7 m/s
+        // and 74 degrees out of shape, off a marker board.
+        colliders.push({ x, z, r: 0.7, kind: 'post' });
       }
     }
 

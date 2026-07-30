@@ -51,13 +51,24 @@
 // ---------------------------------------------------------------------------
 // CHASSIS
 // ---------------------------------------------------------------------------
-// The drawn car (entities/car.js) is 4.2 m long over the bumpers on a 2.70 m
-// wheelbase (game.js carPose uses A = 1.35 half wheelbase) and 1.84 m over the
-// arches. Rounding the collision box to 1.90 m wide keeps the mirrors honest
-// without making the car catch on scenery it visually clears.
+// MEASURED FROM THE SCENE GRAPH, not from BODY_LEN.
+//
+// The comment that used to sit here said the drawn car is "4.2 m long over the
+// bumpers and 1.84 m over the arches". Both numbers were wrong: BODY_LEN is the
+// tub alone, and car.js then hangs a nose wedge out to x = +2.72 and a rear wing
+// back to x = -2.38. The bounding box of what is actually drawn is 5.12 x 2.44 m,
+// so a 4.20 x 1.90 box left a 0.62 m nose overhang and 0.27 m down each flank
+// outside the collision shape — the entire nose, splitter and light bar buried
+// themselves in a trunk before anything fired.
+//
+// The box is now sized to the SOLID car: bumper to bumper, and over the arches.
+// It deliberately excludes the wing tips and the mirrors, which are 0.07-0.13 m
+// appendages that should not catch on scenery, and it stays inside the drawn
+// silhouette so nothing collides with air.
 export const CHASSIS = {
-  halfLength: 2.10,        // m, nose to centre
-  halfWidth: 0.95,         // m, centreline to flank
+  halfLength: 2.55,        // m, nose to centre — the wedge tip at x = 2.72 less
+                           // the 0.17 m of taper that is not full width
+  halfWidth: 1.07,         // m, centreline to flank — ARCH_W/2, the widest solid
   mass: 1180,              // kg — DEFAULT_TUNE.mass in entities/vehicle.js
   // YAW INERTIA. A 4.2 x 1.9 m plate is I = m(L^2+W^2)/12 = 1180*21.25/12
   // = 2090 kg m^2. The handling model does NOT use that: DEFAULT_TUNE has
