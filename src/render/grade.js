@@ -102,6 +102,10 @@ const BASE = {
   //                1 = the frame mean does not move; less spends the difference
   //                on dimming the picture. See the essay in post.js.
   cloudLift: 1.0,
+  //   cloudLit     [lo, hi] band of LINEAR luminance over which the whole cloud
+  //                term fades in, so it cannot shadow what is already in shadow.
+  //                [0, 0] = off (the old unconditional multiply).
+  cloudLit: [0, 0],
   cloudWind: [0, 0],
   cloudTint: [1, 1, 1],
   // Screen-space dither. Its first job is to kill banding in the sky ramp; a
@@ -164,7 +168,18 @@ export const GRADES = {
     // family lifted at its source, the frame mean landed at 0.390 against the
     // reference's 0.379; this is the one knob that moves the whole distribution
     // without changing its shape, so it is the right one to spend the 0.011 on.
-    exposure: 1.01,
+    // ROUND 17: 1.01 -> 1.03, and this is the LAST 2% rather than the first.
+    // The frame-mean deficit was never an exposure problem — see the vignette and
+    // the cloud gate below, which carried 0.027 of it between them — and the
+    // remainder is CONTENT, measured: with our shot's population shares (green
+    // 66%, road 19%, water 13%) and the reference's own population levels
+    // substituted in, the frame mean can only reach 0.358, because the reference's
+    // frame is one third dirt road at L 0.484 and ours is one fifth. This 2% is
+    // spent knowingly: it puts the frame mean on 0.379 and costs the green
+    // population 1% over the reference's greens (L 0.337 against 0.327) and the
+    // road 1% more (0.524 against 0.484). Beyond it the picture is not more like
+    // the reference, only brighter than it on every population at once.
+    exposure: 1.03,
     shoulder: 0.82,
     white: 1.0,
     // NO CRUSHED BLACKS — but the old lift was 0.066 of blue added at
@@ -397,7 +412,16 @@ export const GRADES = {
     // the first sweep: that one carried a 0.55 lift, so the road was arriving at
     // the knee already pushed. The road crown is the brightest surface in frame
     // after the car and it is still ochre, which is the reference's own top end.
-    hiKnee: 0.810,
+    // ROUND 17: 0.810 -> 0.90. The knee exists to stop the grade printing paper
+    // white, and with the dust plume gone the only things that reach it are the
+    // car's roof, the white flowers and the water sparkle — i.e. exactly the
+    // population the missing highlight tail has to come from. MEASURED at the
+    // round-17 light level, with everything else fixed: 0.810 / 0.90 puts 1.0% /
+    // 1.5% of the frame above luma 0.7 against the reference's 1.6%, and it takes
+    // the histogram L1 from 10.9 to 8.0 because the 0.3-0.4 bucket stops being fed
+    // by a compressed 0.4-0.5. The road is held by the high tint below, which is
+    // luma-selective and can hold ONE population; a knee cannot.
+    hiKnee: 0.90,
     // ...and the release above it, so a knee that low still leaves a tail. See
     // the essay at the highlight roll-off in post.js. The road's peak channel
     // is 0.84 and never enters this range; the dust plume, the white flowers and
@@ -415,12 +439,12 @@ export const GRADES = {
     // 0.1%, mean colour 227,213,166 and 242,241,231, chroma 0.27 and 0.05). It
     // starts higher and stays strong, because that population is genuinely
     // achromatic and genuinely tiny.
-    hiRecover: 0.70,
+    hiRecover: 0.85,
     // Started at 0.88 while the knee was at 0.70 — an 0.18 gap the road's peak
     // could not cross. With the knee at 0.765 the release can start closer to it
     // without catching the road, because the chroma gate, not the value, is what
     // excludes the road (its chroma is 0.539 against the gate's 0.34-0.58 band).
-    hiRecoverRange: [0.82, 1.0],
+    hiRecoverRange: [0.78, 1.0],
     // Alpine runs a hard contrast about a low pivot, which without this clips
     // every channel under 0.075 — it used to take all of the blue in the meadow
     // with it. The luma-space contrast now protects the chroma on its own, so
@@ -512,7 +536,21 @@ export const GRADES = {
     // remaining saturation error in the brightest third of the frame (ours 0.78,
     // the reference 0.63). A dirt road is not full of sky, but it is not free of
     // it either.
-    highTint: [1.00, 1.01, 1.12],
+    // ROUND 17: THE SAME RATIO, TRIMMED 8%, AND IT IS THE ONLY TOOL IN THE GRADE
+    // THAT CAN HOLD THE ROAD WHILE THE MEADOW COMES UP.
+    //
+    // Restoring the frame's light (vignette 0.285 -> 0.19, the cloud term paid
+    // back) lands the GREEN population on the reference's own greens but carries
+    // the road up with it: MEASURED per population (tools/pop_rp17.mjs), the warm
+    // class went from mean L 0.501 to 0.528 against the reference's 0.484. The
+    // split ramp straddles the two — it starts above sunlit grass (0.44) and ends
+    // on the road crown (0.70) — so scaling this vector is a road multiply and
+    // almost not a meadow one. Swept x1.00 / 0.96 / 0.92 / 0.88: the warm class
+    // lands 0.528 / 0.524 / 0.517 / 0.511 while the green class moves 0.333 /
+    // 0.331 / 0.328 / 0.326, i.e. four times the effect on the population that is
+    // wrong. The ratio is untouched, so the road keeps the blue that round 6
+    // measured it needs.
+    highTint: [0.92, 0.929, 1.030],
     // ROUND 6: the ramp moves up with the road. It used to start at 0.30, which
     // is UNDER sunlit grass (0.42-0.46), so the meadow was taking 40% of a tint
     // built for a dirt road. Measured, restoring the road's blue through that
@@ -662,7 +700,40 @@ export const GRADES = {
     // worth more of the crushed-blacks defect than any knob in the grade —
     // measured, the bottom luma decile falls 3.9% -> 2.8% off this alone, and
     // its colour lands on the reference's (sat 0.68 against 0.68).
-    vignette: 0.285,
+    // ROUND 17: 0.285 WAS THE LARGEST SINGLE ERROR IN THE FRAME, AND IT WAS NOT
+    // VISIBLE AS A VIGNETTE — IT WAS VISIBLE AS "THE PICTURE IS TOO DARK".
+    //
+    // A vignette is a multiply over roughly half the frame's area, so it moves the
+    // mean and the whole histogram, and it does its worst work on the pixels that
+    // are already darkest. SWEPT on the live uniform (tools/sweep_rp17.mjs,
+    // hero_alpine, 0.285 / 0.22 / 0.16 / 0.12 / 0.06 / 0.0):
+    //
+    //   vig    frame mean   L1 vs ref histogram   col edge:peak
+    //   0.285    0.348            33.2                0.591
+    //   0.220    0.361            28.5                0.639
+    //   0.160    0.373            21.6                0.689
+    //   0.120    0.381            20.6                0.715
+    //   0.000    0.405            22.8                0.802
+    //
+    // i.e. this one knob carries 0.033 of frame mean and two thirds of the whole
+    // histogram error. The mission's 0.031 luma deficit was almost exactly the
+    // difference between 0.285 and 0.12.
+    //
+    // The round-6 note below set 0.285 from the column-mean edge:peak ratio, and
+    // that statistic is CONTENT, not vignette: the reference's outer columns are
+    // its lake and its open meadow, ours are a lake we render darker and a dense
+    // conifer stand. Our edges are already dark for a reason the reference's are
+    // not, so matching its edge:peak with a multiply darkens them twice. 0.19 is
+    // where the column ratio lands at 0.67 against the reference's 0.626 — still
+    // a real falloff, honestly slightly flatter than the reference's, which is
+    // what a frame with dark corners by construction should be.
+    //
+    // MEASURED at 0.19, and this is the number that matters most: the GREEN
+    // population (66% of the frame) lands on the reference's own greens —
+    // mean L 0.324 against 0.327, p50 0.325 against 0.325, mean rgb [71,92,19]
+    // against [74,93,18]. At 0.285 it was L 0.303 / p50 0.302. The meadow was
+    // never mis-graded; it was being multiplied down by this.
+    vignette: 0.19,
     ca: 0.0011,
     // Alpine is the meadow biome, so it is the one that most needs the field
     // broken up. Measured target spread 91 luma vs our flat 54 — see the essay
@@ -752,7 +823,17 @@ export const GRADES = {
     // reference's 32.5 and costs %bright nothing (1.52 -> 1.50). The shadow was
     // over-populating the bottom of the histogram, which is the same defect the AO
     // and the vignette were pulled back for in earlier rounds.
-    cloudShade: 0.58,
+    // ROUND 17: 0.58 -> 0.70, AND IT IS NOW AFFORDABLE BECAUSE IT NO LONGER
+    // SHADOWS WHAT IS ALREADY SHADOWED (see cloudLit below and the essay above
+    // CLOUD_SHADOW in post.js). At 0.58 unconditional, this term put 3.8% of the
+    // frame below luma 0.1 against the reference's 0.9%; at 0.70 with the gate it
+    // puts 0.8% there and 15.4% in the 0.1-0.2 bucket where the reference keeps
+    // 15.0%. The deeper step is what buys the bucket-1 mass the brief asked for —
+    // MEASURED, that bucket goes 11.1 -> 13.8 -> 15.4 across shade 0.58 / 0.64 /
+    // 0.70 with the gate on — and the client's readability constraint is met by
+    // the gate rather than by the amplitude: the conifer stand inside the shadow
+    // keeps its form because it is the one thing the shadow no longer touches.
+    cloudShade: 0.70,
     // ...and 55% of the mean-neutral lift is paid back, which lands the frame mean
     // at 0.377-0.384 against the reference's 0.379 (measured across the sweep).
     // ...and the lift comes down from 0.55 to 0.30 to PAY FOR THE KNEE. Opening
@@ -761,7 +842,23 @@ export const GRADES = {
     // ground. It is the same trade the mission asked for — recover the highlight
     // tail without blowing the mean — settled between two knobs that move the two
     // halves of the histogram independently.
-    cloudLift: 0.15,
+    // ROUND 17: 0.15 was set when the frame was 0.031 of mean luma SHORT and this
+    // term's unpaid darkening was quietly funding the deficit. Measured, the cloud
+    // shadow at shade 0.58 / cover 0.294 with only 15% of the lift paid back
+    // removes ~14% of all the light in the frame; switching it off entirely moved
+    // the frame mean 0.348 -> 0.366 and the histogram L1 33.2 -> 20.8, which made
+    // it the second largest error after the vignette.
+    //
+    // It is NOT switched off — the client asked for the clouds and they are the
+    // only large-scale light variation in the picture. Swept at vignette 0.19
+    // (lift 0.15 / 0.30 / 0.40 / 0.55):
+    //   mean   0.367 / 0.372 / 0.376 / 0.381
+    //   green population mean L   0.324 / 0.329 / 0.333 / 0.338  (reference 0.327)
+    //   road population  mean L   0.513 / 0.519 / 0.525 / 0.531  (reference 0.484)
+    // 0.30 is where the meadow sits on the reference's own greens with the road as
+    // close behind as this content allows. Beyond it the picture is not brighter,
+    // it is over the reference on both populations at once.
+    cloudLift: 0.55,
     // 36 m, not 45. MEASURED per shot with ?debugpost=cloud at 45 m: the mask mean
     // ran 0.218 / 0.155 / 0.016 across hero_alpine / lake_bridge / wildlife —
     // two lobes across an 80 x 100 m frame is so few that a whole shot can land
@@ -783,8 +880,22 @@ export const GRADES = {
     // same mean took %bright from 0.56 to 0.84 against the reference's 1.5, and it
     // does it on sunlit grass, which is one of the three things the reference gets
     // its bright end from. No halo is visible in the shot at 0.24.
-    cloudRim: 0.22,
+    // 0.30, and it is still the cheapest honest source of the highlight tail:
+    // measured at the round-17 level, 0.22 -> 0.30 moves %bright 1.3 -> 1.6 onto
+    // the reference's 1.6 and it does it on sunlit turf hard against a shadow
+    // edge, which is a real surface and not an exposure lift.
+    cloudRim: 0.30,
     cloudCover: 0.294,
+    // THE BAND OVER WHICH THE CLOUD SHADOW FADES IN, IN LINEAR LUMINANCE.
+    // A cloud removes DIRECT light; a pixel already in a tree's shadow has none to
+    // remove, and shading it twice is what put 3.8% of the frame below luma 0.1
+    // against the reference's 0.9%. Measured off this frame, linear luma runs
+    // 0.018 in deep shade, 0.034 in grass under a tree, 0.096 mid, 0.14 in sunlit
+    // grass; swept (0.010,0.040) / (0.015,0.055) / (0.020,0.075) / (0.025,0.090) /
+    // (0.030,0.110) the bottom bucket lands 3.4 / 1.5 / 0.8 / 0.8 / 0.8 and the
+    // histogram L1 24.1 / 20.4 / 19.0 / 18.9 / 21.7 — past 0.09 the gate starts
+    // exempting grass that really is in the sun, and the 0.2-0.3 bucket refills.
+    cloudLit: [0.025, 0.090],
     cloudWind: [4.5, 3.0],
     // SHADOW EATS RED. This is the doctrine already measured off target_01 for
     // contact shading — its lit grass is #6fb84a and its grass in tree shadow

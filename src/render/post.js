@@ -396,6 +396,33 @@ const MEADOW_NOISE = /* glsl */ `
  * and the whole amplitude is spent on RANGE — which is the second thing this
  * buys, because a sunlit-turf population lifted above the road's ceiling is
  * where the missing highlight tail has to come from.
+ *
+ * A CLOUD CANNOT SHADOW WHAT IS ALREADY IN SHADOW (uCloudLit).
+ *
+ * This pass multiplies the COMPOSITED colour, so as first written it removed 58%
+ * of the light from a patch of meadow already sitting inside a conifer's cast
+ * shadow — where there is no sun to remove. Two shadows stacked, and the result
+ * is a hole. MEASURED (tools/sweep_rp17.mjs, hero_alpine): our darkest luma
+ * bucket held 3.8% of the frame against the reference's 0.9%, and its mean colour
+ * was rgb(12,22,10) against the reference's rgb(9,28,21) — ours are not merely
+ * fewer photons, they are a DIFFERENT, deader colour, which is the signature of a
+ * multiply applied twice. The bucket above it, where the reference keeps 15% of
+ * its pixels, matches the reference's colour EXACTLY (rgb 23,46,25 against
+ * 23,45,25). So our shadow family is not mis-graded; a fraction of it is being
+ * shaded a second time.
+ *
+ * The whole term — the shade, the tint AND the sunlit lift, since a shadowed
+ * pixel receives no cloud-edge bounce either — is therefore weighted by how much
+ * DIRECT light the pixel plausibly has, estimated from its own linear luminance
+ * against a band measured off this frame:
+ *
+ *   deep shade 0.018   grass in tree shadow 0.034   mid 0.096   lit grass 0.14
+ *
+ * The estimate is confounded by albedo — a dark surface in full sun reads like a
+ * bright one in shade — which is why the band sits BELOW everything except the
+ * genuinely double-shadowed: at 0.015..0.055 a sunlit conifer crown (0.06) still
+ * takes the full shadow, grass in tree shade takes about half, and the inside of
+ * a stand takes none. Set the band to (0,0) for the old unconditional behaviour.
  */
 const CLOUD_SHADOW = /* glsl */ `
   uniform float uCloudShade;   // how much darker shaded ground is. 0 = off
@@ -405,6 +432,7 @@ const CLOUD_SHADOW = /* glsl */ `
   uniform float uCloudEdge;    // edge width in field units (~2 m at cut 0.5)
   uniform float uCloudCore;    // fraction of the depth that lives in the inner step
   uniform float uCloudRim;     // extra light on the turf just outside the edge
+  uniform vec2  uCloudLit;     // linear-luma band over which the term fades in
   uniform vec2  uCloudDrift;   // metres the field has travelled: wind x time
   uniform vec2  uCloudSkew;    // -S.xz / S.y, the sun-ray projection
   uniform vec3  uCloudTint;    // colour of the light that is left in shade
@@ -614,14 +642,26 @@ const COMPOSITE_FRAG = /* glsl */ `
       if (uCloudShade > 0.0001) {
         vec2 mr = cloudMask(wp);
         cmask = mr.x;
+        // How much direct sun this pixel plausibly carries. See the essay above
+        // CLOUD_SHADOW: without this the term shadows what is already shadowed.
+        float dw = uCloudLit.y > 0.0
+          ? smoothstep(uCloudLit.x, uCloudLit.y, dot(max(col, 0.0), LUMA))
+          : 1.0;
         // mr.y is the turf just CLEAR of a shadow — the brightest ground in a
         // cumulus field, because it gets the sun plus the light bouncing off the
         // cloud's lit flank. It is also, conveniently, exactly the population the
         // missing highlight tail has to come from, and it is light landing on an
         // already-warm albedo rather than a global exposure lift, so it does not
         // move the road.
-        float shade = mix(1.0 + uCloudSun + uCloudRim * mr.y, 1.0 - uCloudShade, cmask);
-        col *= shade * mix(vec3(1.0), uCloudTint, cmask);
+        //
+        // cmask stays the RAW silhouette so ?debugpost=cloud still measures the
+        // coverage the mean-neutral lift is computed from; eff is the effective
+        // one. The lift is gated by the same weight: a pixel with no sun to lose
+        // has none to gain back either, so the term stays mean-neutral per pixel.
+        float eff = cmask * dw;
+        float lift = (uCloudSun + uCloudRim * mr.y) * dw;
+        float shade = mix(1.0 + lift, 1.0 - uCloudShade, eff);
+        col *= shade * mix(vec3(1.0), uCloudTint, eff);
       }
 
       if (uDapple > 0.0001) {
@@ -1132,6 +1172,7 @@ export function createPostFX(ctx) {
     uCloudEdge: { value: 0.030 },
     uCloudCore: { value: 0.34 },
     uCloudRim: { value: 0.0 },
+    uCloudLit: { value: new THREE.Vector2(0, 0) },
     uCloudDrift: { value: new THREE.Vector2() },
     uCloudSkew: { value: new THREE.Vector2() },
     uCloudTint: { value: new THREE.Vector3(1, 1, 1) },
@@ -1226,6 +1267,7 @@ export function createPostFX(ctx) {
       u.uCloudEdge.value = g.cloudEdge ?? 0.030;
       u.uCloudCore.value = g.cloudCore ?? 0.34;
       u.uCloudRim.value = g.cloudRim ?? 0;
+      u.uCloudLit.value.fromArray(g.cloudLit ?? [0, 0]);
       u.uCloudTint.value.fromArray(g.cloudTint ?? [1, 1, 1]);
       // MEAN-NEUTRALITY IS A CEILING HERE, NOT THE SETTING.
       //
