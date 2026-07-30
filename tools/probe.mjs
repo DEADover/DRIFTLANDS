@@ -53,6 +53,7 @@ const report = await page.evaluate(async ({ only, driven }) => {
   if (want('solidity')) out.roadSolidity = P.auditRoadSolidity(g);
   if (want('feet')) out.barrierFeet = P.auditBarrierFeet(g);
   if (want('guards')) out.cornerGuards = P.auditCornerGuards(g);
+  if (want('gaps')) out.guardGaps = P.auditGuardGaps(g);
   if (want('deck')) out.deckOverdraw = P.auditDeckOverdraw(g);
   // Driving mutates the world state, so these must go last.
   if (want('wheels')) out.wheels = P.auditWheelSeating(g);
@@ -137,6 +138,18 @@ if (report.cornerGuards) {
   else {
     line(`  owed ${c.owed} bay-stations   UNPROTECTED ${c.missing}   ${c.ok ? 'PASS' : 'FAIL'}`);
     for (const l of String(c.text ?? '').split('\n').filter((s) => /MISSING|and \d+ shorter/.test(s)).slice(0, 8)) line(`  ${l}`);
+  }
+}
+
+if (report.guardGaps) {
+  const g = report.guardGaps;
+  line('');
+  line('STEEL OWED AND MISSING — independent of roads.audit()');
+  line(`  stations walked ${g.checked}   dangerous-and-unsteeled ${g.dangerous}`);
+  line(`  with NOTHING at all ${g.nothingAtAll}   with timber only ${g.timberOnly}`);
+  line('    trouble   fall    radius  entry   protected by      at');
+  for (const r of g.runs) {
+    line(`  ${String(r.trouble).padStart(8)}  ${f(r.fall, 1).padStart(5)} m  ${String(r.radius).padStart(5)} m  ${f(r.entry, 0).padStart(4)}   ${String(r.protectedBy).padEnd(12)}  (${r.x}, ${r.z})  x${r.stations}`);
   }
 }
 

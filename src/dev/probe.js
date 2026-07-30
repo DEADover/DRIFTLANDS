@@ -277,6 +277,149 @@ export function auditBarrierFeet(game, { cell = 2.0 } = {}) {
  * "Dangerous" is curvature tight enough to run wide at speed AND a real fall
  * beyond the verge. A tight corner on flat ground needs nothing.
  */
+/**
+ * WHERE IS STEEL OWED AND MISSING? — INDEPENDENT OF roads.js.
+ *
+ * `auditCornerGuards` below delegates to `roads.audit()`, which is the module
+ * that PLACES the barriers grading its own work, against its own definition of a
+ * dangerous corner and against `terrain.heightAt` rather than the surface it
+ * actually draws. It reports 0 unprotected. The player says otherwise, so this
+ * asks the question from scratch and shares nothing with it:
+ *
+ *   - the corner is found by differentiating the route's own heading, not read
+ *     off a cached curvature;
+ *   - the drop is measured on the DRAWN surface by raycast, outward from the
+ *     real carriageway edge, and it is the drop a car would fall, not the
+ *     gradient of the hillside;
+ *   - "protected" means a barrier bay whose body is within reach of the edge,
+ *     and it records whether that bay is STEEL or merely timber — the player
+ *     asked specifically about the metal ones, and a timber fence in front of a
+ *     15 m fall is decoration.
+ *
+ * Returns gaps sorted by how much trouble they are: fall x entry speed.
+ */
+export function auditGuardGaps(game, {
+  stations = 900, reach = 15, dropMin = 4.0, look = 8, radiusMax = 140,
+} = {}) {
+  // CALIBRATION, learned the hard way. The first version took dropMin 2.5 m,
+  // looked 14 m out, and applied no radius filter at all, so it reported 352
+  // "dangerous" stations — including a 942 m radius sweeper, which is a straight
+  // with a kink in it, and falls measured 14 m off the edge that no car leaving
+  // the road at that radius would ever reach. An independent walk over the same
+  // route found five candidate corners and all five dissolved.
+  //
+  // A corner only counts if you can actually run wide out of it, and the drop
+  // only counts if it is close enough to the edge to fall into: radius under
+  // 140 m, fall over 4 m within 8 m of the carriageway.
+  
+  const surf = makeRaycastSurface(game.scene);
+  const segs = game.roads.barriers?.segments ?? [];
+
+  // Bucket the barriers so the proximity test is not O(bays) per station.
+  const CELL = 12;
+  const grid = new Map();
+  for (const s of segs) {
+    for (const f of [-1, -0.5, 0, 0.5, 1]) {
+      const x = s.x + s.dx * s.half * f, z = s.z + s.dz * s.half * f;
+      const k = `${Math.floor(x / CELL)},${Math.floor(z / CELL)}`;
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push({ x, z, kind: s.kind });
+    }
+  }
+  const nearest = (x, z) => {
+    let best = null, bd = Infinity;
+    const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+    const span = Math.ceil(reach / CELL);
+    for (let u = -span; u <= span; u++) {
+      for (let v = -span; v <= span; v++) {
+        for (const p of grid.get(`${ci + u},${cj + v}`) ?? []) {
+          const d = Math.hypot(p.x - x, p.z - z);
+          if (d < bd) { bd = d; best = p; }
+        }
+      }
+    }
+    return { d: bd, kind: best?.kind ?? null };
+  };
+
+  // Sample the centreline, then differentiate it for curvature.
+  const S = [];
+  for (let i = 0; i < stations; i++) {
+    const s = game.roads.sample(i / stations);
+    if (s) S.push(s);
+  }
+  const gaps = [];
+  for (let i = 1; i < S.length - 1; i++) {
+    const a = S[i - 1], b = S[i], c = S[i + 1];
+    let dh = c.heading - a.heading;
+    while (dh > Math.PI) dh -= 2 * Math.PI;
+    while (dh < -Math.PI) dh += 2 * Math.PI;
+    const ds = Math.hypot(c.x - a.x, c.z - a.z);
+    if (ds < 1e-3) continue;
+    const k = dh / ds;                                  // 1/radius, signed
+    const radius = Math.abs(k) > 1e-6 ? 1 / Math.abs(k) : Infinity;
+
+    // Outside of the bend, in world space.
+    const fx = Math.cos(b.heading), fz = -Math.sin(b.heading);
+    const rx = -fz, rz = fx;
+    const side = k > 0 ? 1 : -1;
+
+    // Walk out to the real carriageway edge, then keep going and watch the
+    // drawn surface fall away.
+    let edge = 0;
+    for (let u = 2; u <= 26; u += 0.5) {
+      if (!game.roads.isOnRoad(b.x + rx * side * u, b.z + rz * side * u)) { edge = u; break; }
+    }
+    if (!edge) continue;
+    const ex = b.x + rx * side * edge, ez = b.z + rz * side * edge;
+    const top = surf(ex, ez);
+    if (!top) continue;
+    let fall = 0, fallAt = 0;
+    for (let u = 1; u <= look; u += 1) {
+      const d = surf(ex + rx * side * u, ez + rz * side * u);
+      if (!d) continue;
+      const f = top.y - d.y;
+      if (f > fall) { fall = f; fallAt = u; }
+    }
+    if (fall < dropMin) continue;
+
+    // A corner you can carry speed into is more dangerous than a hairpin.
+    if (radius > radiusMax) continue;
+    // Entry speed a car can actually carry through this radius on this grip.
+    // Capped at the car's own top speed, but the cap must not swallow the whole
+    // signal: at radius 213 the uncapped figure is 76 m/s, so with a 40 m/s cap
+    // every corner scored identically and the radius did nothing at all. That is
+    // why the radius filter above exists rather than a speed weighting.
+    const entry = Math.min(40, Math.sqrt(2.8 * 9.81 * radius));
+    const n = nearest(ex, ez);
+    const covered = n.d <= reach;
+    if (covered && n.kind === 'guard') continue;         // steel present: fine
+    gaps.push({
+      x: +ex.toFixed(1), z: +ez.toFixed(1),
+      radius: Math.round(radius), fall: +fall.toFixed(1), fallAt,
+      entry: +entry.toFixed(1),
+      protectedBy: covered ? n.kind : 'nothing',
+      nearestBay: covered ? +n.d.toFixed(1) : null,
+      trouble: +(fall * entry).toFixed(0),
+    });
+  }
+  gaps.sort((p, q) => q.trouble - p.trouble);
+
+  // Collapse runs of adjacent stations into one reported gap.
+  const runs = [];
+  for (const g of gaps) {
+    const near = runs.find((r) => Math.hypot(r.x - g.x, r.z - g.z) < 30);
+    if (near) { near.stations++; if (g.fall > near.fall) { near.fall = g.fall; } continue; }
+    runs.push({ ...g, stations: 1 });
+  }
+  return {
+    checked: S.length,
+    dangerous: gaps.length,
+    nothingAtAll: gaps.filter((g) => g.protectedBy === 'nothing').length,
+    timberOnly: gaps.filter((g) => g.protectedBy === 'fence').length,
+    runs: runs.slice(0, 20),
+  };
+}
+
 export function auditCornerGuards(game) {
   // roads.js owns the definition of "a barrier is owed here" and already walks
   // every route to check it. Re-deriving that here would only give us a second,
