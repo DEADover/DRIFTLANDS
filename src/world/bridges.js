@@ -63,6 +63,19 @@ const RAMP = 22;         // over how many metres the deck settles onto the road
 const JOIN_LIP = 0.08;
 const DECK_PROUD = 0.30;
 
+/**
+ * STEEL, for the parapet. The same 0x64665b the road's W-beam uses (roads.js
+ * `steel`), so a rail crossing a bridge does not change species halfway. A
+ * parapet is the one part of a timber trestle that is not timber: it is the
+ * thing that stops you leaving, and it has to read as the same promise the road
+ * makes.
+ */
+const STEEL = {
+  beam: 0x64665b,
+  beamHi: 0x8f9186,       // the one bright crease along the top of a W-beam
+  post: 0x52544a,
+};
+
 const TIMBER = {
   deck: 0x9c6a3e,
   deckAlt: 0x8a5a33,
@@ -320,6 +333,8 @@ export function createBridges(ctx) {
   group.name = 'bridges';
   const decks = [];
   const colliders = [];
+  /** Parapet segments, published so the collision solver can hold the car on. */
+  const rails = [];
 
   const stub = {
     group,
@@ -418,8 +433,8 @@ export function createBridges(ctx) {
     if (!P) return stub;
     const n = P.length;
 
-    if (plan) buildPlannedDecks({ plan, P, roads, terrain, group, decks, colliders });
-    else buildFoundDecks({ P, roads, terrain, level, group, decks, colliders });
+    if (plan) buildPlannedDecks({ plan, P, roads, terrain, group, decks, colliders, rails });
+    else buildFoundDecks({ P, roads, terrain, level, group, decks, colliders, rails });
 
     if (typeof window !== 'undefined' && window.__WATER) window.__WATER.decks = decks.length;
     if (!decks.length) return stub;
@@ -540,7 +555,7 @@ export function createBridges(ctx) {
       return false;
     };
 
-    return { group, heightAt, isBlocked, colliders };
+    return { group, heightAt, isBlocked, colliders, rails };
   } catch (err) {
     console.warn('[bridges] build failed, continuing without bridges:', err);
     group.clear();
@@ -563,7 +578,7 @@ export function createBridges(ctx) {
  * mean. A flat deck sited on the mean sinks below the carriageway at the crown
  * and the car drives through it.
  */
-function buildPlannedDecks({ plan, P, roads, terrain, group, decks, colliders }) {
+function buildPlannedDecks({ plan, P, roads, terrain, group, decks, colliders, rails }) {
   const n = P.length;
   // Is the ground beside the route here cut by more than half a metre? That is
   // the footprint of the neck, and it is what has to be spanned.
@@ -627,13 +642,13 @@ function buildPlannedDecks({ plan, P, roads, terrain, group, decks, colliders })
       // The reference's bridge is a deck on legs; three and a half metres is
       // what it takes for the legs to be a visible part of the object rather
       // than something under it.
-      buildDeck({ idx, P, roads, terrain, deckY: null, floor: c.level + 3.6, waterline: c.level, group, decks, colliders });
+      buildDeck({ idx, P, roads, terrain, deckY: null, floor: c.level + 3.6, waterline: c.level, group, decks, colliders, rails });
     }
   }
 }
 
 /** The old behaviour, kept for any biome water.js has not planned. */
-function buildFoundDecks({ P, roads, terrain, level, group, decks, colliders }) {
+function buildFoundDecks({ P, roads, terrain, level, group, decks, colliders, rails }) {
   const n = P.length;
   const deckY = level + CLEARANCE;
   const covered = new Uint8Array(n);
@@ -668,12 +683,12 @@ function buildFoundDecks({ P, roads, terrain, level, group, decks, colliders }) 
     for (let k = i; k < j; k++) { const g = (start + k) % n; idx.push(g); run += P[g].ds; }
     i = j;
     if (idx.length >= 6 && run >= MIN_SPAN && run <= 340) {
-      buildDeck({ idx, P, roads, terrain, deckY, group, decks, colliders });
+      buildDeck({ idx, P, roads, terrain, deckY, group, decks, colliders, rails });
     }
   }
 }
 
-function buildDeck({ idx, P, roads = null, terrain, deckY, floor = -Infinity, waterline = null, group, decks, colliders }) {
+function buildDeck({ idx, P, roads = null, terrain, deckY, floor = -Infinity, waterline = null, group, decks, colliders, rails = null }) {
   const kit = new Kit();
   const hw = DECK_HW;
   const THICK = 0.5;
@@ -914,17 +929,18 @@ function buildDeck({ idx, P, roads = null, terrain, deckY, floor = -Infinity, wa
     // solid turns the approach into a gate the car has to thread.
     for (const s of [1, -1]) {
       const px = p.x + p.nx * hw * s, pz = p.z + p.nz * hw * s;
-      kit.box(0.38, 1.55, 0.38, px, dY(p, hw * s) + 0.62, pz, yaw, TIMBER.post);
-      // NO COLLIDER ON THE RAILING.
+      kit.box(0.30, 1.20, 0.30, px, dY(p, hw * s) + 0.52, pz, yaw, STEEL.post);
+      // NO POINT COLLIDER ON THE POSTS — the parapet is published as a barrier
+      // SEGMENT instead (see `rails` below), which is what it physically is.
       //
-      // game.js pushes the car out of a collider at (r + 1.4) m, so a post at
-      // the deck edge eats 1.6 m of carriageway on each side — and the deck is
-      // only a metre wider than the road it carries. Measured over ninety
-      // seconds of autopilot: the car clipped a post at the abutment, was
-      // shoved sideways, re-entered, clipped again — twelve deck entries in one
-      // lap and a finishing speed of 32 km/h. The brief for this round is that
-      // a car on the centreline crosses cleanly, and the cheapest way to
-      // guarantee that is for there to be nothing on the bridge to hit.
+      // The note that used to stand here described a collision model that no
+      // longer exists: game.js pushed the car out of a circular collider at
+      // (r + 1.4) m, so a post at the deck edge ate 1.6 m of carriageway a side
+      // and the car bounced in and out of the parapet twelve times a lap. Since
+      // core/collision.js the car is an oriented box resolved against the
+      // barrier's own face normal, and a `guard` segment deflects ALONG the beam
+      // rather than shoving the car sideways off it. So the reason for leaving
+      // a bridge over water with nothing to stop you going into it is gone.
     }
   }
   // Two horizontal rails, laid per plank segment so they follow the curve.
@@ -937,8 +953,25 @@ function buildDeck({ idx, P, roads = null, terrain, deckY, floor = -Infinity, wa
       const nx = (p.nx + q.nx) / 2, nz = (p.nz + q.nz) / 2;
       const rx = mx + nx * hw * s, rz = mz + nz * hw * s;
       const my = (dY(p, hw * s) + dY(q, hw * s)) / 2;
-      kit.box(len, 0.22, 0.16, rx, my + 1.12, rz, yaw, TIMBER.rail);
-      kit.box(len, 0.18, 0.13, rx, my + 0.62, rz, yaw, TIMBER.rail);
+      // A W-beam and its crease, read almost entirely off the top faces from
+      // this camera — the same reading roads.js arrived at for the road's own
+      // barrier, so the two match at a glance.
+      kit.box(len, 0.62, 0.20, rx, my + 0.92, rz, yaw, STEEL.beam);
+      kit.box(len, 0.10, 0.09, rx, my + 1.24, rz, yaw, STEEL.beamHi);
+      // AND IT IS SOLID. One barrier segment per plank segment, published as
+      // `guard` so core/collision.js deflects the car ALONG the beam and never
+      // breaks it — which is what a bridge parapet is for and why the road's
+      // own steel behaves the same way. The face normal points INBOARD, toward
+      // the carriageway, because that is the side a car arrives from.
+      if (rails) {
+        const ex = q.x - p.x, ez = q.z - p.z;
+        const il = 1 / (Math.hypot(ex, ez) || 1);
+        rails.push({
+          x: rx, z: rz, dx: ex * il, dz: ez * il, half: len * 0.5,
+          nx: -nx * s, nz: -nz * s,
+          kind: 'guard', broken: false, id: rails.length,
+        });
+      }
       // A kerb board sitting ON the deck just inboard of the posts. From a
       // camera looking 52 degrees down the railing is nearly edge-on and the
       // deck's own outline is the only thing separating timber from meadow;

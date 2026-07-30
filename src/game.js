@@ -191,7 +191,26 @@ export class Game {
     // The barrier set is rebuilt with the roads, so the collision world has to
     // be re-pointed at it; everything else it needs is reached through closures
     // that survive the swap.
-    this.collisionWorld.barriers = this.roads.barriers;
+    /**
+     * ONE BARRIER VIEW OVER TWO OWNERS.
+     *
+     * roads.js publishes the road's fences and guardrails; bridges.js now
+     * publishes its parapets, which until this round were drawn and not solid —
+     * so three of five spans let the car leave the deck at speed with no
+     * collision event at all and fall 8.5 to 11.3 m into the lake.
+     *
+     * The solver takes one `barriers`, so this composes them. Bridge rails are
+     * `guard`: `hit()` is never true for them, exactly as for the road's steel,
+     * so the id space only has to be unambiguous for the breakable ones — and
+     * those are all roads'. Bridge ids are offset clear of them anyway.
+     */
+    const roadBarriers = this.roads.barriers;
+    const bridgeRails = (this.bridges.rails ?? []).map((r, i) => ({ ...r, id: -1 - i }));
+    this.collisionWorld.barriers = {
+      get segments() { return roadBarriers.segments.concat(bridgeRails); },
+      hit: (id, load) => (id >= 0 ? roadBarriers.hit(id, load) : false),
+      update: (dt) => roadBarriers.update?.(dt),
+    };
 
     this.carView.setHeadlights(palette.sunElevation < 0.18);
 
