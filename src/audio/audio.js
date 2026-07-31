@@ -840,8 +840,44 @@ class Audio {
       else if (name === 'driftStart') this._driftStart();
       else if (name === 'driftEnd') this._payout(payload?.score ?? 0);
       else if (name === 'shift') this._shift(true, this._lastV ?? {});
+      else if (name === 'lap') this._lap(payload?.final === true);
     } catch (err) {
       if (!this._warned) { this._warned = true; console.warn('[audio]', err); }
+    }
+  }
+
+  /**
+   * THE LAP CHIME — a timing beam, not a fanfare.
+   *
+   * Two short bell tones a fifth apart, the second a beat after the first, on a
+   * fast exponential decay. Deliberately spare: this fires once a lap, over an
+   * engine at full noise, and it has one job — to tell the player the line went
+   * under them without taking their attention off the road. A fanfare would be
+   * heard once and resented four more times.
+   *
+   * The final lap gets a third tone an octave up, so finishing sounds different
+   * from lapping without needing a second sound to learn.
+   */
+  _lap(final = false) {
+    const ctx = this.ctx, now = ctx.currentTime;
+    // A fifth: 880 and 1320 Hz sit above the engine's strongest harmonics
+    // (the firing order tops out near 600 Hz at the limiter) so the chime is
+    // heard through full throttle rather than mixed into it.
+    const notes = final ? [[880, 0], [1320, 0.13], [1760, 0.27]] : [[880, 0], [1320, 0.13]];
+    for (const [hz, at] of notes) {
+      const t = now + at;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      // Triangle, not sine: a pure sine at this level disappears under broadband
+      // engine noise, and a saw is a buzzer. A triangle keeps a little edge.
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(hz, t);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.5, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0008, t + 0.42);
+      o.connect(g).connect(this.master);
+      o.start(t);
+      o.stop(t + 0.45);
     }
   }
 

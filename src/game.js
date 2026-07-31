@@ -232,6 +232,29 @@ export class Game {
     // The gate is sited from the route, so it can only be built once the roads
     // and bridges are up; attach re-sites it and resets the ledger.
     this.race.attach(this);
+
+    /**
+     * AND THE CAR STARTS ON THE LINE.
+     *
+     * startline.js sites the gate 15 to 48 m AHEAD of `roads.spawn()`, so that
+     * lap 1 is a full circuit like the other four rather than a short one. That
+     * is right for the table and wrong for the player, who was left staring at
+     * `TO THE LINE` and driving fifty metres of nothing before the clock even
+     * started.
+     *
+     * Both can be true: keep the gate where it is and move the CAR to it. Four
+     * metres back along the gate's own forward direction — a car length, so it
+     * begins wholly behind the line and the very first crossing is unambiguous,
+     * and close enough that the clock starts within a few tenths of the flag.
+     */
+    const gate = this.race.gate;
+    if (gate) {
+      const BACK = 4.0;
+      const heading = Math.atan2(-gate.fz, gate.fx);
+      this.vehicle.reset(gate.x - gate.fx * BACK, gate.z - gate.fz * BACK, heading);
+      this.resetPose();
+      this.race.attach(this);      // re-seed the crossing test at the new position
+    }
     this.driftScore = 0;
     if (this.hud) this.hud.setPlace(biome.label);
     this.currentBiome = id;
@@ -881,8 +904,27 @@ export class Game {
     // PAUSE STOPS THE SIMULATION, NOT THE RENDERER. render() is called from the
     // frame loop separately, so the world stays on screen behind the table.
     if (this.race.paused) return;
-    const scaled = dt * (this.feel.timeScale ?? 1);
-    this.accumulator += Math.min(scaled, 0.1);
+    /**
+     * THE ACCUMULATOR MAY NEVER GO NEGATIVE, AND IT HAD.
+     *
+     * MEASURED on a running page: `accumulator = -5.86`, i.e. seven hundred
+     * fixed steps in debt. The loop below only runs while it is at or above
+     * FIXED_DT, so once it is negative NOTHING STEPS EVER AGAIN — simTime frozen
+     * at 0, the car at 0.00 m/s with the throttle wide open, and a world that
+     * renders perfectly while being completely dead. That is the worst shape a
+     * bug can have: the picture looks fine.
+     *
+     * It only takes ONE negative `scaled` to get there and there is no way back,
+     * because the recovery has to climb out at real time. Both inputs are now
+     * pinned: a time scale cannot be negative (it is a rate, and the slow-motion
+     * easing added this round is the obvious way one could transiently go under
+     * zero), and dt cannot be either. The clamp on the accumulator itself is the
+     * belt to that pair of braces — whatever future code gets this wrong, the
+     * simulation keeps running.
+     */
+    const ts = Math.max(0, this.feel.timeScale ?? 1);
+    const scaled = Math.max(0, dt) * ts;
+    this.accumulator = Math.max(0, this.accumulator + Math.min(scaled, 0.1));
     while (this.accumulator >= FIXED_DT) {
       this.step(FIXED_DT, input);
       this.accumulator -= FIXED_DT;

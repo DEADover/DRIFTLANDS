@@ -373,6 +373,11 @@ export class Race {
     });
     this.lapStartT = tCross;
     this.lapStartDrift = driftCross;
+    // The line going under the car is a fact the player should HEAR — at this
+    // camera height the gate passes in a couple of frames and is easy to miss
+    // while looking at the corner ahead. `final` distinguishes the chequered
+    // flag from lapping, so the two never have to be told apart by counting.
+    game.audio?.event?.('lap', { n: this.laps.length, final: this.laps.length >= this.lapsTotal });
 
     if (this.laps.length >= this.lapsTotal) {
       this.state = 'finished';
