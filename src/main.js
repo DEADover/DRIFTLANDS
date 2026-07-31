@@ -26,6 +26,12 @@ if (shotId) {
   game.cameraZoom = preset.camera?.zoom ?? 1;
   if (preset.camera?.pitchDeg) game.camera.pitch = (preset.camera.pitchDeg * Math.PI) / 180;
 
+  // A capture is a fixed number of steps from a fixed pose. The auto-rescue in
+  // game.js may not fire inside one — a teleport mid-warm-up would change what
+  // the shot is of. Cleared afterwards so a harness that boots this page and
+  // then drives the game itself (every tool in tools/) still gets rescued.
+  game.noRescue = true;
+
   const tape = new TapeInput(preset.tape);
   const dt = 1 / 60;
   // `?t=` overrides the preset's settle time. Shooting one preset at several
@@ -48,6 +54,7 @@ if (shotId) {
     tape.advance(dt);
     game.update(dt, input);
   }
+  game.noRescue = false;
   game.render();
   game.render(); // second pass so shader compiles never land in the capture
 
@@ -88,48 +95,28 @@ if (shotId) {
   window.addEventListener('keydown', onAnyKey);
 
   /**
-   * Respawn on the route. Also used to rescue the player: at this camera height
-   * it is easy to end up in a lake or wedged somewhere with no way to tell what
-   * went wrong, and a demo must never dead-end.
+   * Respawn on the route. At this camera height it is easy to end up in a lake
+   * or wedged somewhere with no way to tell what went wrong, and a demo must
+   * never dead-end.
+   *
+   * The act itself lives on the game (`respawnCar`), because the auto-rescue
+   * that used to sit a few lines below this one now lives there too — see
+   * § THE RESCUE BELONGS TO THE SIMULATION in game.js. It was rescuing the
+   * player and no headless harness in the project, which meant every audit we
+   * have taken could be quietly distorted by a car that stopped moving.
    */
-  const respawn = () => {
-    const s = game.roads.spawn?.() ?? game.findSpawn();
-    game.vehicle.reset(s.x, s.z, s.heading);
-    game.resetPose();            // vertical + pose state lives on the game, not the vehicle
-    game.skid.clear();
-    game.particles.clear();
-    game.driftScore = 0;
-    game.camera.calmShake?.();   // a crash must not follow you through a respawn
-  };
-
   window.addEventListener('keydown', (e) => {
-    if (e.code === 'KeyR') respawn();
+    if (e.code === 'KeyR') game.respawnCar();
     // Biome switching is deliberately NOT bound. This build is a single-world
     // demo; the other biomes exist in the codebase but none of them has had the
     // art pass alpine has, so offering them would only show unfinished work.
   });
 
-  // Auto-rescue: if the car is submerged or stuck for a few seconds, put it back
-  // on the road rather than leaving the player stranded.
-  let stuckFor = 0;
-  const watchdog = (dt, input) => {
-    const v = game.vehicle;
-    const g = game.groundAt(v.position.x, v.position.z);
-    const submerged = g.height < (game.biome.waterLevel ?? -Infinity) - 0.5;
-    // Only "stuck" if the player is ASKING to move and nothing is happening.
-    // Parking to look at the view must never teleport you.
-    const wedged = v.speed < 1.2 && (input.throttle > 0 || input.brake > 0);
-    stuckFor = (submerged || wedged) ? stuckFor + dt : 0;
-    if (stuckFor > 5) { respawn(); stuckFor = 0; }
-  };
-
   let last = performance.now();
   const frame = (now) => {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
-    const input = kb.sample();
-    game.update(dt, input);
-    watchdog(dt, input);
+    game.update(dt, kb.sample());
     game.render();
     requestAnimationFrame(frame);
   };

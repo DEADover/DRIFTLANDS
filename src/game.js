@@ -88,6 +88,11 @@ export class Game {
     this.cameraZoom = 1;
     this._wasDrifting = false;
 
+    // Auto-rescue state — see § THE RESCUE BELONGS TO THE SIMULATION.
+    this.noRescue = false;
+    this.rescues = 0;
+    this._stuckFor = 0;
+
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
     this._watchSize();
@@ -625,6 +630,62 @@ export class Game {
     this.carView?.resetSeating?.();
   }
 
+  /**
+   * Put the car back on the route. The R key and the auto-rescue below are the
+   * same act and must not be two implementations of it.
+   */
+  respawnCar() {
+    const s = this.roads.spawn?.() ?? this.findSpawn();
+    this.vehicle.reset(s.x, s.z, s.heading);
+    this.resetPose();            // vertical + pose state lives here, not on the vehicle
+    this.skid.clear();
+    this.particles.clear();
+    this.driftScore = 0;
+    this.camera.calmShake?.();   // a crash must not follow you through a respawn
+    this._stuckFor = 0;
+  }
+
+  /**
+   * § THE RESCUE BELONGS TO THE SIMULATION, NOT TO THE KEYBOARD LOOP.
+   *
+   * This watchdog spent its whole life in main.js's `requestAnimationFrame`
+   * callback, next to the keyboard sampler. A person playing the game was
+   * therefore rescued and every headless run in the project was not: probe.mjs,
+   * collide-live.mjs, jump-test.mjs and race-test.mjs all drive `game.update()`
+   * straight and never saw a line of it. That is the wrong way round. A stuck
+   * car does not distort what a player sees — they get picked up after five
+   * seconds and carry on — it distorts the MEASUREMENTS, silently, because a
+   * run that spends its last 80 s parked against a sapling still reports a mean
+   * and a p95 and looks like a number. Every audit taken in this project so far
+   * has been exposed to that, and at least one is known to have been bitten by
+   * it: collide-live.mjs's "51.8% of the run under 3 m/s, ended stationary at
+   * (-128, 414)". The rescue lives here so that the thing being measured and
+   * the thing being played are the same thing.
+   *
+   * THE GATE IS UNCHANGED, and both halves of it matter. `speed < 1.2` with a
+   * pedal down means the player is ASKING to move and nothing is happening; a
+   * car parked to look at the view is holding no pedal and is never touched.
+   * Submerged is separate because a car in a lake is stuck whatever it does.
+   *
+   * `noRescue` is honoured for the deterministic capture warm-up in main.js: a
+   * screenshot is a fixed number of steps from a fixed pose and may not have a
+   * teleport inside it. It is NOT gated on `capture`, because every harness in
+   * tools/ boots through a capture page and then drives the game itself — those
+   * runs are exactly the ones that need this.
+   */
+  _watchdog(dt, input) {
+    if (this.noRescue || !input) return;
+    const v = this.vehicle;
+    const g = this.groundAt(v.position.x, v.position.z);
+    const submerged = g.height < (this.biome?.waterLevel ?? -Infinity) - 0.5;
+    const wedged = v.speed < 1.2 && ((input.throttle ?? 0) > 0 || (input.brake ?? 0) > 0);
+    this._stuckFor = (submerged || wedged) ? this._stuckFor + dt : 0;
+    if (this._stuckFor > 5) {
+      this.respawnCar();
+      this.rescues++;
+    }
+  }
+
   surfaceAt(x, z) {
     if (this.bridges.heightAt(x, z) != null) return { grip: 1.0, kind: 'bridge' };
     if (this.roads.isOnRoad(x, z)) return { grip: this.roads.gripAt(x, z), kind: 'road' };
@@ -861,19 +922,19 @@ export class Game {
         this.audio.event('land', { speed: impact });
         this.camera.addShake(Math.min(0.6, impact * 0.02));
       }
-      v.onGround = true;
       /**
        * AND THE FLAG THAT IS ACTUALLY TRUE.
        *
-       * `onGround` is written twice per step — vehicle.updateVertical sets it
-       * from the SUSPENSION and this clamp sets it from the ballistics — and the
-       * suspension's copy is the one a later reader sees. Measured over this
-       * jump: `v.onGround` reads `true` for the whole 0.9 s flight, with the car
-       * 3.11 m above the ground at the apex. Anything downstream that needs to
-       * know whether the wheels are on the surface (fx/feel.js holds slow motion
-       * on exactly that question) has to read a flag nothing else touches.
+       * `onGround` used to be written twice per step — here from the ballistics
+       * and again, later, in vehicle.updateVertical from the SUSPENSION — and
+       * the suspension's copy was the one every reader saw. Measured over this
+       * jump: `v.onGround` read `true` for the whole 0.9 s flight, with the car
+       * 3.11 m above the ground at the apex. vehicle.js now only reads it, and
+       * `ballisticAir` — the flag that existed to route around the collision —
+       * is an alias for it there, so this assignment is the only one in the
+       * build and there is nothing left for it to disagree with.
        */
-      v.ballisticAir = false;
+      v.onGround = true;
       this._airborne = false;
     } else {
       /**
@@ -904,28 +965,137 @@ export class Game {
       this._rampRise = 0;
       this._rampGate = 0;
       v.onGround = false;
-      v.ballisticAir = true;
       this._airborne = true;
     }
 
-    if (!v.onGround) return;   // no traction in the air, so no slope force
+    if (!v.onGround) { v.groundSlope = 0; return; }   // no traction in the air
 
     // Gravity along the ground plane. For a unit normal n the downhill
     // direction in xz is (n.x, n.z) and its length is sin(slope), so this one
     // expression gives both the direction and the g*sin(theta) magnitude.
     const n = g.normal;
     const slope = Math.hypot(n.x, n.z);
+    v.groundSlope = slope;
     if (slope > 0.02) {
       const G = 9.81;
-      v.velocity.x += n.x * G * dt;
-      v.velocity.z += n.z * G * dt;
+      const ux = n.x / slope, uz = n.z / slope;      // downhill, unit, in xz
 
-      // Beyond about 32 degrees the tyres cannot hold at all: bleed speed hard
-      // so a steep bank is a wall, not a ramp. This is what stops the car
-      // climbing out of a lake basin onto a road that sits well above it.
-      if (slope > 0.53) {
-        const over = Math.min(1, (slope - 0.53) / 0.30);
-        v.velocity.multiplyScalar(1 - over * 3.2 * dt);
+      /**
+       * IS IT A SURFACE, OR A STEP THE STENCIL IS STRADDLING?
+       *
+       * `groundAt` builds this normal from central differences over a 2.5 m arm,
+       * and that baseline is right for the question "how steep is this hillside
+       * for a car" — see its own note. It is a LIE about anything with a wall in
+       * it, because a 5 m stencil laid across a cliff averages the two benches
+       * either side of it and reports the cliff as a slope the car is standing
+       * on.
+       *
+       * MEASURED, the face this whole task was reported against — road sample
+       * ~900, at (514.3, 464.6). The normal there reads 0.899, which everyone
+       * including the report called "a 67 degree bank". Sampling the drawn
+       * surface along that normal's own downhill direction at 0.25 m says
+       * otherwise:
+       *
+       *     s -2.00 .. 0.00   h 20.557 -> 20.231    gradient -0.05  (flat bench)
+       *     s  0.00 -> 0.25   h 20.231 -> 14.187    A 6.04 m CLIFF
+       *     s  0.25 .. 2.25   h 14.187 -> 13.745    gradient -0.22  (flat bench)
+       *
+       * There is no 67 degree bank. There is a vertical step between two pieces
+       * of near-level ground, and a car parked on the upper one was being pushed
+       * sideways at 8.82 m/s^2 by a gradient that is not under its wheels.
+       *
+       * So: measure the surface over a car's length and believe the smaller of
+       * the two. On a real bank the two agree by construction (tan 64 deg over
+       * 1.8 m is still 0.899 of sine) and nothing changes; on a step the local
+       * probe reads the bench and gravity stops inventing a hill. It costs two
+       * `surfaceHeight` calls, and only past 0.20 where the correction could be
+       * worth more than 0.2 m/s^2.
+       */
+      let sine = slope;
+      if (slope > 0.20) {
+        const R = 0.9;                                 // half a wheelbase
+        // ONE-SIDED, AND UPHILL. A two-sided probe is no better than the 2.5 m
+        // stencil at the lip of a step: it straddles the same cliff and reports
+        // the same 0.899. The question that has an answer is "what is under the
+        // wheels", and the ground the car is standing on is the ground BEHIND
+        // the downhill direction. At (514.3, 464.6) that reads 0.054 — the
+        // bench — while the two-sided probe reads 0.96 and the stencil 0.899.
+        const rise = this.surfaceHeight(v.position.x - ux * R, v.position.z - uz * R) - ground;
+        const tan = Math.max(0, rise / R);             // per metre, downhill +ve
+        sine = Math.min(slope, tan / Math.hypot(1, tan));
+      }
+      // The honest one, because the standstill deadband in vehicle.js asks the
+      // same question: is this ground shallow enough to park on?
+      v.groundSlope = sine;
+      v.velocity.x += ux * sine * G * dt;
+      v.velocity.z += uz * sine * G * dt;
+
+      /**
+       * A STEEP FACE SHOULD END THE SLIDE, NOT WELD THE CAR TO IT.
+       *
+       * This bleed used to run at 3.2/s on the WHOLE velocity vector, which is
+       * the trap. MEASURED at (514.3, 464.6), full throttle, pointing uphill:
+       * the car sat at a fixed point 0.22 m from where it started, skittering
+       * between 0.003 and 0.15 m/s, for as long as the test ran. The along-slope
+       * gravity was never missing — it is applied at every slope, and GRADE_MAX
+       * gates only the launch and landing terms above, nothing here. 9000 N of
+       * drive is 7.63 m/s^2 up the hill against 8.82 m/s^2 down it, so the net
+       * is 1.19 m/s^2 downhill and 3.2/s caps the resulting slide at 0.37 m/s.
+       * The car was sliding off. It was sliding off at a quarter of walking pace.
+       *
+       * 0.75/s instead, on the honest gradient: against 8.82 m/s^2 that settles
+       * at 11.8 m/s — a car falling off a bank rather than one welded to it, and
+       * still not the 120 m/s that drag alone would allow. The job this bleed
+       * used to do as a side effect, stopping the car driving up out of a lake
+       * basin onto a road above it, is done properly by § THE WALL below, which
+       * asks about the ground in FRONT of the car instead of guessing from a
+       * normal that cannot tell ahead from behind.
+       */
+      if (sine > 0.53) {
+        const over = Math.min(1, (sine - 0.53) / 0.30);
+        v.velocity.multiplyScalar(1 - Math.min(0.5, over * 0.75 * dt));
+      }
+    } else {
+      v.groundSlope = slope;
+    }
+
+    /**
+     * § THE WALL — the only honest way to ask "can I go that way".
+     *
+     * Every previous attempt to stop the car climbing something it should not
+     * was made from the ground NORMAL, and a normal is symmetric: it is the same
+     * at the foot of a wall and at the lip of the same wall, so any rule built
+     * on it either lets the car climb from below or welds it in place from
+     * above. That is exactly what happened at (514.3, 464.6), where the 6.04 m
+     * step between two flat benches reads 0.899 from both sides.
+     *
+     * So ask the question with a direction in it: sample the drawn surface a
+     * bumper's reach along the way the car is actually travelling and see
+     * whether it goes up faster than a car can climb. GRADE_MAX is already this
+     * build's answer to "steeper than that is a step, not a surface" and is
+     * reused deliberately. Faded over the next 0.40 of grade so a genuinely
+     * steep but drivable pitch is left alone, and applied as a RATE, so a wall
+     * is something the car piles into over a fifth of a second rather than
+     * something that stops it dead in one frame.
+     *
+     * What this buys, in the order it matters:
+     *   - a lake bank at 0.65 is unclimbable from the water, as before;
+     *   - the SAME bank, stood on from the top, costs nothing at all, because
+     *     the ground in front of a car pointing away from it is flat;
+     *   - the jump ramp (0.25) and every road climb are untouched;
+     *   - a car pressed into a wall is slowed, not welded — the tangential
+     *     escape in vehicle.js § THE ESCAPE takes it out along the face.
+     */
+    const sp = Math.hypot(v.velocity.x, v.velocity.z);
+    if (sp > 0.05) {
+      const A = 1.2;
+      const ahead = (this.surfaceHeight(
+        v.position.x + (v.velocity.x / sp) * A,
+        v.position.z + (v.velocity.z / sp) * A,
+      ) - ground) / A;
+      if (ahead > GRADE_MAX) {
+        const w = Math.min(1, (ahead - GRADE_MAX) / 0.40);
+        v.velocity.multiplyScalar(1 - Math.min(0.9, w * 20 * dt));
       }
     }
 
@@ -1041,6 +1211,10 @@ export class Game {
       const h = scaled / substeps;
       for (let i = 0; i < substeps; i++) this.step(h, input);
     }
+
+    // On the REAL frame time, not the slow-motion one: five seconds of being
+    // wedged is five seconds by the clock on the wall.
+    this._watchdog(Math.min(Math.max(0, dt), 0.1), input);
 
     const v = this.vehicle;
     const g = this.groundAt(v.position.x, v.position.z);

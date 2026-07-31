@@ -196,7 +196,10 @@ export const DEFAULT_TUNE = {
   bumpSpin: 0.22,            // yaw flick from an off-centre hit
   bumpAlign: 0.58,           // how much a hit turns the CAR, not just its path
   bumpDeflect: 0.62,         // minimum slide along the surface, per m/s of hit
-  bumpEscape: 7.0,           // m/s per second of grinding — nothing traps the car
+  // m/s of tangential slide per second of grinding. See § THE ESCAPE in `step`:
+  // this used to live in `_resolveExternal`, where it had been dead code since
+  // core/collision.js started calling commitExternalResolve() every frame.
+  bumpEscape: 7.0,
   bumpSteer: 2.2,            // rad/s^2 steering the nose along the obstacle
 
   // --- suspension (visual + landing feel) ----------------------------------
@@ -208,6 +211,20 @@ export const DEFAULT_TUNE = {
 };
 
 const GEAR_COUNT = 6;
+
+// --- § THE ESCAPE, the constants -------------------------------------------
+// Deliberately the same speed the auto-rescue in game.js calls "wedged": the
+// two are the same judgement made 4.6 s apart, and they must not disagree about
+// what standing still means.
+const GRIND_SPEED = 1.2;         // m/s — below this, and asking to move, is a grind
+// ...and it stays a grind until the car is comfortably clear of the ceiling the
+// escape itself can reach. Without this hysteresis the escape throttles itself:
+// MEASURED at the lake bank and the bridge abutment, both settled at 1.19 and
+// 1.21 m/s, a hair under the arming speed, arming and disarming forever.
+const GRIND_RELEASE = 2.5;       // m/s
+const GRIND_ARM = 0.35;          // s of grinding before any slide is granted
+const GRIND_MAX = 1.10;          // s — the ceiling on the accumulator
+const ESCAPE_MAX = 3.0;          // m/s — walking pace out, not a shove
 
 export class Vehicle {
   constructor(tune = {}) {
@@ -261,6 +278,18 @@ export class Vehicle {
     this._lastVel = new THREE.Vector3();
     this._lastYawRate = 0;
 
+    // The velocity `step` itself produced last time, so the next step can see
+    // what the world outside took back off us (§ THE ESCAPE). `_lastVel` cannot
+    // serve: core/collision.js overwrites it through commitExternalResolve on
+    // every frame, contact or no contact.
+    this._stepVel = new THREE.Vector3();
+    this._grindTime = 0;
+    this._grindTx = 0;
+    this._grindTz = 0;
+    // Written by game.js `_stepVertical` — the gradient of the surface the
+    // wheels are on. Read by the standstill deadband at the end of `step`.
+    this.groundSlope = 0;
+
     // Vertical body state (driven by entities/car.js, which knows the ground).
     this._bodyY = 0;
     this._bodyVY = 0;
@@ -296,6 +325,9 @@ export class Vehicle {
     this._lastPos.copy(this.position);
     this._lastVel.set(0, 0, 0);
     this._lastYawRate = 0;
+    this._stepVel.set(0, 0, 0);
+    this._grindTime = 0;
+    this._grindTx = this._grindTz = 0;
     this._bodyY = this._bodyVY = 0;
     this._groundY = null;
     this._contactTime = 0;
@@ -317,6 +349,15 @@ export class Vehicle {
   get right() {
     return this._right.set(Math.sin(this.heading), 0, Math.cos(this.heading));
   }
+
+  /**
+   * RETIRED, KEPT AS A NAME. `ballisticAir` existed only because `onGround` was
+   * written twice per step and the wrong copy won the read (see the § note in
+   * `updateVertical`). It is now the same bit, so fx/feel.js and
+   * tools/jump-trace.mjs need no change and cannot drift apart from it. It is
+   * read-only on purpose: a second writeable airborne flag is the bug.
+   */
+  get ballisticAir() { return !this.onGround; }
 
   /** Peak friction coefficient available on the current surface. */
   get mu() {
@@ -432,12 +473,127 @@ export class Vehicle {
   }
 
   /**
+   * § THE ESCAPE — and why `bumpEscape` had not run once since collision.js
+   * landed.
+   *
+   * `bumpEscape` lives in `_resolveExternal` above, where it is guarded by
+   * `_contactTime`, which only grows when the shim finds the car somewhere it
+   * did not put it. core/collision.js finishes every pass by calling
+   * `commitExternalResolve()` — UNCONDITIONALLY, contact or no contact — which
+   * copies the post-solve pose into `_lastPos`. So the shim's very first test,
+   * `d2 < 1e-8`, is true on every single frame, `_contactTime` decays to zero
+   * and stays there, and the line whose comment reads "nothing traps the car"
+   * has been unreachable ever since. The comment was describing dead code.
+   *
+   * MEASURED (tools/stuck-test.mjs, alpine seed 1337): a car nosed into a
+   * SAPLING of 0.231 m radius at (427.26, 313.73) sits at 0.062 m/s with the
+   * throttle wide open for as long as you care to hold it — 15 s tested, and
+   * the state is a fixed point, so it is forever. Deleting the prop grid from
+   * `collisionWorld` and repeating the run from the same pose frees it
+   * immediately (30.4 m/s after 5 s), which is what pins the cause on the
+   * contact and not on the terrain. The mechanism inside collision.js is its
+   * own no-grind rule: it removes the whole approach component and hands back
+   * `deflect` of it along the contact TANGENT, but the tangent is derived from
+   * the slide the car already has, so a car with no speed gets a tangent of
+   * zero length and no deflection at all. At 25 m/s the rule works; at rest it
+   * cannot, and at rest is exactly when you need it.
+   *
+   * So the escape is rebuilt here, on the one signal that survives the commit:
+   * the difference between the velocity THIS module produced at the end of the
+   * last step and the velocity it is handed at the start of this one. Whatever
+   * ate it — a solver impulse, a slope, a depenetration — pushed along that
+   * difference, so it is a normal, and its perpendicular is a way out. Growing
+   * the slide with grind time is the original `bumpEscape` idea and its
+   * original constant; what is new is that it can actually fire.
+   *
+   * IT IS DELIBERATELY NOT A RESCUE. 3.0 m/s of ceiling is a car crawling clear
+   * of a trunk, not a car being thrown off one; it needs 0.35 s of continuous
+   * grinding to arm, and it needs the player to be ASKING to move, so a car
+   * parked against a fence to look at the view is left alone. The 5 s auto-
+   * rescue in game.js is still behind it for whatever this cannot reach.
+   */
+  _escapeGrind(dt, input) {
+    const T = this.tune;
+    const want = clamp(input?.throttle ?? 0, 0, 1);
+    const made = Math.hypot(this._stepVel.x, this._stepVel.z);
+    const have = Math.hypot(this.velocity.x, this.velocity.z);
+    /**
+     * "THE THROTTLE IS DOWN AND THE CAR IS NOT MOVING." That is the whole test,
+     * and the two earlier and cleverer versions of it are worth recording
+     * because both were wrong in the same way.
+     *
+     * The first asked whether something OUTSIDE this module had eaten the speed
+     * we made — `have < made * k`. It is a good description of the trunk weld,
+     * where the solver takes the velocity away, and it is exactly backwards at
+     * the bridge abutment at (-113.9, -208.6), where the trace reads
+     * `in 0.0500 -> out 0.0216` on every substep: the world PUSHES the car
+     * (gravity down a 0.54 bank) and the tyre forces in this module cancel it.
+     * `have` is bigger than `made` there, not smaller, and no threshold on that
+     * ratio can catch both. A stuck car is not distinguished by which side of
+     * the fence ate the speed.
+     *
+     * THROTTLE, NOT THROTTLE-OR-BRAKE, and not under the handbrake. A player
+     * holding the brake at a standstill is asking the car to stay still, and a
+     * player holding throttle and lever together is doing a stationary spin;
+     * neither may be shoved sideways. A normal standing start cannot arm this
+     * either — 0 to GRIND_SPEED takes 0.16 s at 7.63 m/s^2 and the timer needs
+     * 0.35 s of it.
+     */
+    const stop = this._grindTime > 0 ? GRIND_RELEASE : GRIND_SPEED;
+    const held = want > 0 && (input?.handbrake ?? 0) < 0.5
+      && have < stop && made < stop;
+    this._grindTime = held
+      ? Math.min(GRIND_MAX, this._grindTime + dt)
+      : Math.max(0, this._grindTime - dt * 4);
+    if (this._grindTime === 0) { this._grindTx = 0; this._grindTz = 0; }
+    if (this._grindTime <= GRIND_ARM) return;
+
+    /**
+     * THE WAY OUT IS CHOSEN ONCE AND THEN COMMITTED TO.
+     *
+     * The direction comes from whatever moved the car without this module's
+     * consent — `velocity - _stepVel` — which is a contact normal at a trunk, a
+     * downhill at a bank and a push-out at a barrier, and is perpendicular to
+     * all three of the ways out. Recomputing it every substep is what a driver
+     * would never do: MEASURED at the bridge abutment, the free tangent rotated
+     * with the pocket the car was in and the car drove a 2 m/s circle, covering
+     * 30 m of path and ending 2.7 m from where it started. So it is LATCHED for
+     * as long as the grind lasts, and only a fresh grind may pick a new one.
+     */
+    if (this._grindTx === 0 && this._grindTz === 0) {
+      let nx = this.velocity.x - this._stepVel.x;
+      let nz = this.velocity.z - this._stepVel.z;
+      const nl = Math.hypot(nx, nz);
+      if (nl < 1e-4) return;
+      nx /= nl; nz /= nl;
+      // Along the contact, in whichever of the two tangents the nose is
+      // pointing — the same choice `_resolveExternal` makes, for the same
+      // reason: the player is trying to go somewhere and this is the half of
+      // the tangent that agrees with them.
+      let tx = -nz, tz = nx;
+      const f = this.forward;
+      if (tx * f.x + tz * f.z < 0) { tx = -tx; tz = -tz; }
+      this._grindTx = tx; this._grindTz = tz;
+    }
+    const tx = this._grindTx, tz = this._grindTz;
+
+    const esc = Math.min(T.bumpEscape * (this._grindTime - GRIND_ARM), ESCAPE_MAX) *
+      (0.4 + 0.6 * want);
+    const along = this.velocity.x * tx + this.velocity.z * tz;
+    if (along < esc) {
+      this.velocity.x += tx * (esc - along);
+      this.velocity.z += tz * (esc - along);
+    }
+  }
+
+  /**
    * @param {number} dt fixed timestep
    * @param {{throttle:number,brake:number,steer:number,handbrake:number}} input
    */
   step(dt, input) {
     const T = this.tune;
     this._resolveExternal(dt, input);
+    this._escapeGrind(dt, input);
 
     const cosH = Math.cos(this.heading), sinH = Math.sin(this.heading);
     // body-frame velocity: x = forward, y = right
@@ -700,7 +856,26 @@ export class Vehicle {
     this.velocity.x += (f.x * ax + r.x * ay) * dt;
     this.velocity.z += (f.z * ax + r.z * ay) * dt;
 
-    if (this.velocity.lengthSq() < 0.05 && throttle === 0 && brake === 0) {
+    /**
+     * THE STANDSTILL DEADBAND — a handbrake, and it must not work on a cliff.
+     *
+     * Below 0.224 m/s with no pedal the velocity is annihilated outright, which
+     * is what keeps a parked car parked instead of shivering downhill on the
+     * camber under an integrator's rounding. It also made gravity structurally
+     * unable to move a stopped car ANYWHERE, because it fires every substep:
+     * MEASURED on the 0.899 face at (514.3, 464.6), a car released from rest
+     * with no throttle gained 0.0735 m/s of downhill speed per substep and had
+     * it zeroed again 1/120 s later, and after 15 s had travelled 0.00 m. Three
+     * substeps' worth of gravity would have cleared the threshold — it never
+     * got two.
+     *
+     * `groundSlope` is what game.js's `_stepVertical` measured under the wheels
+     * this step. Past 0.18 (about 10 degrees, and about where a car left out of
+     * gear starts to roll) the deadband lets go, so a face the car cannot climb
+     * is a face it slides off even with nobody at the wheel.
+     */
+    if (this.velocity.lengthSq() < 0.05 && throttle === 0 && brake === 0
+      && this.groundSlope < 0.18) {
       this.velocity.set(0, 0, 0);
       this.yawRate *= 0.4;
     }
@@ -709,6 +884,8 @@ export class Vehicle {
     this._lastPos.copy(this.position);
     this._lastVel.copy(this.velocity);
     this._lastYawRate = this.yawRate;
+    // The last thing this module knows to be its own. § THE ESCAPE reads it.
+    this._stepVel.copy(this.velocity);
 
     // ---- telemetry ----------------------------------------------------------
     const ch = Math.cos(this.heading), sh = Math.sin(this.heading);
@@ -785,8 +962,28 @@ export class Vehicle {
     this._bodyVY += acc * dt;
     this._bodyY += this._bodyVY * dt;
 
+    /**
+     * ONE FLAG, AND THE SUSPENSION IS NOT ALLOWED TO WRITE IT.
+     *
+     * This line used to be `this.onGround = this._bodyY < T.suspTravel * 0.92`,
+     * i.e. "the spring is not at full droop". That is not a question about the
+     * ground at all, and it is answered second — game.js runs its whole step
+     * loop, ballistic clamp included, before car.js ever calls in here — so the
+     * suspension's answer is the one every later reader saw. MEASURED over the
+     * design jump: `v.onGround` read `true` for all 0.9 s of the flight with the
+     * car 3.11 m above the terrain, because a body hanging in the air is not
+     * topped out, it is just hanging. fx/feel.js armed slow motion on the
+     * airborne edge and released it on the very next frame, so the jump had no
+     * slow motion at all, and `airTime` — and therefore the landing thump —
+     * never accumulated either.
+     *
+     * `_stepVertical` owns the flag now: it is the only code that knows the
+     * car's height and the ground's. Here we only READ it, which is what makes
+     * `airTime` mean airtime and the landing below fire on a real landing.
+     * `ballisticAir` was the workaround for the collision and is now an alias
+     * (see the accessor); fx/feel.js keeps working untouched.
+     */
     const wasAir = !this.onGround;
-    this.onGround = this._bodyY < T.suspTravel * 0.92;
     if (!this.onGround) this.airTime += dt;
 
     if (this._bodyY < -T.suspTravel) {
