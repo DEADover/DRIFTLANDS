@@ -555,6 +555,22 @@ export function createBridges(ctx) {
       return false;
     };
 
+    // THE DECK SURFACE, PUBLISHED ON THE SCENE GRAPH.
+    //
+    // roads.js runs two constructors before this one, so on its settled pass —
+    // the first tick, once the spans exist — it has no reference to this module
+    // at all. It already reaches through the scene graph to read the deck meshes
+    // (`bridgeDecks`, `bridgeFootprint`); this gives it the one thing the
+    // triangles cannot tell it cheaply, which is WHICH of them is the walking
+    // surface. The merged span mesh holds planks, kerbs, parapet beams, pier caps
+    // and abutment tops, all upward-facing: a max-per-cell over that reads the
+    // top of the parapet, 1.14 m above the planks, and a min reads a pier cap
+    // six metres below. `heightAt` is the only correct answer and it is O(1).
+    //
+    // Read-only and one-way, like the deck read. If it ever disappears roads.js
+    // falls back to leaving its ribbon where it is, which is the behaviour that
+    // shipped.
+    group.userData.deckHeightAt = heightAt;
     return { group, heightAt, isBlocked, colliders, rails };
   } catch (err) {
     console.warn('[bridges] build failed, continuing without bridges:', err);

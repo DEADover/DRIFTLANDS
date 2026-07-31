@@ -236,20 +236,65 @@ export function auditBarrierFeet(game, { cell = 2.0 } = {}) {
     // in ground that is not a knife edge.
     const d = surf(b.x, b.z);
     if (!d) continue;
-    let best = d;
+    let best = d, low = d;
     for (const [ox, oz] of [[0.35, 0], [-0.35, 0], [0, 0.35], [0, -0.35],
                             [0.25, 0.25], [-0.25, 0.25], [0.25, -0.25], [-0.25, -0.25]]) {
       const q = surf(b.x + ox, b.z + oz);
       if (q && q.y > best.y) best = q;
+      if (q && q.y < low.y) low = q;
     }
-    const row = { x: b.x, z: b.z, foot: b.lo, drawn: best.y, gap: b.lo - best.y, kind: best.kind };
+    // ONE ESTIMATOR, USED IN ONE DIRECTION, IS A THUMB ON THE SCALE.
+    //
+    // `best` — the highest drawn surface the post's 0.7 m footprint covers —
+    // was used for BOTH tests. For "is it floating" that is the right generosity
+    // and the comment above says why. For "is it buried" it is the opposite of
+    // generous: on any slope the max over a disc sits above the centre, so the
+    // audit charged every post on a gradient with burial it did not have.
+    //
+    // MEASURED on the shipped layout: 1596 emitted posts, the max-of-nine lifts
+    // the reference by a mean of 0.135 m, and the buried share goes 9.8% against
+    // that reference versus 2.2% against a ray at the post's own centre. Three
+    // quarters of defect 2 was this probe.
+    //
+    // So each test now gets the footprint's benefit of the doubt in its own
+    // direction: floating against the highest ground the post could be standing
+    // on, buried against the lowest ground it could be standing in. A post is
+    // only buried if its base is under even the lowest point of its own footprint.
+    const row = {
+      x: b.x, z: b.z, foot: b.lo, drawn: best.y, kind: best.kind,
+      gap: b.lo - best.y,                 // for the floating test
+      gapLow: b.lo - low.y,               // for the buried test
+    };
     // A rail on a bridge is BOLTED TO THE DECK and is supposed to overhang the
     // void. Judging it against the valley floor 11 m below is meaningless, so it
     // is counted separately: near a span, the question is only whether the rail
     // is anywhere near deck level.
+    // ON A DECK MEANS OVER THE PLANKS, WITHIN THIS BUCKET — NOT WITHIN 5 m OF A
+    // BRIDGE.
+    //
+    // This searched out to 5 m for any answer from bridges.heightAt and then
+    // judged the post against the deck it found. MEASURED: all 7 cells it put in
+    // this bucket were classified by that fallback and NOT ONE of them was over a
+    // deck. Every one is a roads.js post standing on drawn road or terrain
+    // beside an abutment, correctly seated on it (gap to the surface it is really
+    // on: -0.34 to -0.18 m) and charged with floating 0.34 to 1.45 m because it
+    // was being compared against a deck five metres away and higher. That is the
+    // whole of the "23.1% of on-deck rails float" figure: 3 of 13 road posts, no
+    // deck rail among them.
+    //
+    // The bucket's real purpose is only to stop a rail that overhangs the void
+    // being judged against the valley floor, so the reach is now the bucket's own
+    // cell — if the deck is not under this cell, the post is not on it.
+    //
+    // Note also what this audit can and cannot see: it samples meshes matching
+    // /barrier/, which is roads.js only. bridges.js merges its parapets into the
+    // span mesh named 'bridge', so no deck rail has ever entered this audit. It
+    // does not need to: the parapet post is emitted at dY(deck) + 0.52 with a
+    // half-height of 0.60, so its base is deck - 0.08 m by construction, at every
+    // post on every span. There is nothing here to measure.
     const deck = game.bridges.heightAt?.(b.x, b.z);
     const deckNear = deck != null ? deck
-      : [[2.5, 0], [-2.5, 0], [0, 2.5], [0, -2.5], [5, 0], [-5, 0], [0, 5], [0, -5]]
+      : [[cell, 0], [-cell, 0], [0, cell], [0, -cell]]
         .map(([ox, oz]) => game.bridges.heightAt?.(b.x + ox, b.z + oz))
         .find((h) => h != null);
     if (deckNear != null) { onDeck.push({ ...row, deck: deckNear, gapToDeck: b.lo - deckNear }); continue; }
@@ -266,7 +311,7 @@ export function auditBarrierFeet(game, { cell = 2.0 } = {}) {
       floating: pct(deckGaps.filter((g) => g > 0.12).length, deckGaps.length),
     },
     floating: pct(gaps.filter((g) => g > 0.12).length, gaps.length),
-    buried: pct(gaps.filter((g) => g < -0.6).length, gaps.length),
+    buried: pct(rows.filter((r) => r.gapLow < -0.6).length, rows.length),
     worst: rows.slice().sort((a, b) => b.gap - a.gap).slice(0, 10),
   };
 }
@@ -313,7 +358,23 @@ export function auditGuardGaps(game, {
   // 140 m, fall over 4 m within 8 m of the carriageway.
   
   const surf = makeRaycastSurface(game.scene);
-  const segs = game.roads.barriers?.segments ?? [];
+  // EVERY OWNER OF STEEL, NOT ONE OF THEM.
+  //
+  // This read `game.roads.barriers.segments` and nothing else, and that is the
+  // road's own list. bridges.js publishes its deck parapets separately, as
+  // `bridges.rails` with kind 'guard'; game.js composes the two into
+  // `collisionWorld.barriers` and THAT is the set the collision solver actually
+  // uses. So the audit was asking "did roads.js build a guardrail on this bridge
+  // deck", to which the answer is correctly no — roads.js skips deck stations on
+  // purpose (`onDeck`) because the parapet is the bridge's job.
+  //
+  // MEASURED: of the 13 stations this reported as dangerous-and-unsteeled, 12
+  // sit 0.6-0.8 m from drawn deck geometry and have a steel bridge parapet
+  // 1.0-1.7 m away. The nearest ROAD steel at those same three clusters is
+  // 20.6, 24.5 and 31.6 m — which is the exact triple that three rounds of
+  // chasing this took as proof of a hole. It was the audit looking at one list.
+  const segs = game.collisionWorld?.barriers?.segments
+    ?? (game.roads.barriers?.segments ?? []).concat(game.bridges?.rails ?? []);
 
   // Bucket the barriers so the proximity test is not O(bays) per station.
   const CELL = 12;
@@ -534,7 +595,28 @@ export function auditPhantomDeck(game, { step = 1.5, pad = 14 } = {}) {
   };
 }
 
-export function auditDeckOverdraw(game, { stations = 400 } = {}) {
+/**
+ * THIS AUDIT SAMPLED 112 POINTS AND MISSED WHAT THE PLAYER COULD SEE.
+ *
+ * It walked 400 centreline stations, kept the ~22 that were over a span, and
+ * took five lateral offsets out to +/-3.5 m at each. 112 samples for five
+ * bridges. It reported 5.4% overdrawn, then 0.0% after a first fix — while a
+ * screenshot of the car parked mid-span still showed ragged ochre islands in
+ * the planking, which is what the client was complaining about the whole time.
+ *
+ * Measured on a 0.35 m grid over the walking surface instead: 27,130 samples,
+ * 436 of them (1.61%) with gravel above the planks, worst 0.652 m. The defect
+ * was never in the ramp region the centreline walk was aimed at; it was a fringe
+ * around the rim of every deck and a scatter of islands across the middle, and
+ * five lateral offsets on the racing line could not see either.
+ *
+ * So the sweep is the deck's own plan area, at a spacing finer than a plank is
+ * wide, and membership is `bridges.heightAt` — which is the drawn plank surface
+ * by construction, so the audit never asks about fascias, kerbs or pier caps.
+ * The centreline walk is kept as `centreline`, because a regression exactly on
+ * the racing line is worth naming separately.
+ */
+export function auditDeckOverdraw(game, { stations = 400, step = 0.35 } = {}) {
   const scene = game.scene;
   const bridgeMeshes = [];
   const roadMeshes = [];
@@ -573,11 +655,37 @@ export function auditDeckOverdraw(game, { stations = 400 } = {}) {
     }
   }
   const bad = rows.filter((r) => r.over > 0.01);
+
+  // THE WHOLE WALKING SURFACE, NOT THE RACING LINE.
+  const area = [];
+  for (const m of bridgeMeshes) {
+    m.geometry.computeBoundingBox();
+    const b = m.geometry.boundingBox.clone().applyMatrix4(m.matrixWorld);
+    for (let x = b.min.x; x <= b.max.x; x += step) {
+      for (let z = b.min.z; z <= b.max.z; z += step) {
+        const deck = game.bridges.heightAt?.(x, z);
+        if (deck == null) continue;              // not the drawn plank surface
+        const road = top(roadMeshes, x, z);
+        if (road == null) continue;
+        area.push({ x: +x.toFixed(1), z: +z.toFixed(1), deck, road, over: road - deck });
+      }
+    }
+  }
+  const areaBad = area.filter((r) => r.over > 0.01);
+
   return {
-    samples: rows.length,
-    overdrawn: bad.length,
-    overdrawnPct: pct(bad.length, rows.length),
-    worst: bad.sort((a, b) => b.over - a.over).slice(0, 8),
+    samples: area.length,
+    overdrawn: areaBad.length,
+    overdrawnPct: pct(areaBad.length, area.length),
+    worst: areaBad.sort((a, b) => b.over - a.over).slice(0, 8),
+    // Over 0.05 m is the band that reads on screen as a patch of gravel rather
+    // than as a shading seam; it is the number to watch.
+    reads: pct(area.filter((r) => r.over > 0.05).length, area.length),
+    centreline: {
+      samples: rows.length,
+      overdrawn: bad.length,
+      overdrawnPct: pct(bad.length, rows.length),
+    },
   };
 }
 

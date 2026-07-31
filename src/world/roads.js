@@ -1173,13 +1173,32 @@ function describe(ctx, pts, opts) {
   // shimmy from station to station instead of swinging through the corner.
   const kSm = blurRing(Float64Array.from(f.k), Math.max(1, Math.round(24 / ds)), 2, closed);
 
+  // ...AND CURVATURE AS THE BARRIER RULE NEEDS TO SEE IT, WHICH IS NOT THE SAME.
+  //
+  // `kSm` above is two passes of a +/-24 m box: support out to +/-48 m, because
+  // the ruts must swing through a corner rather than shimmy. The barrier layout
+  // borrowed it (raw `k` at these stations is genuinely too noisy to gate on)
+  // and inherited a corner detector that cannot see a corner.
+  //
+  // MEASURED at the last surviving gap, (-132.7, 342.6): a least-squares circle
+  // fitted to the centreline reads R = 132 m over +/-12 m, 134 over +/-15, 137
+  // over +/-20, 140 over +/-25 — and 153 over +/-40. `kSm` called it 202 m, so
+  // the module's own G_SHARP = 140 m gate never fired, and a 10.6 m fall on the
+  // outside of a 133 m bend got post-and-rail. The rule was right; the number it
+  // was handed was measured over a baseline three times longer than the corner.
+  //
+  // Two passes of +/-6 m is a triangular kernel of half-support 12 m, which is
+  // the baseline the circle fit agrees with, and still averages a dozen samples
+  // so the noise the original comment worried about is gone.
+  const kGuard = blurRing(Float64Array.from(f.k), Math.max(1, Math.round(6 / ds)), 2, closed);
+
   const out = new Array(n);
   for (let i = 0; i < n; i++) {
     const rl = rutLine(kSm[i]);
     out[i] = {
       x: pts[i].x, z: pts[i].z, s: s[i],
       y: y[i] + clearance[i] * (1 - deckMask[i]), yT: yT[i],
-      tx: f.tx[i], tz: f.tz[i], nx: f.nx[i], nz: f.nz[i], k: f.k[i], ks: kSm[i],
+      tx: f.tx[i], tz: f.tz[i], nx: f.nx[i], nz: f.nz[i], k: f.k[i], ks: kSm[i], kg: kGuard[i],
       rutShift: rl.shift, rutSpread: rl.spread,
       rutL: warpU(-RUT_U, rl.shift, rl.spread),
       rutR: warpU(RUT_U, rl.shift, rl.spread),
@@ -2480,6 +2499,182 @@ function bridgeDecks(node) {
  * building it costs one pass over a few thousand triangles, once.
  */
 const DECK_CELL = 2.0;
+/**
+ * A DECK'S WALKING SURFACE, FROM THE MODULE THAT BUILT IT.
+ *
+ * bridges.js hangs its `heightAt` on its own group's userData for exactly this.
+ * Rasterising the triangles instead does not work and it is worth saying why so
+ * that nobody tries it again: the span is ONE merged mesh holding planks, kerbs,
+ * parapet beams, posts, pier caps and abutment tops, and all of those have
+ * upward-facing faces. MEASURED, taking the highest upward-facing triangle per
+ * 2 m cell: 620 of 864 cells disagreed with a ray fired at the deck by more than
+ * 0.5 m, worst 6.00 m — at the six overdrawn stations the grid read 0.31 to
+ * 1.14 m HIGH, because it had found the top of the parapet beam.
+ */
+function deckHeightFn(node) {
+  try {
+    let root = node;
+    while (root.parent) root = root.parent;
+    let fn = null;
+    root.traverse((o) => {
+      if (!fn && o.name === 'bridges' && typeof o.userData?.deckHeightAt === 'function') {
+        fn = o.userData.deckHeightAt;
+      }
+    });
+    return fn;
+  } catch { return null; }
+}
+
+/**
+ * THE ROAD RIBBON DOES NOT GET TO SHOW THROUGH THE PLANKS.
+ *
+ * MEASURED on the shipped build: 6 of 112 deck stations drew road gravel above
+ * the deck, worst 0.221 m — and every one of the six is at u = +/-3.5 m, never
+ * at the centre or at +/-1.8. The cause is not the ramp profile itself but what
+ * the ramp does to the CROSS-SECTION: bridges.js lifts the deck CLEAR = 0.30 m
+ * above the road mid-span and then eases that lift back to nothing at the
+ * abutments, deliberately, so the car does not hit a step getting on. Where the
+ * lift has eased away, all that separates the two surfaces is the deck's own
+ * cross-slope `cs`, which is smoothed over +/-9 stations and clamped at 1:4.5 —
+ * so on a banked approach the deck's edge falls short of the road's by up to
+ * 0.22 m and the gravel wins the depth test.
+ *
+ * Raising the deck instead would put back the step at the abutment that the ease
+ * exists to remove, and it would put it on the centreline where the car is. So
+ * the ribbon gives way: any ribbon vertex standing over a plank and above it is
+ * dropped just under it. Nothing is deleted — no triangle is removed and no hole
+ * can open — the ribbon simply passes beneath the deck it is crossing, which is
+ * what a road does at a bridge.
+ *
+ * The offset is 20 mm because the abutment is where the deck is FLUSH with the
+ * road by design: anything larger would carve the step back out of the other
+ * side. Vertices already below the planks are untouched, so the edit is bounded
+ * above by the overdraw it is removing.
+ */
+// CLEARANCE, AND WHY IT IS NOT 20 mm.
+//
+// Lowering each ribbon vertex to just under the deck AT THAT VERTEX is not
+// enough, because the two surfaces are tessellated differently: the deck is one
+// quad per plank segment with the cross-fall baked into its corners, the ribbon
+// has its own lateral stations, its crown and its ruts. Between two lowered
+// vertices the ribbon triangle is a flat plane while the deck under it is not,
+// so the plane comes back up through the planks in the middle.
+//
+// LOOKED AT, which is the only reason this was found: with 20 mm clearance the
+// mid-span frame still showed ragged ochre islands in the timber. Measured on a
+// 0.35 m grid over the walking surface, 436 of 27,130 samples (1.61%) had gravel
+// above the planks, worst 0.652 m, and the distribution had a long tail rather
+// than the sub-centimetre noise a pure epsilon problem would give.
+//
+// So the vertex is cleared against the LOWEST deck height in its own
+// neighbourhood — a radius a little over the ribbon's own vertex pitch — and by
+// a margin thick enough to swallow what is left. None of this is visible: the
+// planks are drawn over all of it.
+const RIBBON_UNDER_DECK = 0.10;
+const RIBBON_NEAR = 1.4;
+const RIBBON_RING = [[1, 0], [-1, 0], [0, 1], [0, -1],
+                     [0.71, 0.71], [-0.71, 0.71], [0.71, -0.71], [-0.71, -0.71]];
+function sinkRibbonUnderDecks(node) {
+  let moved = 0, worst = 0, refused = 0;
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
+  try {
+    const deckAt = deckHeightFn(node);
+    if (!deckAt) return { moved, worst, refused, note: 'no deck height function' };
+    let root = node;
+    while (root.parent) root = root.parent;
+
+    // WHY THERE IS NO "IS A PLANK ACTUALLY DRAWN HERE" RAY.
+    //
+    // The obvious worry is that `deckAt` answers over a wider band than the deck
+    // is drawn, in which case this would dig a trench along the deck edge instead
+    // of hiding gravel — and the ribbon is certainly wider than the deck:
+    // `outerEdgeAt`, which reports the ribbon's outermost drawn lateral station,
+    // gives 7.9 to 10.8 m over the 86 deck stations on the centreline.
+    //
+    // But bridges.js does not bound its query by a half-width; it tests the same
+    // pair of triangles `kit.quad` winds and interpolates them barycentrically,
+    // so its answer IS the drawn plank surface rather than an approximation of
+    // it. MEASURED over a 35 x 30 m window around a span, 0.25 m grid, 16,000
+    // points: heightAt answered where no plank ray hit exactly 0 times (the 133
+    // points the other way are fascia, kerb and parapet, which are not the
+    // walking surface and not the ribbon's problem).
+    //
+    // A ray per candidate vertex was tried and cost 467 ms on this tick to
+    // re-derive that guarantee. It was removed. If bridges.js ever goes back to
+    // a half-width bound, `auditPhantomDeck` is the gate that will say so.
+    // Padded plan-view rectangles, one per span — `bridgeDecks` already builds
+    // them and pads them by 3 m, which is twice RIBBON_NEAR.
+    const boxes = bridgeDecks(node);
+    if (!boxes.length) return { moved, worst, refused, note: 'no decks' };
+    const v = new THREE.Vector3();
+    const inv = new THREE.Matrix4();
+    root.traverse((o) => {
+      if (!o.isMesh || (o.name !== 'road-main' && o.name !== 'road-spur')) return;
+      const pos = o.geometry.attributes?.position;
+      if (!pos) return;
+      inv.copy(o.matrixWorld).invert();
+      let touched = false;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+        // Cheap reject first. The ring below is 9 deck queries and the ribbon is
+        // hundreds of thousands of vertices, of which a few thousand are anywhere
+        // near a span: running the ring on all of them cost 317 ms of the settle
+        // tick to answer "no" 99% of the time.
+        let nearSpan = false;
+        for (const b of boxes) {
+          if (v.x >= b[0] && v.x <= b[2] && v.z >= b[1] && v.z <= b[3]) { nearSpan = true; break; }
+        }
+        if (!nearSpan) continue;
+        let t = deckAt(v.x, v.z);
+        const inside = t != null && Number.isFinite(t);
+        // THE CORNER JUST OUTSIDE THE DECK IS PART OF THE PROBLEM.
+        //
+        // A ribbon triangle with two corners over the planks and one corner
+        // past the deck edge is a plane pinned up by that third corner, and the
+        // part of it that lies over the planks comes through them.
+        //
+        // MEASURED after the neighbourhood clearance above: 162 samples of gravel
+        // still above the planks and 160 of them — 99% — within 1.6 m of a deck
+        // boundary, the worst at lateral offsets of 6.7 to 8.4 m against a deck
+        // half-width of 8.6. Not a scattering across the deck: a fringe around
+        // its rim.
+        //
+        // So a vertex just outside is brought down too, but only TO the deck and
+        // never under it. That matters at the abutment, where the deck is flush
+        // with the road on purpose: giving these the interior clearance would dig
+        // a 0.10 m dip into the gravel in the last metre before the planks, which
+        // is exactly where the car is. At deck level there is no dip and no step.
+        for (const [ox, oz] of RIBBON_RING) {
+          const q = deckAt(v.x + ox * RIBBON_NEAR, v.z + oz * RIBBON_NEAR);
+          if (q == null || !Number.isFinite(q)) continue;
+          if (t == null || !Number.isFinite(t) || q < t) t = q;
+        }
+        if (t == null || !Number.isFinite(t)) continue;
+        const want = inside ? t - RIBBON_UNDER_DECK : t;
+        if (v.y <= want) continue;
+        // NO CAP. There was one, at 0.5 m, from when the deck height came from a
+        // rasterised grid that could answer with a pier cap six metres down.
+        // `deckAt` only answers where the walking surface is drawn, so a vertex
+        // above it is gravel over planks however far above it sits — and the cap
+        // was refusing 78 of them, which is the whole >0.6 m tail of the frame's
+        // remaining ochre islands.
+        if (v.y - want > worst) worst = v.y - want;
+        v.y = want;
+        v.applyMatrix4(inv);
+        pos.setXYZ(i, v.x, v.y, v.z);
+        moved++; touched = true;
+      }
+      if (touched) {
+        pos.needsUpdate = true;
+        o.geometry.computeVertexNormals();
+        o.geometry.computeBoundingSphere();
+      }
+    });
+  } catch { /* a ribbon that shows through is better than a thrown build */ }
+  const ms = (typeof performance !== 'undefined' ? performance.now() : 0) - t0;
+  return { moved, worst, refused, ms: +ms.toFixed(1) };
+}
+
 function bridgeFootprint(node) {
   const cells = new Set();
   try {
@@ -2654,6 +2849,8 @@ function splinterGeom() {
  */
 /** Per-station guardrail decisions from the last compile; diagnostics only. */
 let DECISIONS = [];
+/** What the settled ribbon-under-deck pass actually moved; diagnostics only. */
+let RIBBON_SINK = { moved: 0, worst: 0 };
 
 function buildBarriers(routes, terrain, seed, cols, waterLevel) {
   const group = new THREE.Group();
@@ -2813,13 +3010,22 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
         // The deck itself belongs to bridges.js, which builds its own timber
         // railing along it. A second barrier out there would either duplicate
         // that or hang over open water.
-        if (onDeck[i0] || onDeck[i1]) { st.push(null); continue; }
+        if (onDeck[i0] || onDeck[i1]) {
+          st.push(null);
+          // A skipped station leaves NO decision, and a hole in the diagnostics
+          // is indistinguishable from a station that was judged and declined.
+          // Four wrong guesses came out of that ambiguity, so the skip is now
+          // recorded as loudly as any other outcome.
+          DECISIONS.push({ ri, side, s, i0, cx: S[i0].x, cz: S[i0].z, skipped: 'onDeck', guard: false });
+          continue;
+        }
 
         let nx = lerp(a.nx, b.nx, t), nz = lerp(a.nz, b.nz, t);
         const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
         let tx = lerp(a.tx, b.tx, t), tz = lerp(a.tz, b.tz, t);
         const tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
         const e = {
+          ri, side,
           s, i0, t, a, b, nx, nz, tx, tz,
           cx: lerp(a.x, b.x, t), cz: lerp(a.z, b.z, t),
           hw: lerp(a.hw, b.hw, t), verge: lerp(a.verge, b.verge, t),
@@ -2828,11 +3034,14 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
         };
 
         // --- does this station earn a guardrail? ---
-        // `ks` is curvature already smoothed over 24 m — raw k at 3 m stations
-        // carries enough sampling noise to invent corners that are not there.
-        const ks = lerp(a.ks ?? a.k, b.ks ?? b.k, t);
+        // `kg` is curvature smoothed over the 12 m baseline a corner is actually
+        // measured on — see `describe`. It used to be `ks`, the rut line's 48 m
+        // one, which read a circle-fit 133 m bend as 202 m and put timber in
+        // front of a 10.6 m fall. `auditBarriers` reads the same field.
+        const ks = lerp(a.kg ?? a.ks ?? a.k, b.kg ?? b.ks ?? b.k, t);
         const r = 1 / Math.max(Math.abs(ks), 1e-6);
         const outside = -Math.sign(ks) || 1;
+        e.r = r; e.outside = outside;
         // Bridge approach: both sides, but stopping short of the abutment so
         // the steel never grows out of the bridge's own timber wing walls.
         if (e.wetD > G_ABUTMENT && e.wetD < G_APPROACH) { e.guard = true; e.spec = true; }
@@ -2920,7 +3129,8 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
         for (const e of st) if (e && e.spec) budget--;
         const cliffs = st.filter((e) => e && !e.spec && (e.haz ?? 0) > G_CLIFF)
           .sort((p, q) => q.haz - p.haz);
-        for (let i = 0; i < cliffs.length && budget > 0; i++, budget--) cliffs[i].guard = true;
+        for (let i = 0; i < cliffs.length && budget > 0; i++, budget--) { cliffs[i].guard = true; cliffs[i].rationed = true; }
+        for (const e of st) if (e) { e.budgetLeft = budget; if (!e.guard && (e.haz ?? 0) > G_CLIFF) e.starved = true; }
       }
 
       // --- 3. tidy the guardrail runs -------------------------------------
@@ -2961,7 +3171,12 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
         if (!kept[i]) continue;
         for (const d of [-1, 1]) { const j = at(i + d); if (j >= 0) dil[j] = 1; }
       }
-      for (let i = 0; i < m; i++) if (st[i]) st[i].guard = !!dil[i];
+      for (let i = 0; i < m; i++) if (st[i]) {
+        // Keep WHICH stage moved this station, not just where it ended up.
+        if (flag[i] && !dil[i]) st[i].eroded = true;
+        if (!flag[i] && dil[i]) st[i].dilated = true;
+        st[i].guard = !!dil[i];
+      }
 
       // --- 4. place and emit ----------------------------------------------
       let prev = null;
@@ -3015,7 +3230,24 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
           const ub = (px - e.b.x) * e.b.nx + (pz - e.b.z) * e.b.nz;
           const oa = drawnSection(e.a, ua, _secA);
           const ob = drawnSection(e.b, ub, _secB);
-          return (oa || ob) ? lerp(_secA.y, _secB.y, e.t) : groundY(terrain, px, pz);
+          e.onEarthworks = !!(oa || ob);
+          // WHICHEVER OF THE TWO IS ON TOP, BECAUSE BOTH ARE DRAWN.
+          //
+          // This returned the earthworks section wherever the section had an
+          // answer, and the terrain only where it had none. But the batter mesh
+          // does not delete the terrain under it — roads.js never cuts, it lifts
+          // (`clearRaw`, capped at 0.15 m) — so where the road runs along a
+          // hillside the terrain beside it stands well ABOVE the section profile,
+          // and the topmost drawn surface at the post is the hillside.
+          //
+          // MEASURED: 1596 emitted posts, and the worst thirty are fence posts
+          // at the standard 2.15 m offset placed on a section reading 37.2 m
+          // with the drawn terrain at 40.3 m — a 1.28 m post set three metres
+          // into a bank, which is not a short post, it is no post. Taking the
+          // higher of the two is right in both directions: on a fill embankment
+          // the batter is above the terrain and still wins.
+          if (!(oa || ob)) return groundY(terrain, px, pz);
+          return Math.max(lerp(_secA.y, _secB.y, e.t), groundY(terrain, px, pz));
         };
         const off0 = guard ? G_OFFSET : 2.15;
         let off = off0, x = 0, z = 0, g = 0, ok = false;
@@ -3052,16 +3284,22 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
         if (!guard && noiseAt(e.s, side) <= GATE) { prev = null; continue; }
         if (overRoad(x, z, ri, e.i0, n, skip, guard ? 0.5 : 1.4)) { prev = null; continue; }
 
+        // Every emitted post records where its foot came from, so "why is this
+        // one buried" is a query rather than a fifth guess.
+        e.postX = x; e.postZ = z; e.postOff = off; e.postG = g;
+        e.postGrd = footGround(x, z); e.postRoadY = roadYAt(u); e.emitted = true;
         if (guard) {
           // Bolted to the shoulder: the beam tracks the CARRIAGEWAY, and the
           // post reaches down to whatever the ground is doing underneath it.
           const roadY = roadYAt(u);
           const foot = Math.max(Math.min(g, roadY) - 0.10, roadY - 1.70);
+          e.postFoot = foot;
           const top = roadY + G_POST_TOP;
           barBox(strip, x, (foot + top) * 0.5, z, e.tx, e.tz,
             G_POST_R, G_POST_R, (top - foot) * 0.5, cols.steelPost, cols.steelTop);
           g = roadY;
         } else {
+          e.postFoot = g;
           barBox(strip, x, g + POST_H * 0.5, z, e.tx, e.tz, POST_R, POST_R, POST_H * 0.5,
             // The cap is the giveaway from above: in the reference it is a
             // bright orange square sitting proud of the rails, one per bay.
@@ -3169,6 +3407,11 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
   const resettle = () => {
     if (settled) return;
     settled = true;
+    // THE RIBBON GOES UNDER THE PLANKS HERE because this is the module's only
+    // hook that runs after bridges.js has built anything and runs exactly once.
+    // It is not a barrier concern and it does not belong to compile(); it is
+    // here because there is nowhere else in roads.js that meets both conditions.
+    RIBBON_SINK = sinkRibbonUnderDecks(group);
     let moved = false;
     for (const w of plan.witness) {
       if (Math.abs(terrain.heightAt(w[0], w[1]) - w[2]) > 0.6) { moved = true; break; }
@@ -3362,6 +3605,7 @@ function buildBarriers(routes, terrain, seed, cols, waterLevel) {
     breakSpeed: BREAK_SPEED,
     /** Diagnostics: what the layout decided at every station of the last compile. */
     get decisions() { return DECISIONS; },
+    get ribbonSink() { return RIBBON_SINK; },
   };
 }
 
@@ -3644,7 +3888,9 @@ function auditBarriers(routes, terrain, group, segments) {
         const cx = lerp(a.x, b.x, t), cz = lerp(a.z, b.z, t);
         const hw = lerp(a.hw, b.hw, t), verge = lerp(a.verge, b.verge, t);
         const wd = lerp(wetD[i0], wetD[i1], t);
-        const ks = lerp(a.ks ?? a.k, b.ks ?? b.k, t);
+        // The same corner baseline compile() gates on. If these two ever read
+        // different curvature the audit grades a road nobody built.
+        const ks = lerp(a.kg ?? a.ks ?? a.k, b.kg ?? b.ks ?? b.k, t);
         const r = 1 / Math.max(Math.abs(ks), 1e-6);
         const outside = -Math.sign(ks) || 1;
         const roadY = lerp(a.y, b.y, t) + LIFT;
