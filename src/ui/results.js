@@ -7,7 +7,12 @@
  *   }
  *
  * `model` is `race.model()`: { state, lap, lapsTotal, laps:[{n,time,drift}],
- * lapTime, lapDrift, totals:{time,drift,best,bestDrift}, key }.
+ * lapTime, lapDrift, totals:{time,drift,best,bestDrift}, bank, key }.
+ *
+ * Every drift figure in here — the per-lap column, the footer, the TOP mark and
+ * the verdict — is the BANKED score from fx/feel.js, the same number the HUD
+ * has been rolling up in the corner all race. This file does no arithmetic on
+ * it beyond adding the column up.
  *
  * ---------------------------------------------------------------------------
  * TYPOGRAPHY IS INHERITED, NOT INVENTED.
@@ -39,12 +44,18 @@ export function fmtTime(sec) {
   return `${m ? m + ':' : ''}${ss}.${String(c).padStart(2, '0')}`;
 }
 
-/** 1234567 -> "1 234 567". Same grouping as the HUD's score readouts. */
+/**
+ * 1234567 -> "1 234 567". THE score formatter — ui/hud.js imports this one
+ * rather than keeping its own near-duplicate, which grouped with a different
+ * character and so printed the same figure a different way. The separator is
+ * U+2009 THIN SPACE: at the sizes these numbers are set at, a full space reads
+ * as two numbers and a comma reads as a decimal point.
+ */
 export function fmtScore(n) {
   const s = String(Math.max(0, Math.round(n) | 0));
   let o = '';
   for (let i = 0; i < s.length; i++) {
-    if (i > 0 && (s.length - i) % 3 === 0) o += ' ';
+    if (i > 0 && (s.length - i) % 3 === 0) o += ' ';
     o += s[i];
   }
   return o;
@@ -93,6 +104,18 @@ export function createResults({ onRestart, onClose, key = 'L' } = {}) {
         ? 'CROSS THE LINE TO START'
         : `LAP ${m.lap} OF ${m.lapsTotal}`;
 
+    /**
+     * THE FOOTER IS THE SUM OF THE COLUMN ABOVE IT — literally, accumulated as
+     * the rows are printed rather than read from a separate total.
+     *
+     * It used to print `totals.drift`, which is the completed laps only, while
+     * the column above it also carried a live row for the lap in progress. Open
+     * the table mid-race and the figures did not add up on screen; and the drift
+     * column disagreeing with its own total is precisely the class of bug this
+     * whole pass exists to remove. Summing what was drawn cannot drift out of
+     * step with what was drawn.
+     */
+    let sumT = 0, sumD = 0;
     const rows = [];
     for (let i = 0; i < m.lapsTotal; i++) {
       const lap = m.laps[i];
@@ -101,6 +124,8 @@ export function createResults({ onRestart, onClose, key = 'L' } = {}) {
       // The lap in progress gets its own live row, dimmed, so the table always
       // has exactly `lapsTotal` rows and never jumps height as laps land.
       const running = !lap && m.state === 'running' && i === m.laps.length;
+      if (lap) { sumT += lap.time; sumD += lap.drift; }
+      else if (running) { sumT += m.lapTime; sumD += m.lapDrift; }
       const cls = ['row'];
       if (isBest) cls.push('best');
       if (!lap && !running) cls.push('void');
@@ -117,8 +142,8 @@ export function createResults({ onRestart, onClose, key = 'L' } = {}) {
     }
     el.body.innerHTML = rows.join('');
 
-    el.footTime.textContent = fmtTime(m.totals.time);
-    el.footDrift.textContent = fmtScore(m.totals.drift);
+    el.footTime.textContent = fmtTime(sumT);
+    el.footDrift.textContent = fmtScore(sumD);
 
     if (finished) {
       const best = m.laps.find((l) => l.n === m.totals.best);

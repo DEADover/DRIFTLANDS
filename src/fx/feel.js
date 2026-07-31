@@ -20,7 +20,41 @@
  * state = { vehicle, camera, dt, onRoad, surface }
  *
  * Extras this implementation also publishes (safe to ignore, nice for a HUD):
- *   chainStep, chainTime, chainGrace, bank, payout, payoutAge, shakeTrauma
+ *   chainStep, chainTime, chainGrace, shakeTrauma
+ *
+ * ---------------------------------------------------------------------------
+ * THE LEDGER LIVES HERE, AND THAT IS THE POINT OF THIS BLOCK.
+ *
+ * It used to live in ui/hud.js — `hud.total`, `hud.best`, a payout multiplier
+ * and PAYOUT_MIN, all private to the view. Which meant that under `?hud=0`,
+ * which is what every capture preset and every audit tool runs, THE SCORE DID
+ * NOT EXIST. core/race.js could not read it, so it grew a second, quieter
+ * scoring rule of its own out of the raw rises of game.driftScore, and the
+ * player was shown two totals that never agreed (measured on a five-lap alpine
+ * race under the autopilot: corner TOTAL 242.04, results table 1222.51 — the
+ * two disagreed by a factor of five, in the direction that made the number the
+ * player had watched all race the SMALLER one).
+ *
+ * feel.js is where it belongs because this module is the only one that already
+ * knows the whole shape of a slide: it owns CHAIN_STEPS, it is constructed
+ * unconditionally by the shell whether or not there is a DOM, it is updated
+ * every frame with the vehicle, and game.js already hands it the finished score
+ * of every slide via `event('driftEnd', {score})`. Nothing had to be added to
+ * the shell to move the ledger here — the wire was already in place.
+ *
+ * Public ledger surface (ui/hud.js draws it, core/race.js buckets it):
+ *   bank         running banked total for the current ledger, in WHOLE points
+ *   best         the largest single slide banked into it
+ *   payout       what the last banked slide was worth (== the rise in `bank`)
+ *   payoutPeak   the same slide as a RAW drift score — what the HUD's tiers grade
+ *   payoutBase   that slide before the chain multiplier — a display figure, so
+ *                the HUD's count-up beat has somewhere to count FROM
+ *   payoutMult   the chain multiplier it was held at — display only
+ *   payoutSeq    ++ on every banked slide; the HUD's trigger edge
+ *   slideSeq     ++ on every slide that ENDS, banked or not; the HUD needs the
+ *                difference to know when to drop its chain pips
+ *   payoutAge    seconds since the last banked slide
+ *   resetBank()  empty the ledger — core/race.js calls it at the start line
  */
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -63,6 +97,49 @@ const CHAIN_STEPS = [
 ];
 const CHAIN_GRACE = 0.85;      // s of straight-line allowed between linked drifts
 
+/**
+ * THE FLOOR. Below this a slide is not worth announcing, so it banks NOTHING —
+ * not in the corner total, not in the lap table, not in the race total. It was
+ * a private constant in ui/hud.js, which is exactly how the two scoreboards
+ * came to disagree: the HUD dropped these slides and race.js counted them.
+ * One rule, one place, and 110 is unchanged from the value it was tuned at.
+ */
+/**
+ * Below this a finished slide is not banked and not announced.
+ *
+ * 110 was set when the base scoring rate was 6. It is now 1.8 — the rate came
+ * down when the chain ceiling went from x6 to x100 — and the floor did not move
+ * with it, so it started discarding almost everything: MEASURED over a five-lap
+ * race, 169 of 181 slides dropped, 5,826 raw points thrown away against 2,184
+ * banked. A floor that rejects 93% of what the player does is not a floor, it is
+ * the ceiling.
+ *
+ * Scaled by the same 1.8/6 the rate moved by, so the SHARE of slides worth
+ * announcing is what it was when the number was chosen.
+ */
+export const PAYOUT_MIN = 33;
+
+/**
+ * THE CHAIN MULTIPLIER IS APPLIED ONCE, AND IT IS APPLIED WHILE YOU DRIVE.
+ *
+ * game.js accumulates `driftScore += driftAngle * speed * dt * 1.8 * mul` — the
+ * ladder is already integrated into every point of the live number. hud.js then
+ * multiplied the finished slide by `min(9.9, mul)` a SECOND time on the way
+ * into the corner total. That is a squared ladder: a slide held at the x4 rung
+ * banked x16, and one held to the top banked x100 * 9.9 = x990.
+ *
+ * The retune in the commit that raised the ceiling states its intent in
+ * arithmetic, and the arithmetic only closes on a single application:
+ *   "a casual slide banks about a third of what it used to"
+ *        6 -> 1.8 at mul 1  =  0.30      (the second application is 1.0 either way)
+ *   "a chain held to the top banks five times the old maximum"
+ *        1.8 * 100 = 180  vs  6 * 6 = 36  =  5.00 exactly
+ * Doubled, that second line comes out at 1.8*100*9.9 / (6*6*6) = 8.25, which is
+ * not a number anyone chose. So: bank the peak as game.js accumulated it, and
+ * never multiply again. `payoutMult` below is carried purely so the HUD's
+ * count-up beat has something honest to say.
+ */
+
 const TUNE = {
   // FOV
   fovSpeed: 3.0,               // deg at top speed
@@ -100,11 +177,12 @@ export function createFeel(ctx = {}) {
   let chainTime = 0;           // seconds of accumulated drift in this chain
   let chainGrace = 0;          // seconds left to relink after breaking
   let chainStep = 0;
-  let bank = 0;                // paid-out score
-  let payout = 0;              // size of the last payout
   let payoutAge = 99;
   let wasDrifting = false;
-  let pendingScore = 0;
+  let bank = 0;                // every point banked since the last resetBank()
+  let best = 0;                // the largest single slide in that ledger
+  let payoutSeq = 0;
+  let slideSeq = 0;
 
   const feel = {
     timeScale: 1,
@@ -113,10 +191,19 @@ export function createFeel(ctx = {}) {
     chainStep: 0,
     chainTime: 0,
     chainGrace: 0,
-    bank: 0,
-    payout: 0,
-    payoutAge: 99,
     shakeTrauma: 0,
+
+    // ---- the ledger (see the header). Plain fields: read them, never write. --
+    bank: 0,
+    best: 0,
+    payout: 0,
+    payoutPeak: 0,
+    payoutBase: 0,
+    payoutMult: 1,
+    payoutSeq: 0,
+    slideSeq: 0,
+    payoutAge: 99,
+    PAYOUT_MIN,
 
     /**
      * @param {number} dt time already scaled by this.timeScale (game.js does it)
@@ -171,7 +258,7 @@ export function createFeel(ctx = {}) {
         if (!wasDrifting) fovPunch += 0.9;
       } else if (chainGrace > 0) {
         chainGrace -= rdt;
-        if (chainGrace <= 0) this._payout();
+        if (chainGrace <= 0) this._breakChain();
       }
       wasDrifting = drifting;
 
@@ -197,7 +284,6 @@ export function createFeel(ctx = {}) {
       this.chainStep = step;
       this.chainTime = chainTime;
       this.chainGrace = chainGrace;
-      if (state.driftScore > pendingScore) pendingScore = state.driftScore;
       payoutAge += rdt;
       this.payoutAge = payoutAge;
 
@@ -246,7 +332,11 @@ export function createFeel(ctx = {}) {
           chainGrace = CHAIN_GRACE;
           break;
         case 'driftEnd':
-          if ((payload.score ?? 0) > pendingScore) pendingScore = payload.score;
+          // game.js fires this on the frame `isDrifting` goes false, BEFORE it
+          // applies the exp(-2.2 dt) decay, and driftAngle is a magnitude — so
+          // the score it hands us is the slide's peak by construction. There is
+          // no need to sample and track a maximum anywhere.
+          this._bank(payload.score ?? 0);
           break;
         default:
           break;
@@ -298,20 +388,67 @@ export function createFeel(ctx = {}) {
       }
     },
 
-    _payout() {
-      const mul = CHAIN_STEPS[chainStep].mul;
-      if (chainTime > 0.6 && pendingScore > 0) {
-        payout = pendingScore * mul;
-        bank += payout;
-        payoutAge = 0;
-        this.bank = bank;
-        this.payout = payout;
-      }
+    /**
+     * A SLIDE HAS ENDED. Bank it, or throw it away — once, for everyone.
+     *
+     * `slideSeq` ticks either way: the HUD drops its chain pips on a slide that
+     * failed to clear the floor, and it can only know that happened if the
+     * ledger tells it. `payoutSeq` ticks only when something was actually
+     * banked, and is the edge the celebration beat fires on.
+     */
+    _bank(peak) {
+      this.slideSeq = ++slideSeq;
+      if (!(peak >= PAYOUT_MIN)) return;   // the floor is on the RAW peak
+      const mul = this.chainMultiplier;
+
+      /**
+       * A SCORE IS A WHOLE NUMBER, AND IT IS ROUNDED HERE — ONCE.
+       *
+       * Everything downstream prints integers: the corner total, each row of
+       * the lap table, the table's footer. If the ledger carried fractions,
+       * five lap cells rounded independently would not add up to a footer
+       * rounded once — a five-lap race could show a column summing to 2184
+       * under a total of 2183, which is exactly the "these two numbers
+       * disagree" complaint in miniature. Banking integers makes every lap
+       * bucket a difference of integers, so the column sums to the total
+       * EXACTLY, on screen and in float, with no tolerance anywhere. It also
+       * retires a 1.1e-13 residual that had to be tolerated in the tests.
+       */
+      const points = Math.round(peak);
+      bank += points;               // already carries the ladder — see the header
+      if (points > best) best = points;
+      payoutAge = 0;
+      this.bank = bank;
+      this.best = best;
+      this.payout = points;
+      this.payoutPeak = peak;       // the RAW slide — what the HUD's tiers grade
+      this.payoutBase = points / mul;
+      this.payoutMult = mul;
+      this.payoutAge = 0;
+      this.payoutSeq = ++payoutSeq;
+    },
+
+    /** The relink window closed: the ladder goes back to the bottom rung. */
+    _breakChain() {
       chainTime = 0;
       chainStep = 0;
-      pendingScore = 0;
       this.chainMultiplier = 1;
       this.chainStep = 0;
+      this.chainTime = 0;
+    },
+
+    /**
+     * Empty the ledger. core/race.js calls this the instant the race starts and
+     * on restart, which is what makes the corner total and the race total the
+     * same number rather than two numbers that happen to grow together: they
+     * both start at zero at the start line. Points scored while staging are
+     * discarded exactly like the clock discards the time spent there.
+     */
+    resetBank() {
+      bank = 0; best = 0; payoutSeq = 0; slideSeq = 0; payoutAge = 99;
+      this.bank = 0; this.best = 0; this.payout = 0; this.payoutPeak = 0;
+      this.payoutBase = 0; this.payoutMult = 1;
+      this.payoutSeq = 0; this.slideSeq = 0; this.payoutAge = 99;
     },
   };
 

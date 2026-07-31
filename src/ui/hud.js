@@ -21,7 +21,31 @@
  * ribbon. Both are pure view state; nothing else observes them.
  */
 
-import { fmtTime } from './results.js';
+/**
+ * SCORING IS NOT DONE HERE ANY MORE. See the ledger block at the top of
+ * fx/feel.js.
+ *
+ * This file used to OWN the score: `this.total`, `this.best`, the payout
+ * multiplier and PAYOUT_MIN all lived in the view. Run with `?hud=0` — which is
+ * what every capture preset and every audit tool does — and the score simply
+ * did not exist, which is why core/race.js had to invent a second, quieter one
+ * and the player was shown two totals that disagreed.
+ *
+ * What is left here is the drawing of it. `this.total` and `this.best` are now
+ * copies of `feel.bank` / `feel.best`, kept as fields only because `_stats`
+ * eases the displayed figure toward them; the payout beat fires off
+ * `feel.payoutSeq` instead of off a drift-end this file detected for itself.
+ * Nothing in this file decides what a slide is worth.
+ */
+
+// fmtScore, not a local copy of it. This file carried its own `fmt()` that was
+// a near-duplicate of results.js's `fmtScore()` — near, not exact: this one
+// grouped digits with a THIN space and that one with an ordinary space, so the
+// corner TOTAL and the lap table rendered the identical figure two different
+// ways. One number deserves one formatter; the thin space is the HUD's
+// typographic call and it has moved into results.js with the function.
+import { fmtTime, fmtScore } from './results.js';
+import { PAYOUT_MIN } from '../fx/feel.js';
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const seg = (t, a, b) => clamp01((t - a) / (b - a));
@@ -43,8 +67,11 @@ const tierOf = (s) => {
   return t;
 };
 
-const CHAIN_WINDOW = 2.6;   // seconds between slides that still counts as a chain
-const PAYOUT_MIN = 110;     // below this a slide is not worth announcing
+// Pips only. This is the window over which the little chain dashes stay lit,
+// and it is deliberately longer than fx/feel.js's 0.85 s CHAIN_GRACE — the
+// dashes are a decoration that lingers, not a reading of the ladder. Nothing
+// downstream of it touches the score.
+const CHAIN_WINDOW = 2.6;
 const TRACE_SPAN = 420;     // metres across the route ribbon
 
 /** Filenames are user input and land in innerHTML; never trust one. */
@@ -119,14 +146,18 @@ export class Hud {
     this.subText = '';
     this.chain = 0;
     this.lastEnd = -999;
-    this.peak = 0;
     this.wasDrift = false;
     this.payT0 = -999;
     this.payBase = 0;
     this.payMult = 1;
     this.payTotal = 0;
+    this.payGrade = 0;
+    // Mirrors of fx/feel.js's ledger, not accumulators. _stats eases the drawn
+    // figure toward them; nothing in this file ever adds to them.
     this.total = 0;
     this.best = 0;
+    this._slideSeq = 0;
+    this._paySeq = 0;
     this.shownTotal = 0;
     this.shownBest = 0;
     this.liveShown = 0;
@@ -205,17 +236,20 @@ export class Hud {
 
       let score = Number.isFinite(driftScore) ? driftScore : 0;
       let drifting = !!v?.isDrifting;
-      const feelMult = ctx?.feel?.chainMultiplier;
+      // The ledger. Normally fx/feel.js's, which exists with or without a DOM.
+      let ledger = ctx?.feel ?? null;
 
       if (this.demo) {
         const d = demoScript(t);
         score = d.score;
         drifting = d.drifting;
+        ledger = this._demoLedger ??= makeDemoLedger();
+        ledger.step(score, drifting, this.chain);
       }
 
       this._telemetry(v, t);
       this._title(t, ctx);
-      this._drift(t, dt, score, drifting, feelMult);
+      this._drift(t, dt, score, drifting, ledger);
       this._stats(dt);
       this._traceRibbon(v, dt, drifting);
     } catch (err) {
@@ -287,31 +321,42 @@ export class Hud {
   }
 
   // -------------------------------------------------------------------- drift
-  _drift(t, dt, score, drifting, feelMult) {
-    // chain bookkeeping
+  _drift(t, dt, score, drifting, L) {
+    // ---- chain pips. Pure decoration; nothing below the next block reads it.
     if (drifting && !this.wasDrift) {
       this.chain = t - this.lastEnd < CHAIN_WINDOW ? Math.min(this.chain + 1, 8) : 1;
-      this.peak = 0;
       this.payT0 = -999;
     }
-    if (drifting) this.peak = Math.max(this.peak, score);
-    if (!drifting && this.wasDrift) {
-      this.lastEnd = t;
-      if (this.peak >= PAYOUT_MIN) {
-        this.payT0 = t;
-        this.payBase = this.peak;
-        this.payMult = this._mult(feelMult);
-        this.payTotal = this.payBase * this.payMult;
-        this.total += this.payTotal;
-        this.best = Math.max(this.best, this.payTotal);
-      } else {
-        this.chain = 0;
-      }
-    }
+    if (!drifting && this.wasDrift) this.lastEnd = t;
     this.wasDrift = drifting;
     if (!drifting && t - this.lastEnd > CHAIN_WINDOW) this.chain = 0;
 
-    const mult = this._mult(feelMult);
+    /**
+     * ---- the ledger fired. We watch two counters rather than watching the car:
+     * a slide can begin and end inside a single rendered frame (game.js runs
+     * several fixed steps per frame), and the edge we care about is "something
+     * was banked", which is the ledger's to declare, not ours to infer.
+     */
+    if (L) {
+      if (L.slideSeq !== this._slideSeq) {
+        this._slideSeq = L.slideSeq;
+        if (L.payoutSeq !== this._paySeq) {
+          this._paySeq = L.payoutSeq;
+          this.payT0 = t;
+          this.payBase = L.payoutBase;   // the slide without its chain bonus
+          this.payMult = L.payoutMult;
+          this.payTotal = L.payout;      // what actually went into the bank
+          this.payGrade = L.payoutPeak;  // the raw slide — TIERS are on that
+        } else {
+          // Under the floor. It banked nothing, so it links nothing either.
+          this.chain = 0;
+        }
+      }
+      this.total = L.bank;
+      this.best = L.best;
+    }
+
+    const mult = L?.chainMultiplier ?? 1;
     const pay = t - this.payT0;
     const paying = pay >= 0 && pay < 2.15;
 
@@ -325,14 +370,14 @@ export class Hud {
       gradeTxt = tier.name;
       // the number chases the truth so it always feels like it is climbing
       this.liveShown += (score - this.liveShown) * Math.min(1, dt * 14);
-      txt = fmt(Math.round(this.liveShown));
+      txt = fmtScore(Math.round(this.liveShown));
       const ph = (this.liveShown % 100) / 100;         // small tick every 100 pts
       sc = 1 + 0.035 * Math.pow(1 - ph, 6) + clamp01(score / 2400) * 0.09;
       multTxt = '×' + (mult >= 10 ? mult.toFixed(0) : mult.toFixed(1));
       multVis = mult > 1.04 ? 1 : 0;
       y = lerp(12, 0, easeOut(clamp01((score - 25) / 90)));
     } else if (paying) {
-      const tier = tierOf(this.payBase);
+      const tier = tierOf(this.payGrade);
       col = tier.col;
       gradeTxt = tier.name;
       // 0-0.12 slam · 0.10-0.72 count through the multiplier · hold · lift away
@@ -340,7 +385,7 @@ export class Hud {
       const count = easeOutExpo(seg(pay, 0.1, 0.72));
       const lift = seg(pay, 1.5, 2.15);
       const val = lerp(this.payBase, this.payTotal, count);
-      txt = fmt(Math.round(val));
+      txt = fmtScore(Math.round(val));
       sc = 1 + 0.28 * (1 - easeOut(slam)) + 0.05 * (1 - count);
       vis = 1 - easeOut(lift);
       y = -36 * easeOut(lift);
@@ -392,17 +437,12 @@ export class Hud {
     }
   }
 
-  _mult(feelMult) {
-    if (Number.isFinite(feelMult) && feelMult > 1.04) return Math.min(9.9, feelMult);
-    return Math.min(5, 1 + Math.max(0, this.chain - 1) * 0.5);
-  }
-
   // -------------------------------------------------------------------- stats
   _stats(dt) {
     this.shownTotal += (this.total - this.shownTotal) * Math.min(1, dt * 7);
     this.shownBest += (this.best - this.shownBest) * Math.min(1, dt * 7);
-    const a = fmt(Math.round(this.shownTotal));
-    const b = fmt(Math.round(this.shownBest));
+    const a = fmtScore(Math.round(this.shownTotal));
+    const b = fmtScore(Math.round(this.shownBest));
     if (a !== this._totalTxt) { this._totalTxt = a; this.el.total.textContent = a; }
     if (b !== this._bestTxt) { this._bestTxt = b; this.el.best.textContent = b; }
     // Driven off the sim clock, not a CSS transition — a wall-clock fade would
@@ -595,17 +635,6 @@ export class Hud {
   }
 }
 
-/** 1234567 -> 1 234 567. Thin groups read better than commas at display size. */
-function fmt(n) {
-  const s = String(Math.max(0, n | 0));
-  let o = '';
-  for (let i = 0; i < s.length; i++) {
-    if (i > 0 && (s.length - i) % 3 === 0) o += ' ';
-    o += s[i];
-  }
-  return o;
-}
-
 function mixHex(a, b, x) {
   const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
   const r = Math.round(lerp((pa >> 16) & 255, (pb >> 16) & 255, x));
@@ -620,6 +649,43 @@ function mixHex(a, b, x) {
  * never appear in a screenshot and could not be art-directed. This is a review
  * fixture, not gameplay: unreachable unless the URL asks for it by name.
  */
+/**
+ * DEMO LEDGER — huddemo_* capture presets only.
+ *
+ * Those presets fabricate a drift score because no real car is sliding in them,
+ * so there is no fx/feel.js payout to draw. This reproduces the banking rule as
+ * it stood before the ledger moved — including its chain-derived multiplier —
+ * so the frames those presets were art-directed against still render pixel for
+ * pixel. Real gameplay never reaches this function; `this.demo` is only ever set
+ * for a shot id beginning `huddemo`.
+ */
+function makeDemoLedger() {
+  const L = {
+    bank: 0, best: 0, payout: 0, payoutPeak: 0, payoutBase: 0,
+    payoutMult: 1, payoutSeq: 0, slideSeq: 0, chainMultiplier: 1,
+  };
+  let peak = 0, was = false;
+  L.step = (score, drifting, chain) => {
+    L.chainMultiplier = Math.min(5, 1 + Math.max(0, chain - 1) * 0.5);
+    if (drifting && !was) peak = 0;
+    if (drifting) peak = Math.max(peak, score);
+    if (!drifting && was) {
+      L.slideSeq++;
+      if (peak >= PAYOUT_MIN) {
+        L.payoutPeak = peak;
+        L.payoutBase = peak;
+        L.payoutMult = L.chainMultiplier;
+        L.payout = Math.round(peak * L.chainMultiplier);   // whole points, as feel.js banks
+        L.bank += L.payout;
+        L.best = Math.max(L.best, L.payout);
+        L.payoutSeq++;
+      }
+    }
+    was = drifting;
+  };
+  return L;
+}
+
 function demoScript(t) {
   const runs = [
     [1.2, 3.1, 260],

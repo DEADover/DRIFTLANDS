@@ -18,7 +18,15 @@ import { createResults } from '../ui/results.js';
  *                                           quickest lap, or 0
  *   race.gate        the line, from world/startline.js
  *   race.colliders   the two gantry posts
+ *   race.driftTotal  the banked ledger for this race == game.feel.bank
  *   race.toggleTable() / openTable() / closeTable() / restart()
+ *
+ * ---------------------------------------------------------------------------
+ * THIS FILE DOES NOT SCORE. It reads `game.feel.bank` — the one banked total,
+ * the one the HUD draws in the corner — and buckets it by lap. See the ledger
+ * block at the top of fx/feel.js for why the score lives there and not in the
+ * view. The only opinion this file holds about drift is WHERE a lap boundary
+ * falls, which is the one thing it is actually the authority on.
  *
  * ---------------------------------------------------------------------------
  * HOW A LAP IS DETECTED, AND WHY IT IS NOT A RADIUS TEST
@@ -111,9 +119,8 @@ export class Race {
     this.finishT = 0;
     this.lapStartT = 0;
     this.lapStartDrift = 0;
-    this.driftTotal = 0;        // every point of drift ever banked, cumulative
+    this.driftTotal = 0;        // == feel.bank, mirrored each frame
     this._prevDriftTotal = 0;
-    this._prevScore = 0;
     this._prev = null;          // {x, z, t}
     this._away = Infinity;      // armed, so the very first crossing always counts
     this._nowT = 0;
@@ -142,8 +149,8 @@ export class Race {
     game.worldGroup.add(line.group);
 
     this._reset();
+    this._resetLedger(game);
     this._prev = { x: game.vehicle.position.x, z: game.vehicle.position.z, t: game.simTime };
-    this._prevScore = game.driftScore ?? 0;
 
     // A capture is a deterministic screenshot, not a session: no key handler, no
     // overlay, and `paused` is never true, so nothing here can freeze a shot.
@@ -231,8 +238,8 @@ export class Race {
     game.bestDrift = 0;
     game.camera?.calmShake?.();
     this._reset();
+    this._resetLedger(game);
     this._prev = { x: game.vehicle.position.x, z: game.vehicle.position.z, t: game.simTime };
-    this._prevScore = 0;
     this._pushHud(game);
   }
 
@@ -249,22 +256,23 @@ export class Race {
     this._nowT = t;
 
     /**
-     * DRIFT, BUCKETED — NOT RE-SCORED.
+     * DRIFT — THE BANKED LEDGER, READ, NOT RE-DERIVED.
      *
-     * game.driftScore is the LIVE score of the slide in progress: it climbs
-     * while `isDrifting` and decays at exp(-2.2 dt) the moment it is not, so it
-     * is not a running total and cannot be differenced across a lap boundary.
-     * What IS a running total is the sum of its RISES. Taking only the positive
-     * part of the frame-to-frame change reproduces exactly the points game.js
-     * accumulated — chain multiplier and all — without this file knowing
-     * anything about slip angles or fx/feel.js's multiplier, and it stays right
-     * if either of those is retuned. The decay contributes nothing, which is
-     * correct: a slide that fades away was still driven.
+     * This used to sum the positive frame-to-frame RISES of game.driftScore,
+     * which is a different quantity from the one the player watches in the
+     * corner of the screen: it counts every twitch of oversteer, including the
+     * ones the corner total throws away for falling under PAYOUT_MIN, and it
+     * counts them raw. On a five-lap alpine race the two came out at 1222.51
+     * and 242.04. Two scoreboards, one race.
+     *
+     * fx/feel.js now banks each finished slide once, under one rule, whether or
+     * not there is a HUD to draw it. So this file no longer scores anything —
+     * it reads `feel.bank`, which is monotonic, and buckets it by differencing
+     * across the gate. Per-lap values therefore sum to the race total by
+     * construction, and the race total IS the corner total.
      */
-    const score = game.driftScore ?? 0;
     this._prevDriftTotal = this.driftTotal;
-    if (score > this._prevScore) this.driftTotal += score - this._prevScore;
-    this._prevScore = score;
+    this.driftTotal = game.feel?.bank ?? this.driftTotal;
 
     const p0 = this._prev;
     this._prev = { x, z, t };
@@ -317,17 +325,21 @@ export class Race {
     if (this._away < AWAY_MIN) { this.rejected++; this._pushHud(game); return; }
 
     const tCross = p0.t + (t - p0.t) * frac;
-    const driftCross = this._prevDriftTotal
-      + (this.driftTotal - this._prevDriftTotal) * frac;
+    // Time is interpolated to the crossing because time is continuous. The
+    // ledger is NOT: a payout is a single discrete event, and splitting one
+    // across a lap boundary by the fraction of a frame would credit half a
+    // slide to each of two laps. The whole slide goes to the lap that was
+    // running when it landed.
+    const driftCross = this.driftTotal;
     this._away = 0;
 
-    if (s1 > s0) this._forward(tCross, driftCross);
-    else this._backward(tCross, driftCross);
+    if (s1 > s0) this._forward(tCross, driftCross, game);
+    else this._backward(tCross, driftCross, game);
 
     this._pushHud(game);
   }
 
-  _forward(tCross, driftCross) {
+  _forward(tCross, driftCross, game) {
     if (this.state === 'finished') { this.ignoredAfterFinish++; return; }
 
     if (this.state === 'staging') {
@@ -342,7 +354,12 @@ export class Race {
       this.crossings = 1;
       this.raceStartT = tCross;
       this.lapStartT = tCross;
-      this.lapStartDrift = driftCross;
+      // THE LEDGER STARTS WHEN THE CLOCK STARTS. Points scored while staging
+      // are discarded exactly as the seconds spent there are, and that is what
+      // makes the corner total and the sum of this table the same number rather
+      // than two numbers that merely grow together: both begin at zero here.
+      this._resetLedger(game);
+      this.lapStartDrift = 0;
       return;
     }
 
@@ -364,7 +381,7 @@ export class Race {
     }
   }
 
-  _backward() {
+  _backward(tCross, driftCross, game) {
     // A finished race is finished; the ledger is closed and reversing through
     // the beam cannot reopen it.
     if (this.state === 'finished') { this.ignoredAfterFinish++; return; }
@@ -379,12 +396,27 @@ export class Race {
       this.state = 'staging';
       this.crossings = 0;
       this.lapStartT = 0;
+      // Un-started, so un-scored: the race that banked those points no longer
+      // exists, and leaving them in the corner total would leave it standing
+      // against an empty table.
+      this._resetLedger(game);
       this.lapStartDrift = 0;
       return;
     }
     const last = this.laps.pop();
     this.lapStartT = last._startT;
     this.lapStartDrift = last._startDrift;
+  }
+
+  /**
+   * Zero the one ledger. fx/feel.js owns the banking RULE; this file owns the
+   * boundary of a race, and this is the only place the two meet. Guarded
+   * because a Race can be driven headless by a test with no feel at all.
+   */
+  _resetLedger(game) {
+    game?.feel?.resetBank?.();
+    this.driftTotal = 0;
+    this._prevDriftTotal = 0;
   }
 
   // -------------------------------------------------------------------- model
@@ -422,6 +454,9 @@ export class Race {
       lapTime: this.lapTime,
       lapDrift: this.lapDrift,
       totals: T,
+      // The ledger itself, unbucketed — identical to the HUD's corner TOTAL.
+      // Anything auditing this table can check it against the column sum.
+      bank: this.driftTotal,
       key: 'L',
     };
   }

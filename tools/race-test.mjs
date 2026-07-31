@@ -16,10 +16,44 @@
  *   3  five laps end the race and the crossing after that does nothing
  *   4  the lap times sum to the total, and the per-lap drift scores do too
  *   5  the pause key stops simTime advancing and resumes cleanly
+ *   6  THE SCORE IS ONE NUMBER — see below
+ *
+ * ---------------------------------------------------------------------------
+ * SECTION 6: ONE SCOREBOARD
+ *
+ * The game used to show two drift scores that disagreed. The HUD banked a
+ * finished slide (peak, times a payout multiplier, dropping anything under
+ * PAYOUT_MIN) into a corner total it owned privately; core/race.js separately
+ * bucketed the raw rises of game.driftScore. On a three-lap alpine race those
+ * came out at 242.04 and 1222.51.
+ *
+ * The ledger now lives in fx/feel.js, which exists with or without a DOM, and
+ * both the HUD and race.js read it. This section proves that, with numbers,
+ * against a driven race rather than against an argument:
+ *
+ *   1  corner TOTAL == sum of the lap table's drift column == race total,
+ *      sampled every frame of a five-lap race, not just at the flag
+ *   2  `?hud=0` scores identically to `?hud=1` — the same race is driven in two
+ *      browser pages and every figure is diffed
+ *   3  the BEST and TOP DRIFT marks come off the same banked per-lap values
+ *   4  a slide under PAYOUT_MIN banks nothing, anywhere: every driftEnd in the
+ *      race is recorded and the bank is reconciled against them exactly
+ *   5  the chain multiplier is applied ONCE (bank rises by the raw peak, not by
+ *      peak * mul), and the ladder still reaches x100 at 45 s
+ *
+ * A DRIFT-HAPPY PILOT drives it. The plain autopilot is smooth enough that
+ * almost nothing it does clears PAYOUT_MIN — a three-lap race banked one single
+ * slide — which would make every figure below zero and every check vacuous. So
+ * the pilot yanks the handbrake in anything tighter than 0.2 of steering lock.
+ * It is a pure function of sim state: no clock, no RNG, same race every run.
  *
  * Exit code is 1 if any check fails or the page threw.
  */
 import { chromium } from 'playwright';
+// The floor is imported, never duplicated: a test that hardcodes the constant
+// it exists to verify fails the moment the constant is tuned, which is exactly
+// what happened when PAYOUT_MIN moved 110 -> 33 with the base scoring rate.
+import { PAYOUT_MIN } from '../src/fx/feel.js';
 import { writeFile } from 'node:fs/promises';
 
 const av = process.argv.slice(2);
@@ -51,20 +85,132 @@ const WIRE = `
     inner(dt, input);
     g.race.update(g);                      // game.js: last line of update()
   };
+  g.__wired = true;
+`;
+
+/**
+ * SECTION 6, run in the page. Shared verbatim between the ?hud=1 and ?hud=0
+ * loads — if the two pages ran different code the diff would prove nothing.
+ */
+const SCORE = `
+  const g = window.__GAME;
+  if (!g.__wired) { __WIRE__ }
+  const race = g.race;
+  const DT = 1 / 60;
+
+  race.closeTable();
+  race.restart(g);
+
+  /**
+   * Deterministic drift pilot. Reads sim state only — no clock, no RNG — so the
+   * same inputs come out in the same order on both pages.
+   */
+  const pilot = () => {
+    const inp = g.autopilotInput({ throttle: 1, aggression: 1.15 });
+    if (Math.abs(inp.steer) > 0.20 && g.vehicle.speed > 11) {
+      inp.handbrake = 1; inp.brake = 0; inp.throttle = 1;
+    }
+    return inp;
+  };
+
+  // Every slide the race produces, and what the bank did about it. Wrapping the
+  // event is the only way to see a slide the ledger THREW AWAY — feel.js is
+  // right not to publish those, and this test is the one thing that needs them.
+  const slides = [];
+  const ev = g.feel.event.bind(g.feel);
+  g.feel.event = (name, payload) => {
+    if (name !== 'driftEnd') return ev(name, payload);
+    const before = g.feel.bank, mul = g.feel.chainMultiplier;
+    const r = ev(name, payload);
+    slides.push({ peak: payload?.score ?? 0, rise: g.feel.bank - before, mul });   // rise is in whole points
+    return r;
+  };
+
+  // Sampled every frame of the race: the three numbers that must never differ.
+  let worstColumn = 0, worstHud = 0, samples = 0;
+  const drive = (frames) => {
+    for (let i = 0; i < frames && race.state !== 'finished'; i++) {
+      g.update(DT, pilot());
+      if (race.state !== 'running') continue;
+      const m = race.model();
+      const column = m.laps.reduce((a, l) => a + l.drift, 0) + m.lapDrift;
+      worstColumn = Math.max(worstColumn, Math.abs(column - m.bank));
+      if (g.hud) worstHud = Math.max(worstHud, Math.abs(g.hud.total - m.bank));
+      samples++;
+    }
+  };
+  drive(60 * BUDGET);
+
+  // THE RENDERED TABLE, SCRAPED. The race ends with the overlay open, so this
+  // is the actual DOM the player is looking at — not the model behind it.
+  const dom = (() => {
+    const root = document.getElementById('raceResults');
+    if (!root) return null;
+    const cells = [...root.querySelectorAll('.row')].map((r) => ({
+      time: r.querySelector('b:not(.d)')?.textContent ?? '',
+      drift: r.querySelector('b.d')?.textContent ?? '',
+      flags: [...r.querySelectorAll('.flag')].map((f) => f.textContent.trim()).filter(Boolean),
+    }));
+    const num = (t) => Number(String(t).replace(/[^0-9]/g, ''));
+    return {
+      open: root.classList.contains('on'),
+      rows: cells,
+      columnSum: cells.reduce((a, c) => a + (c.drift === '—' ? 0 : num(c.drift)), 0),
+      footDrift: num(root.querySelector('[data-footdrift]')?.textContent),
+      footDriftTxt: root.querySelector('[data-footdrift]')?.textContent ?? '',
+      verdict: root.querySelector('[data-verdict]')?.textContent ?? '',
+      bestRows: cells.map((c, i) => (c.flags.includes('BEST') ? i + 1 : 0)).filter(Boolean),
+      topRows: cells.map((c, i) => (c.flags.includes('TOP') ? i + 1 : 0)).filter(Boolean),
+    };
+  })();
+
+  const m = race.model();
+  const T = race.totals;
+  const banked = slides.filter((s) => s.rise > 0);
+  const dropped = slides.filter((s) => s.rise === 0);
+
+  return {
+    state: race.state,
+    laps: race.laps.map((l) => ({ n: l.n, time: l.time, drift: l.drift })),
+    totals: { time: T.time, drift: T.drift, best: T.best, bestDrift: T.bestDrift },
+    bank: race.driftTotal,
+    feelBank: g.feel.bank,
+    feelBest: g.feel.best,
+    hudTotal: g.hud ? g.hud.total : null,
+    hudBest: g.hud ? g.hud.best : null,
+    hudPresent: !!g.hud,
+    dom,
+    samples, worstColumn, worstHud,
+    slides: slides.length,
+    bankedCount: banked.length,
+    droppedCount: dropped.length,
+    bankedSum: banked.reduce((a, s) => a + Math.round(s.peak), 0),
+    droppedSum: dropped.reduce((a, s) => a + s.peak, 0),
+    droppedMax: dropped.reduce((a, s) => Math.max(a, s.peak), 0),
+    bankedMin: banked.reduce((a, s) => Math.min(a, s.peak), Infinity),
+    // The double-multiplier probe: the bank must rise by the RAW peak.
+    multResidual: banked.reduce((a, s) => Math.max(a, Math.abs(s.rise - Math.round(s.peak))), 0),
+    maxMul: banked.reduce((a, s) => Math.max(a, s.mul), 1),
+  };
 `;
 
 const browser = await chromium.launch({
   args: ['--use-gl=angle', '--use-angle=metal', '--enable-unsafe-swiftshader'],
 });
-const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const errors = [];
-page.on('pageerror', (e) => errors.push(String(e)));
-page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
-// t=0 so the car is exactly where roads.spawn() put it and nothing has been
-// driven yet — the race must start from the same pose the player gets.
-await page.goto(`${args.base}/?shot=hero_alpine&t=0`, { waitUntil: 'load', timeout: 120000 });
-await page.waitForFunction('window.__SHOT_READY === true', null, { timeout: 180000 });
+/** t=0 so the car is exactly where roads.spawn() put it and nothing has been
+ *  driven yet — the race must start from the same pose the player gets. */
+async function openStage(hud) {
+  const p = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  p.on('pageerror', (e) => errors.push(`[hud=${hud}] ${e}`));
+  p.on('console', (m) => { if (m.type() === 'error') errors.push(`[hud=${hud}] ${m.text()}`); });
+  await p.goto(`${args.base}/?shot=hero_alpine&t=0&hud=${hud}`, { waitUntil: 'load', timeout: 120000 });
+  await p.waitForFunction('window.__SHOT_READY === true', null, { timeout: 180000 });
+  return p;
+}
+
+const page = await openStage(1);
 
 const report = await page.evaluate(async ({ wire, lapsTotal, budget }) => {
   // eslint-disable-next-line no-new-func
@@ -285,6 +431,31 @@ const report = await page.evaluate(async ({ wire, lapsTotal, budget }) => {
   return out;
 }, { wire: WIRE, lapsTotal: args.laps, budget: args.budget });
 
+// ---------------------------------------------------------------------------
+// SECTION 6 — one scoreboard. Same scripted race, two pages, hud on and off.
+const scoreSrc = SCORE
+  .replace('__WIRE__', WIRE.replace('LAPS_TOTAL', String(args.laps)))
+  .replace('BUDGET', String(args.budget * (args.laps + 1)));
+const runScore = (p) => p.evaluate(
+  (src) => new Function(`return (async () => {${src}})()`)(), scoreSrc);
+
+/**
+ * BOTH SIDES GET A VIRGIN PAGE.
+ *
+ * The first run of this reused the checks page for the hud=1 side and the two
+ * totals came out 3624.99 against 2183.72 — which looks exactly like the bug
+ * being tested and was nothing of the sort. Sections 1-5 teleport the car
+ * around the map, un-lap it, restart it and pause it, so by the time the
+ * scoring race starts that page is 700 s of simTime and a different world state
+ * away from a fresh one. `restart()` puts the car back on the line; it does not
+ * rewind the clock. Two pages that have not been driven are the only pair whose
+ * difference means what this check says it means.
+ */
+const onPage = await openStage(1);
+const on = await runScore(onPage);
+const offPage = await openStage(0);
+const off = await runScore(offPage);
+
 await browser.close();
 
 // ---------------------------------------------------------------------- print
@@ -296,6 +467,119 @@ const time = (s) => {
   const m = Math.floor(cs / 6000);
   return `${m ? m + ':' : ''}${String(Math.floor((cs % 6000) / 100)).padStart(m ? 2 : 1, '0')}.${String(cs % 100).padStart(2, '0')}`;
 };
+
+// ---------------------------------------------------------------------- score
+const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
+const sc = [];
+const okS = (name, pass, detail) => sc.push({ name, pass: !!pass, detail });
+
+const sumD = on.laps.reduce((a, l) => a + l.drift, 0);
+const sumT = on.laps.reduce((a, l) => a + l.time, 0);
+
+okS('the scoring race finished and actually drifted',
+  on.state === 'finished' && on.laps.length === args.laps && on.slides > 20
+    && on.bankedCount > 3,
+  `laps=${on.laps.length} slides=${on.slides} banked=${on.bankedCount} dropped=${on.droppedCount}`);
+
+// ---- 1: one number ---------------------------------------------------------
+okS('corner TOTAL == lap column == race total, at the flag',
+  near(on.hudTotal, on.bank) && near(sumD, on.bank) && near(on.totals.drift, sumD)
+    && near(on.feelBank, on.bank),
+  `hud=${on.hudTotal.toFixed(6)} column=${sumD.toFixed(6)} race=${on.totals.drift.toFixed(6)} feel=${on.feelBank.toFixed(6)}`);
+okS('…and at every frame of the race, not just at the flag',
+  on.worstColumn < 1e-9 && on.worstHud < 1e-9 && on.samples > 5000,
+  `${on.samples} frames sampled · worst |column-bank|=${on.worstColumn.toExponential(2)} · worst |hudTotal-bank|=${on.worstHud.toExponential(2)}`);
+
+// ---- 2: ?hud=0 -------------------------------------------------------------
+const lapDiff = on.laps.map((l, i) => Math.abs(l.drift - (off.laps[i]?.drift ?? NaN)));
+okS('?hud=0 scores exactly what ?hud=1 scores',
+  off.hudPresent === false && on.hudPresent === true
+    && off.laps.length === on.laps.length
+    && lapDiff.every((d) => d === 0)
+    && off.totals.drift === on.totals.drift && off.bank === on.bank,
+  `hud=1 ${on.bank.toFixed(6)}  hud=0 ${off.bank.toFixed(6)}  Δ=${(on.bank - off.bank).toExponential(2)}  per-lap Δ max=${Math.max(...lapDiff)}`);
+okS('…and the same laps, in the same times, with the same marks',
+  off.totals.best === on.totals.best && off.totals.bestDrift === on.totals.bestDrift
+    && off.laps.every((l, i) => l.time === on.laps[i].time),
+  `best lap ${on.totals.best}/${off.totals.best} · top drift ${on.totals.bestDrift}/${off.totals.bestDrift}`);
+
+// ---- 3: the marks ----------------------------------------------------------
+const argMin = (a, f) => a.reduce((b, l) => (f(l) < f(b) ? l : b));
+const argMax = (a, f) => a.reduce((b, l) => (f(l) > f(b) ? l : b));
+okS('BEST and TOP DRIFT are read off the banked per-lap values',
+  on.totals.best === argMin(on.laps, (l) => l.time).n
+    && on.totals.bestDrift === argMax(on.laps, (l) => l.drift).n,
+  `best=lap ${on.totals.best} (${time(argMin(on.laps, (l) => l.time).time)}) · top drift=lap ${on.totals.bestDrift} (${argMax(on.laps, (l) => l.drift).drift.toFixed(2)})`);
+okS('the HUD BEST is the largest single slide in the same ledger',
+  near(on.hudBest, on.feelBest) && on.feelBest > 0 && on.feelBest <= on.bank,
+  `hud.best=${on.hudBest.toFixed(4)} feel.best=${on.feelBest.toFixed(4)}`);
+
+okS('the RENDERED table adds up: its drift column sums to its own footer',
+  !!on.dom && on.dom.open && on.dom.columnSum === on.dom.footDrift
+    && on.dom.footDrift === Math.round(on.bank)
+    && off.dom.columnSum === on.dom.columnSum,
+  `column ${on.dom?.columnSum} == footer "${on.dom?.footDriftTxt}" == bank ${Math.round(on.bank)} · hud=0 column ${off.dom?.columnSum}`);
+okS('the rendered BEST and TOP marks sit on the rows the model says they do',
+  on.dom.bestRows.length === 1 && on.dom.bestRows[0] === on.totals.best
+    && on.dom.topRows.length === 1 && on.dom.topRows[0] === on.totals.bestDrift
+    && on.dom.verdict.includes(String(Math.round(on.bank)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u2009')),
+  `BEST on row ${on.dom.bestRows} · TOP on row ${on.dom.topRows} · verdict "${on.dom.verdict.trim()}"`);
+
+// ---- 4: PAYOUT_MIN ---------------------------------------------------------
+okS('a slide under PAYOUT_MIN banks nothing, anywhere',
+  on.droppedCount > 0 && on.droppedMax < PAYOUT_MIN && on.bankedMin >= PAYOUT_MIN
+    && on.bankedSum === on.bank && sumD === on.bankedSum,
+  `${on.droppedCount} slides dropped worth ${on.droppedSum.toFixed(1)} raw (largest ${on.droppedMax.toFixed(1)}) · ${on.bankedCount} banked (smallest ${on.bankedMin.toFixed(1)}) summing to ${on.bankedSum.toFixed(4)} == bank ${on.bank.toFixed(4)}`);
+
+// ---- 5: the ladder ---------------------------------------------------------
+// EXACTLY zero, no tolerance: the ledger banks whole points, so the rise in the
+// bank must equal the rounded peak to the unit. A second application of the
+// ladder would put this at half a peak or more.
+okS('the chain multiplier is applied ONCE — the bank rises by the raw peak',
+  on.multResidual === 0 && on.maxMul > 1,
+  `max |bankRise - round(peak)| = ${on.multResidual} over ${on.bankedCount} payouts, chain reached x${on.maxMul} (a second application would put this at >= 0.5 x peak)`);
+
+/**
+ * THE LADDER, DRIVEN DIRECTLY. No browser: fx/feel.js imports nothing, so the
+ * rungs can be walked in node against a stub vehicle that never stops sliding.
+ * A driven race cannot reach the top of this table — 45 s of unbroken slide is
+ * meant to be a trophy — so the only honest way to check the ceiling is to hold
+ * it there deliberately.
+ */
+const { createFeel } = await import('../src/fx/feel.js');
+const ladder = (seconds) => {
+  const feel = createFeel({});
+  const v = { isDrifting: true, speed: 30, driftAngle: 0.5,
+    lastImpact: 0, landImpact: 0, justShifted: 0, position: { x: 0, y: 0, z: 0 } };
+  const DT = 1 / 60;
+  for (let t = 0; t < seconds; t += DT) feel.update(DT, { vehicle: v });
+  return feel;
+};
+const at45 = ladder(45.2), at44 = ladder(44.0), at9 = ladder(9.1);
+okS('the chain ladder still reaches x100 after 45 s of linked drifting',
+  at45.chainMultiplier === 100 && at44.chainMultiplier === 60 && at9.chainMultiplier === 6,
+  `44.0 s -> x${at44.chainMultiplier} · 45.2 s -> x${at45.chainMultiplier} · 9.1 s -> x${at9.chainMultiplier}`);
+
+// And the payout at the top of the ladder is the slide itself, not the slide
+// times a hundred a second time. This is the double-application, isolated.
+const top = ladder(45.2);
+const bankBefore = top.bank;
+top.event('driftEnd', { score: 1000 });
+okS('a slide banked at the x100 rung banks 1000, not 99 000',
+  top.chainMultiplier === 100 && top.bank - bankBefore === 1000 && top.payoutMult === 100
+    && top.payoutBase === 10,
+  `mul=x${top.chainMultiplier} peak=1000 -> bank +${top.bank - bankBefore} (the HUD counts up from payoutBase ${top.payoutBase} to ${top.payout})`);
+
+// The floor, isolated: a hair under is worth nothing and exactly on is worth itself.
+const floorFeel = createFeel({});
+floorFeel.event('driftEnd', { score: PAYOUT_MIN - 0.001 });
+const underBank = floorFeel.bank, underSeq = floorFeel.payoutSeq;
+floorFeel.event('driftEnd', { score: PAYOUT_MIN });
+okS('PAYOUT_MIN is a hard edge and only the ledger owns it',
+  underBank === 0 && underSeq === 0 && floorFeel.bank === Math.round(PAYOUT_MIN)
+    && floorFeel.payoutSeq === 1 && floorFeel.slideSeq === 2,
+  `${PAYOUT_MIN - 0.001} -> bank ${underBank} (slideSeq ${floorFeel.slideSeq}, payoutSeq ${floorFeel.payoutSeq}) · ${PAYOUT_MIN} -> bank ${floorFeel.bank}`);
+
 
 line('');
 line('GATE');
@@ -317,13 +601,28 @@ if (report.totals) {
 }
 
 line('');
+line(`SCORING RACE  (drift pilot, ${args.laps} laps, ?hud=1 vs ?hud=0)`);
+line('   LAP        TIME     DRIFT (hud=1)   DRIFT (hud=0)          Δ');
+for (const l of on.laps) {
+  const o = off.laps.find((x) => x.n === l.n) ?? { drift: NaN };
+  const marks = [l.n === on.totals.best ? 'BEST' : '', l.n === on.totals.bestDrift ? 'TOP DRIFT' : '']
+    .filter(Boolean).join('  ');
+  line(`    ${String(l.n).padStart(2, '0')}   ${time(l.time).padStart(9)}   ${f2(l.drift).padStart(13)}   ${f2(o.drift).padStart(13)}   ${(l.drift - o.drift).toExponential(1).padStart(8)}   ${marks}`);
+}
+line(`   -------------------------------------------------------------------`);
+line(`  TOTAL   ${time(on.totals.time).padStart(9)}   ${f2(sumD).padStart(13)}   ${f2(off.laps.reduce((a, l) => a + l.drift, 0)).padStart(13)}`);
+line(`  corner TOTAL (hud.total) ${f2(on.hudTotal)}   ·   feel.bank ${f2(on.feelBank)}   ·   race.driftTotal ${f2(on.bank)}`);
+line(`  ${on.slides} slides · ${on.bankedCount} banked · ${on.droppedCount} dropped under PAYOUT_MIN (${f2(on.droppedSum)} raw points discarded, everywhere)`);
+
+line('');
 line('CHECKS');
 let failed = 0;
-for (const c of report.checks) {
+for (const c of [...report.checks, ...sc]) {
   if (!c.pass) failed++;
   line(`  ${c.pass ? '✓' : '✗'} ${c.name}`);
   line(`      ${c.detail}`);
 }
+const nChecks = report.checks.length + sc.length;
 
 if (errors.length) {
   line('');
@@ -331,9 +630,9 @@ if (errors.length) {
   for (const e of errors.slice(0, 8)) line(`  ${e.slice(0, 220)}`);
 }
 
-if (args.json) await writeFile(args.json, JSON.stringify(report, null, 2));
+if (args.json) await writeFile(args.json, JSON.stringify({ ...report, score: { on, off, checks: sc } }, null, 2));
 
 line('');
 if (errors.length) { line('✗ page errors'); process.exit(1); }
-if (failed) { line(`✗ ${failed} of ${report.checks.length} checks failed`); process.exit(1); }
-line(`✓ all ${report.checks.length} checks passed`);
+if (failed) { line(`✗ ${failed} of ${nChecks} checks failed`); process.exit(1); }
+line(`✓ all ${nChecks} checks passed`);
