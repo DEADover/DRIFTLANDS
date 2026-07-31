@@ -456,15 +456,89 @@ export class Game {
     // Tilt from the plane through the patches, expressed in the car's own frame.
     const front = (h[0] + h[1]) * 0.5, rear = (h[2] + h[3]) * 0.5;
     const left = (h[0] + h[2]) * 0.5, right = (h[1] + h[3]) * 0.5;
-    const pitchT = Math.atan2(front - rear, AF - AR);   // nose up on a climb
-    const rollT = Math.atan2(left - right, 2 * B);
+    // `let`, because the airborne branch below replaces both — see the note there.
+    let pitchT = Math.atan2(front - rear, AF - AR);   // nose up on a climb
+    let rollT = Math.atan2(left - right, 2 * B);
+
+    /**
+     * IN THE AIR THERE ARE NO CONTACT PATCHES, AND THIS IS THE "NON-WORKING JUMP".
+     *
+     * `pitchT` above is the plane through four ground samples 2.7 m apart. That is
+     * the right answer on the ground and it is NONSENSE in the air, because the
+     * ground it samples is whatever happens to be scrolling past 3 m below the
+     * car. TRACED over the real driven flight (tools/jump-trace.mjs, the
+     * `jump_alpine` autopilot drive, frame for frame):
+     *
+     *   wall 106.583  on the lip      pitch  -1.78°
+     *   wall 106.767  0.05 s airborne pitch -14.15°   <- NOSE DOWN off the ramp
+     *   wall 107.400  mid-flight      pitch  +5.21°
+     *   wall 108.183  falling         pitch  -7.22°
+     *
+     * The car dives its nose 14 degrees at the exact instant it leaves the lip —
+     * the front patches drop into the ford while the rears are still on the crown
+     * — and then wanders with the terrain underneath for the rest of the flight.
+     * Nothing in that sequence is a jump. Height was never the problem: the apex
+     * measures 3.18 m and the client still calls the take-off non-working, because
+     * from 140 m up the eye reads ROTATION, not altitude, and this rotation was
+     * both backwards and uncorrelated with the flight.
+     *
+     * So while ballistic, the attitude comes from the TRAJECTORY: the flight-path
+     * angle atan2(vy, v_horizontal), which is nose-up by construction on the way
+     * up, passes through level at the apex, and is nose-down on the way in. It
+     * needs no knowledge of the jump module and it is right for a launch off any
+     * crest, a drop off a bank, or a fall down a hillside.
+     *
+     * GAIN 2.0, CLAMPED TO 24°. The raw flight-path angle of the design jump is
+     * +10.6° off the lip and -15.4° at touchdown: a 26° swing spread over 0.9 s,
+     * on a body that is 90 px long on screen. Doubling it gives +21°/-24°, a 45°
+     * swing, which at this camera visibly opens the underside on the way up and
+     * buries the nose on the way down. It is a lie about the moment of inertia and
+     * an honest one about the trajectory, which is the only thing the player is
+     * being told.
+     *
+     * ROLL RELAXES. The bank a car is carrying when it leaves the ground has
+     * nothing holding it up, so it unwinds over the flight rather than tracking
+     * facets it is nowhere near — and a level roll is what makes the pitch read.
+     *
+     * IT IS WEIGHTED BY HEIGHT, NOT SWITCHED ON `ballisticAir`, AND THAT MATTERS.
+     * `ballisticAir` is true for a large fraction of ordinary fast driving: traced
+     * over the same lap, the flag flickers on for runs of eight to sixteen frames
+     * at a time with the car 0.02-0.34 m off the road — real micro-hops off facet
+     * crests, correctly reported. Swinging the whole car's attitude on those would
+     * flatten its camber on every rough straight, which is a regression dressed as
+     * a feature. So the flight attitude fades in between 0.25 m and 1.00 m of
+     * daylight: a 0.34 m hop gets 12% of it and is imperceptible, the design jump
+     * is fully committed 0.09 s after the lip and stays there for 3.18 m of apex.
+     *
+     * THE BLEND IS ASYMMETRIC: 22/s while committed (a launch is a snap) against
+     * the ground's own 16/s, and the fast rate is held for a sixth of a second
+     * after touchdown so the nose-down attitude survives the landing and the car
+     * visibly slams level. At the landing frame slow motion is still at 0.40, so
+     * those two dozen degrees play over about 0.4 s of wall clock. THAT is the
+     * visible compression — 0.30 m of body squat is six pixels at this camera and
+     * could never have been it.
+     */
+    const gTop = Math.max(h[0], h[1], h[2], h[3]);
+    const airH = (this._carY ?? gTop) - gTop;
+    const airW = THREE.MathUtils.clamp((airH - 0.25) / 0.75, 0, 1);
+    if (airW > 0) {
+      const vh = Math.hypot(v.velocity.x, v.velocity.z);
+      const flight = vh > 1 ? Math.atan2(this._carVY ?? 0, vh) : 0;
+      const pitchAir = THREE.MathUtils.clamp(flight * 2.0, -0.42, 0.42);
+      pitchT += (pitchAir - pitchT) * airW;
+      rollT += (0 - rollT) * airW;
+    }
 
     // Low-pass the ANGLES only. Rates are high enough to track a real gradient
     // at speed and low enough to swallow facet-to-facet steps in the mesh.
     if (this._pose === undefined) this._pose = { y: h[0], pitch: pitchT, roll: rollT };
-    const kA = 1 - Math.exp(-16 * Math.max(dt, 1e-5));
-    this._pose.pitch += (pitchT - this._pose.pitch) * kA;
-    this._pose.roll += (rollT - this._pose.roll) * kA;
+    // 0.16 s of the fast rate after the last committed airborne frame, so the
+    // slam-to-level is not swallowed by the ground filter it lands into.
+    this._airPose = airW > 0.5 ? 0.16 : Math.max(0, (this._airPose ?? 0) - dt);
+    const rate = (airW > 0.5 || this._airPose > 0) ? 22 : 16;
+    const k = 1 - Math.exp(-rate * Math.max(dt, 1e-5));
+    this._pose.pitch += (pitchT - this._pose.pitch) * k;
+    this._pose.roll += (rollT - this._pose.roll) * k;
 
     /**
      * RIDE HEIGHT IS SOLVED, NOT AVERAGED.
@@ -514,7 +588,10 @@ export class Game {
       ? Math.max(this._carY, support)
       : this._pose.y;
 
-    return { y, pitch: this._pose.pitch, roll: this._pose.roll, onBridge, contact: h, support };
+    // `airW` is published because car.js needs the SAME committed-flight weight
+    // for the suspension droop; two independent notions of "is it flying" would
+    // disagree on exactly the frames where it matters.
+    return { y, pitch: this._pose.pitch, roll: this._pose.roll, onBridge, contact: h, support, airW };
   }
 
   /**

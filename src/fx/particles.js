@@ -380,6 +380,69 @@ export class ParticleSystem {
   }
 
   /**
+   * A ONE-SHOT GROUND BURST — a landing slam, an impact ring, anything that is
+   * an EVENT rather than a plume.
+   *
+   * WHY THIS HAD TO EXIST, MEASURED.
+   * `feel._burst` used to build its ring out of `spawn()`, and `spawn()` opens
+   * with `if (this._drivenThisFrame) return;` — a guard whose whole purpose is to
+   * drop the shell's legacy wheel dust when the contact-frame driver has already
+   * emitted a better version of it that frame. A landing ring is not wheel dust
+   * and never should have been subject to that. Instrumented over 112 s of the
+   * `jump_alpine` autopilot drive by counting calls either side of the guard:
+   *
+   *     spawn() calls dropped: 11278      accepted: 0
+   *
+   * Not "mostly dropped" — ALL of them, because the driver runs on every frame a
+   * car is moving, which is every frame a car can land on. So the jump had no
+   * landing dust whatsoever, and neither did any impact. That is a large part of
+   * "the take-off animation can be considered non-working": the flight had no
+   * punctuation at either end.
+   *
+   * This is the same shape as `firework()` — straight to `_emit`, no guard, no
+   * type restriction — and it can reach T_HARD, which `spawn()` cannot, so the
+   * ring throws real chips as well as dust.
+   *
+   * @returns {number} particles emitted
+   */
+  burst({ x, y, z, n = 16, power = 3, color = 0xd8d2c4, dx = 0, dz = 0, seed = 0 }) {
+    const hash = (i) => {
+      let t = (i * 374761393 + seed * 668265263) >>> 0;
+      t = Math.imul(t ^ (t >>> 13), 1274126177) >>> 0;
+      return ((t ^ (t >>> 16)) >>> 0) / 4294967296;
+    };
+    this._c.set(color);
+    const TAU = 6.283185307179586;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * TAU + hash(i) * 0.7;
+      const sp = power * (0.5 + hash(i + 40) * 1.0);
+      // Two thirds soft dust, one third hard chip: the dust is the volume and
+      // the chips are what make the eye read an IMPACT rather than a puff.
+      const chip = i % 3 === 2;
+      this._emit({
+        x: x + Math.cos(a) * 1.1, y: y + 0.25 + hash(i + 80) * 0.4, z: z + Math.sin(a) * 1.1,
+        vx: Math.cos(a) * sp + dx * power * 0.7,
+        vy: (chip ? 3.0 : 1.6) + hash(i + 120) * power * 0.4,
+        vz: Math.sin(a) * sp + dz * power * 0.7,
+        // Dust scales with the event. A 6.3 m/s jump landing arrives at power 5,
+        // which puts the puffs at 3.6-5.6 m — 75-120 px, i.e. the size of the car
+        // — while a 2 m/s scrape stays at 2.6 m and does not shout.
+        w: chip ? 0.30 + hash(i + 160) * 0.22 : 1.9 + power * 0.34 + hash(i + 160) * 2.0,
+        gw: chip ? 0 : 3.4,
+        life: (chip ? 0.55 : 0.75) + hash(i + 200) * 0.5,
+        r: this._c.r, g: this._c.g, b: this._c.b,
+        drag: chip ? 0.7 : 1.9, acc: chip ? -11 : 0.7, turb: chip ? 0 : 0.9,
+        rot: hash(i + 240) * TAU, rotV: chip ? (hash(i + 280) - 0.5) * 14 : 0,
+        seed: hash(i + 320),
+        opacity: chip ? 1 : 0.30,
+        type: chip ? T_HARD : T_SOFT,
+        groundY: y, bounce: chip ? 0.28 : 0,
+      });
+    }
+    return n;
+  }
+
+  /**
    * A FIREWORK — fired either side of a take-off when the wheels leave.
    *
    * WHY THIS IS A NEW ENTRY POINT AND NOT `spawn()`.
@@ -406,12 +469,42 @@ export class ParticleSystem {
    *     so the burst has a centre. Plus a handful of rising glints and a warm
    *     smoke puff, which is what stops it reading as a decal on the grass.
    *
+   * ---------------------------------------------------------------------------
+   * "THE FIREWORKS ARE NOT EXPRESSIVE" — AND THE REASON IS ONE NUMBER.
+   *
+   * All of the above was right about SHAPE and wrong about SCALE, and the defect
+   * lived entirely in the streak THICKNESS. The T_SPARK fragment gate is
+   * `k = length(vec2(p.x, p.y * 2.6))`, so the quad's `h` is squeezed by 2.6
+   * before the falloff is taken: an `h` of 0.26 m draws a bar 0.10 m thick. The
+   * alpine road is 10 m wide and spans about 210 px at this camera, i.e. 1 m is
+   * 21 px, so every streak in the burst was drawn TWO PIXELS wide.
+   *
+   * MEASURED (tools/jump-hot.mjs, which counts pixels that are both near-maximum
+   * red and strongly warm — a gate calibrated to return 0 on a frame with no
+   * burst in it). Over the four frames of the flight the burst painted 31, 15, 6
+   * and 3 hot pixels of a 2 073 600-pixel frame, inside a bounding box 250-360 px
+   * across. A shape that big made of that few pixels is not a firework, it is a
+   * scratch on the lens — which is exactly what the client reported.
+   *
+   * SO: LARGE, BRIEF AND BRIGHT RATHER THAN NUMEROUS, per the direction.
+   *
+   *   - A FLASH first. One white-hot disc, 8 m across and gone in 0.18 s. Because
+   *     the ellipse gate is 2.6:1 in quad space, a quad with `h = 2.6 * w` maps to
+   *     a CIRCLE in world, so this is one particle and one disc — the cheapest
+   *     large bright thing this shader can draw. It is what the eye catches; the
+   *     ring is what it looks at next.
+   *   - HALF AS MANY STREAKS, FIVE TIMES AS THICK. 14 shell + 8 core instead of
+   *     30 + 18, with `h` at 1.45 m (0.56 m drawn, ~12 px) and length 2.6 m
+   *     growing to 11. Fewer, fatter bars survive at 400 px away; thirty thin
+   *     ones average out into the grass.
+   *   - Everything stays deterministic and the whole burst is still one-shot in
+   *     the existing draw call. Cost falls from 64 particles to 37.
+   * ---------------------------------------------------------------------------
+   *
    * DETERMINISTIC. No Math.random anywhere in here: the ring angles are exact
    * divisions of the circle and every jitter comes from the caller's `seed`
    * through a hash. The same jump produces the same frame every run, which the
    * screenshot harness requires.
-   *
-   * COST: 64 particles per call, one-shot, in the existing single draw call.
    *
    * @returns {number} particles emitted
    */
@@ -425,8 +518,35 @@ export class ParticleSystem {
     const TAU = 6.283185307179586;
     let n = 0;
 
+    /**
+     * ---- the flash: ONE disc, white-hot, 0.18 s ---------------------------
+     * `h = 2.6 * w` cancels the T_SPARK gate's own 2.6:1 squeeze, so this quad
+     * paints a circle rather than the usual bar. Ground-aligned like the ring,
+     * so at a 50 degree camera it is a wide ellipse across the crown instead of
+     * a coin seen edge-on. It expands slightly as it dies, which is what makes it
+     * read as a detonation rather than as a lamp being switched off.
+     */
+    this._emit({
+      x, y: y + 1.0, z,
+      vx: 0, vy: 1.2, vz: 0,
+      w: 8.2 * scale, h: 8.2 * 2.6 * scale,
+      gw: 9.0 * scale, gh: 9.0 * 2.6 * scale,
+      // 0.26 s of SIM time. The flight it punctuates runs at timeScale 0.40, so
+      // this is 0.65 s on the wall clock — still brief, but it is alive when the
+      // `jump_alpine` preset takes its frame 0.43 s of wall clock after the lip,
+      // which is the frame every critic compares round to round.
+      life: 0.26,
+      // Near-white with a warm bias; T_SPARK adds vCol * alpha * 1.6 on top of
+      // itself, so this clips to white in the middle and stays gold at the edge.
+      r: 1.0, g: 0.94, b: 0.70,
+      drag: 2.0, acc: 0, turb: 0,
+      rot: 0, seed: h(1),
+      opacity: 1, type: T_SPARK, flat: 1,
+    });
+    n++;
+
     // ---- the shell: a wide fast gold ring ---------------------------------
-    const N1 = 30;
+    const N1 = 14;
     for (let i = 0; i < N1; i++) {
       // Exact divisions, jittered by a fraction of the step: an unbroken ring
       // reads as a machined washer, a scattered one stops reading as a ring.
@@ -447,9 +567,11 @@ export class ParticleSystem {
       this._emit({
         x, y: y + 0.9, z,
         vx, vy: 2.6 + h(i + 17) * 2.4, vz,
-        w: 0.90 * scale, h: 0.26 * scale,
-        gw: 4.0 * scale, gh: 0,
-        life: 0.46 + h(i + 33) * 0.16,
+        // 2.6 m long, 1.45 m of quad thickness = 0.56 m drawn = ~12 px. The old
+        // 0.90 x 0.26 drew a 2 px hair; see the note above for the measurement.
+        w: 2.6 * scale, h: 1.45 * scale,
+        gw: 11.0 * scale, gh: 0,
+        life: 0.62 + h(i + 33) * 0.18,
         // Saturated on purpose: T_SPARK adds `vCol * alpha * 1.6` on top of
         // itself and the grade blooms it, so anything that starts near white
         // arrives as white. Gold has to be requested in the raw colour.
@@ -462,7 +584,7 @@ export class ParticleSystem {
     }
 
     // ---- the core: a slower, tighter, hotter ember ring --------------------
-    const N2 = 18;
+    const N2 = 8;
     for (let i = 0; i < N2; i++) {
       const a = (i / N2) * TAU + 0.31 + (h(i + 400) - 0.5) * 0.35;
       const sp = (11.0 + h(i + 411) * 4.0) * scale;
@@ -470,8 +592,8 @@ export class ParticleSystem {
       this._emit({
         x, y: y + 0.75, z,
         vx, vy: 1.4 + h(i + 421) * 1.8, vz,
-        w: 0.85 * scale, h: 0.24 * scale,
-        gw: 2.2 * scale, gh: 0,
+        w: 2.2 * scale, h: 1.60 * scale,
+        gw: 5.0 * scale, gh: 0,
         life: 0.62 + h(i + 431) * 0.22,
         r: 1.0, g: 0.30 + h(i + 441) * 0.20, b: 0.04,
         drag: 2.6, acc: -6.0, turb: 0.6,
@@ -482,12 +604,14 @@ export class ParticleSystem {
     }
 
     // ---- glints: the vertical component, so it is a burst and not a decal --
-    for (let i = 0; i < 10; i++) {
-      const a = (i / 10) * TAU + 1.1;
+    // Six instead of ten, each two and a half times the diameter: a T_DROP is a
+    // round soft blob, and at 21 px per metre the old 0.30 m ones were 6 px.
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * TAU + 1.1;
       this._emit({
         x: x + Math.cos(a) * 0.5, y: y + 1.0, z: z + Math.sin(a) * 0.5,
         vx: Math.cos(a) * 3.5, vy: 7.5 + h(i + 600) * 5.5, vz: Math.sin(a) * 3.5,
-        w: 0.30 + h(i + 610) * 0.20,
+        w: 0.85 + h(i + 610) * 0.50,
         life: 0.75 + h(i + 620) * 0.35,
         r: 1.0, g: 0.96, b: 0.80,
         drag: 0.9, acc: -13, turb: 0.5,

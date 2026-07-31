@@ -148,6 +148,10 @@ const TUNE = {
   fovAttack: 2.2,              // how fast the boost builds (reads as accel)
   fovRelease: 4.5,             // how fast it lets go (reads as lift-off)
   fovPunchDecay: 5.5,
+  /** deg of PULL-IN held for as long as slow motion is at full depth. Negative
+   *  sign is applied at the use site; see the note there for why it is the one
+   *  FOV term in this file that narrows rather than widens. */
+  fovSlow: 3.5,
 
   // camera
   rumbleTrauma: 0.34,          // sustained shake on rough ground at speed
@@ -388,7 +392,34 @@ export function createFeel(ctx = {}) {
       const rate = target > fovBase ? TUNE.fovAttack : TUNE.fovRelease;
       fovBase += (target - fovBase) * (1 - Math.exp(-rate * rdt));
       fovPunch *= Math.exp(-TUNE.fovPunchDecay * rdt);
-      this.fovBoost = fovBase + fovPunch;
+
+      /**
+       * SLOW MOTION HAS TO BE SEEN, NOT ONLY MEASURED — AND IT WAS ONLY MEASURED.
+       *
+       * Traced over the real driven jump (tools/jump-trace.mjs) `timeScale` sits
+       * at exactly 0.400 for the whole flight and the flight lasts 2.2 s on the
+       * wall clock against 0.9 s of sim. The mechanism was never broken. It was
+       * INVISIBLE, and for a structural reason: the camera FOLLOWS the car, so
+       * during a flight the car is nearly stationary in frame and the only thing
+       * whose on-screen speed changes is the ground scrolling past — under a car
+       * that is 4% of the frame wide, 400 px from the eye. Halve that scroll rate
+       * and nobody can tell; there is nothing in the picture to compare it to.
+       * That is the whole of "the slow motion also works unclearly".
+       *
+       * So the clock now moves the LENS. A sustained pull-IN of 3.5 degrees on a
+       * 26 degree base is a 13% narrowing: the world crowds in, the car grows by
+       * about a sixth, and the change is unmistakable because it is a change in
+       * COMPOSITION rather than in rate. It is the opposite sign to every other
+       * term here — speed, drift and shove all push the lens OUT — so it cannot
+       * be confused with going fast.
+       *
+       * Sustained, not a punch: it is driven off `slowBlend` directly, so it
+       * arrives and leaves exactly with the effect and cannot survive it. The
+       * camera's own 9 deg/s limiter spreads the 3.5 over 0.39 s, which is inside
+       * a 2.2 s flight with room either side.
+       */
+      const e = slowBlend * slowBlend * (3 - 2 * slowBlend);
+      this.fovBoost = fovBase + fovPunch - TUNE.fovSlow * e;
 
       // --------------------------------------------------------- rumble
       // Rough ground should be felt through the frame, not just seen. Bridges
@@ -419,6 +450,7 @@ export function createFeel(ctx = {}) {
       hitStop = 0; hitEase = 0; impactCool = 0;
       slowArmed = false; slowBlend = 0; slowSim = 0; slowCool = 0;
       fovPunch = 0;
+      this.jumpAir = false;
       this.timeScale = 1;
     },
 
@@ -478,13 +510,39 @@ export function createFeel(ctx = {}) {
     _takeoff(p, v, camera) {
       if (!v) return;
       this.jumpCount++;
+      // Armed for `_land`: this flight earns the big touchdown, an ordinary
+      // crest-hop does not. See the note there.
+      this.jumpAir = true;
       // Punch the FOV OUT as the car lifts — the opposite sign to an impact,
       // because the world is falling away rather than arriving.
-      fovPunch += 1.05;
+      // 1.05 -> 0.55 because the slow-motion PULL-IN (see the FOV block in
+      // update()) is -3.5 and arrives 0.18 s later: at the old value the two
+      // spent the first third of the flight cancelling and the lens did nothing
+      // visible at the moment it most needed to.
+      fovPunch += 0.55;
       camera?.addShake?.(0.10);
       if (this.slowMoEnabled && !slowArmed && slowCool <= 0) {
         slowArmed = true;
         slowSim = 0;
+      }
+      /**
+       * DIRT OFF THE LIP. There was nothing here at all: the take-off had two
+       * fireworks and an FOV punch and no contact event whatsoever, so the car
+       * simply stopped touching the ground with no sign that it had ever been
+       * touching it. A rally car leaving an earthwork at 140 km/h throws a sheet
+       * of it backwards, and the sheet is the thing that says WHEELS LEFT HERE.
+       *
+       * Thrown along -forward, at the height of the lip the event carries, and
+       * scaled by the launch speed so a 3 m/s hop off a bank does not produce the
+       * same plume as the design jump's 7.4.
+       */
+      if (particles?.burst) {
+        const f = v.forward;
+        particles.burst({
+          x: v.position.x - f.x * 1.6, y: (p.y ?? v._groundY ?? 0) + 0.2, z: v.position.z - f.z * 1.6,
+          n: 22, power: 3.0 + (p.vy ?? 4) * 0.55,
+          color: 0xc8b48a, dx: -f.x, dz: -f.z, seed: 0x11f7,
+        });
       }
       this._fireworks(p, v);
     },
@@ -508,35 +566,59 @@ export function createFeel(ctx = {}) {
       this.fireworkCost = n;
     },
 
+    /**
+     * TOUCHDOWN — and the end of a celebrated jump is not an ordinary landing.
+     *
+     * "What good looks like: the landing has a visible compression." Two things
+     * carry that here, and neither is a body squat: 0.30 m of chassis travel is
+     * six pixels at this camera and cannot be seen. What CAN be seen is
+     *
+     *   1. the nose slamming level. `carPose` holds the flight attitude — about
+     *      -24 degrees at touchdown — and blends out of it at 22/s, so the front
+     *      of the car drops through two dozen degrees over about a sixth of a
+     *      second of sim. Slow motion is still at 0.40 on the landing frame, so
+     *      that plays over 0.4 s of wall clock. That is the compression.
+     *   2. the dust. Which, until `particles.burst` existed, was emitted and
+     *      thrown away every single time — see `_burst`.
+     *
+     * `jumpAir` is set by `_takeoff` and cleared here, so the big ring is spent
+     * once per celebrated flight and an ordinary kerb-hop still gets the small
+     * one. It cannot leak: the same edge that clears it releases slow motion.
+     */
     _land(speed, v, camera) {
       if (!(speed > 1.2)) return;
-      camera?.addShake?.(clamp(speed * TUNE.landShake, 0.05, 0.6));
+      const big = this.jumpAir === true;
+      this.jumpAir = false;
+      camera?.addShake?.(clamp(speed * TUNE.landShake * (big ? 2.0 : 1), 0.05, 0.7));
       fovPunch -= clamp(speed * 0.06, 0.1, 0.9);
-      this._burst(v, Math.round(clamp(speed * 2.2, 6, 34)), 1.6 + speed * 0.12);
+      this._burst(
+        v,
+        Math.round(clamp(speed * (big ? 5.0 : 2.2), 6, big ? 46 : 34)),
+        (big ? 3.4 : 1.6) + speed * (big ? 0.26 : 0.12),
+      );
       if (speed > 9 && hitStop <= 0) hitStop = 0.035;
     },
 
-    /** Debris/dust ring at the car's contact patch. Purely decorative. */
+    /**
+     * Debris/dust ring at the car's contact patch.
+     *
+     * NOT `particles.spawn` any more, and this was never decorative — it was
+     * ABSENT. `spawn()` drops everything on any frame the contact-frame dust
+     * driver has already run, which is every frame a moving car is on; counted
+     * over 112 s of the jump_alpine drive, 11278 of these calls were discarded
+     * and none survived. So a landing had no dust and an impact had no debris.
+     * `particles.burst` is the event-shaped entry point; see the note on it.
+     */
     _burst(v, n, power, color, dir) {
-      if (!particles || !v) return;
-      const y = (v._groundY ?? 0) + 0.35;
-      for (let i = 0; i < n; i++) {
-        const a = (i / n) * Math.PI * 2 + Math.random() * 0.6;
-        const sp = power * (0.4 + Math.random() * 0.9);
-        particles.spawn({
-          x: v.position.x + Math.cos(a) * 1.2,
-          y: y + Math.random() * 0.5,
-          z: v.position.z + Math.sin(a) * 1.2,
-          vx: Math.cos(a) * sp + (dir ? dir.x * power * 0.8 : 0),
-          vy: 1.4 + Math.random() * power * 0.35,
-          vz: Math.sin(a) * sp + (dir ? dir.z * power * 0.8 : 0),
-          size: 2.0 + Math.random() * 3.2,
-          life: 0.5 + Math.random() * 0.7,
-          color: color ?? 0xd8d2c4,
-          drag: 2.1,
-          grow: 2.6,
-        });
-      }
+      if (!particles?.burst || !v) return;
+      particles.burst({
+        x: v.position.x, y: (v._groundY ?? 0) + 0.25, z: v.position.z,
+        n, power, color: color ?? 0xd8d2c4,
+        dx: dir?.x ?? 0, dz: dir?.z ?? 0,
+        // Deterministic, like the fireworks: the screenshot harness compares the
+        // same preset across rounds and a random ring makes that meaningless.
+        seed: (this.jumpCount * 977 + n * 31 + Math.round(power * 100)) >>> 0,
+      });
     },
 
     /**

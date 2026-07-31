@@ -534,10 +534,23 @@ export class CarView {
        * happen when a car is cocked over a crest.
        */
       this.root.updateMatrixWorld(true);
+      /**
+       * A CAR IN THE AIR HANGS ON ITS STOPS.
+       *
+       * DROOP_MAX is 0.20 m, which is right for a wheel hanging off a verge and
+       * is 4 px at this camera — below the threshold at which anything reads. In
+       * FLIGHT the springs are at full extension, and that is one of the few
+       * airborne cues a top-down camera can actually show, so the stroke opens up
+       * to 0.34 m (7 px per wheel, 14 px across the silhouette) whenever the pose
+       * says the car is committed to a flight. `pose.airW` is the same
+       * height-weighted term the airborne attitude uses, so this cannot fire on
+       * the micro-hops that ordinary fast driving is full of.
+       */
+      const droopMax = DROOP_MAX + 0.14 * (pose?.airW ?? 0);
       for (let i = 0; i < 4; i++) {
         this.wheels[i].getWorldPosition(_wp);
         const gap = (_wp.y - WHEEL_R) - sampleHeight(_wp.x, _wp.z);
-        const droop = clamp(gap, 0, DROOP_MAX);
+        const droop = clamp(gap, 0, droopMax);
         this._droop[i] += (droop - this._droop[i]) * k(18);
         this.wheels[i].position.y -= this._droop[i];
       }

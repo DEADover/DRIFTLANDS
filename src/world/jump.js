@@ -804,15 +804,34 @@ function build(ctx) {
   // One capping beam along the lip, proud of the crown. It is the edge the eye
   // reads the take-off point from, and at this camera an unmarked drop simply
   // disappears into the shadow of its own wall.
+  //
+  // THE BEAMS WERE LAID ALONG THE ROAD INSTEAD OF ACROSS IT — this is the client's
+  // "stick sticking out in the middle of the bridge", and it is a one-argument bug.
+  //
+  // `Kit.box(w, h, d, x, y, z, yaw, ...)` builds a BoxGeometry whose WIDTH runs
+  // along local +X and then applies makeRotationY(yaw). This module's forward is
+  // (cos h, 0, -sin h), which is exactly where rotationY(h) sends local +X. So
+  // passing the 13 m capping length as `w` with `yaw = site.heading` laid a
+  // 13.0 m timber DOWN THE CENTRELINE, centred 0.30 m behind the lip: it ran from
+  // s = -6.8 to s = +6.2, i.e. 6.2 m out into a 12 m void, hanging over the ford
+  // with nothing under it. The landing sill's beam did the same in mirror, which
+  // is why there were two of them. Proved by elimination: hiding `jump-timber`
+  // alone removes the beam from `shots/air2/jump_alpine_t106.9.png` while hiding
+  // `road-barriers` and `bridges` leaves it untouched.
+  //
+  // The capping length belongs on the ACROSS axis. rotationY(h) sends local +Z to
+  // (sin h, 0, cos h) = (-fz, 0, fx) = n, the module's own across vector, so the
+  // fix is to pass the length as `d` and the 0.5 m thickness as `w`. No new
+  // constant, no change to the height solve — `heightAt` never saw these.
   {
     // On the module's OWN answer, not on lipY: the crown is still climbing at
     // 1:4.2 here, so a beam pinned to the lip height floats 8 cm clear of the
     // surface a third of a metre behind it.
     const [wx, wz] = toWorld(-0.30, 0);
     const beamY = heightAt(wx, wz) ?? lipY;
-    timber.box(2 * CROWN_HW - 0.3, 0.34, 0.52, wx, beamY + 0.05, wz, site.heading, TIMBER_HI);
+    timber.box(0.52, 0.34, 2 * CROWN_HW - 0.3, wx, beamY + 0.05, wz, site.heading, TIMBER_HI);
     const [lx, lz] = toWorld(GAP + 0.30, 0);
-    timber.box(2 * CROWN_HW - 0.3, 0.30, 0.62, lx,
+    timber.box(0.62, 0.30, 2 * CROWN_HW - 0.3, lx,
       baseAt(lx, lz) + LAND_TOE + 0.06, lz, site.heading, TIMBER);
   }
 
