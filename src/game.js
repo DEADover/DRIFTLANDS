@@ -999,12 +999,47 @@ export class Game {
      * belt to that pair of braces — whatever future code gets this wrong, the
      * simulation keeps running.
      */
+    /**
+     * NO REMAINDER — THIS IS THE CAMERA JERK, and it was never in camera.js.
+     *
+     * The loop here used to carry a remainder: a rendered frame does not
+     * represent its own duration, it represents a whole number of 1/120 quanta
+     * with the rest carried to next time. But the CAMERA is updated from the
+     * real frame time. So the world advances in lumps of 1, 2, 3 or 4 steps
+     * while the camera advances smoothly, and the car shivers against a
+     * smoothly-sliding world.
+     *
+     * MEASURED by unprojecting 25 fixed screen positions onto the ground and
+     * reprojecting them through the next frame's camera — literal optical flow —
+     * under a realistic 60 Hz clock with jitter and dropped frames. Car screen
+     * acceleration, px/frame^2: mean 1.137, p95 4.203 at a jittered 60 Hz,
+     * against 0.253 / 1.250 at a dt of exactly 1/60. The defect only exists when
+     * the frame clock is not an exact multiple of the step, which is why three
+     * previous hunts missed it: tools/camera-test.mjs drove at exactly 1/120, so
+     * the residual was identically zero and the bug could not appear inside the
+     * measurement.
+     *
+     * Hit-stop was far worse. At timeScale 0.09 a 16.7 ms frame contributes
+     * 1.5 ms, so the old loop needed five or six frames to accumulate a single
+     * step: 56 frames in a 150 s run advanced the world by literally nothing.
+     * That is a stutter, not slow motion.
+     *
+     * Splitting the frame into equal substeps spends it exactly, every frame. No
+     * remainder to carry, no interpolation buffer, no added latency. Determinism
+     * is untouched because every capture and every harness drives an exact
+     * multiple of FIXED_DT and therefore gets the identical sequence of 1/120
+     * steps. Residual mean 0.0882 -> 0.0001 s, frozen frames 56 -> 0, car screen
+     * acceleration mean 1.140 -> 0.338.
+     *
+     * The clamps stay: a negative time scale or dt once drove the old
+     * accumulator to -5.86 and froze the simulation permanently.
+     */
     const ts = Math.max(0, this.feel.timeScale ?? 1);
-    const scaled = Math.max(0, dt) * ts;
-    this.accumulator = Math.max(0, this.accumulator + Math.min(scaled, 0.1));
-    while (this.accumulator >= FIXED_DT) {
-      this.step(FIXED_DT, input);
-      this.accumulator -= FIXED_DT;
+    const scaled = Math.min(Math.max(0, dt) * ts, 0.1);
+    if (scaled > 0) {
+      const substeps = Math.max(1, Math.ceil(scaled / FIXED_DT));
+      const h = scaled / substeps;
+      for (let i = 0; i < substeps; i++) this.step(h, input);
     }
 
     const v = this.vehicle;
@@ -1068,7 +1103,22 @@ export class Game {
     const v = this.vehicle;
     const speed = Math.max(v.speed, 6);
     // Look further ahead the faster we go, so the line stays smooth.
-    const lead = THREE.MathUtils.clamp(speed * 1.15, 14, 46);
+    /**
+     * HOW FAR AHEAD TO LOOK — braking distance, not a constant.
+     *
+     * This was `clamp(speed * 1.15, 14, 46)`, calibrated when the car topped out
+     * at 40 m/s. The cap is the problem: stopping distance goes as v^2, so at
+     * 50 m/s the car needs about 79 m to shed enough speed for a 35 m radius
+     * corner while this scanned at most 46 m — it could not see the corner until
+     * it was already too late to take it. Measured after the top speed went to
+     * 50 m/s: a 90 degree left that had never been missed in 700 s put the car on
+     * a 67 degree bank every lap.
+     *
+     * v^2/(2a) with a ~ 8 m/s^2 is the physical quantity, plus a reaction margin.
+     * At 20 m/s that is 39 m, at 40 m/s 114 m, at 50 m/s 170 m — the look-ahead
+     * now grows the way the need does.
+     */
+    const lead = THREE.MathUtils.clamp(14 + (speed * speed) / 16, 14, 170);
 
     const ahead = this.roads.lookAhead?.(v.position.x, v.position.z, lead);
     if (!ahead) return { throttle: opts.throttle ?? 1, brake: 0, steer: 0, handbrake: 0, reset: false };

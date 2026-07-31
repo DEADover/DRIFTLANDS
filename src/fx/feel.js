@@ -166,7 +166,7 @@ const TUNE = {
   hitStopEase: 0.13,           // s to ease back to normal
 
   impactCooldown: 0.30,        // debounce: grinding a wall is not 40 impacts
-  topSpeed: 44,
+  topSpeed: 50,
 };
 
 /**

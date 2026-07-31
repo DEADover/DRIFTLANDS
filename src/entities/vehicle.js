@@ -55,8 +55,78 @@ export const DEFAULT_TUNE = {
   // car. Braking is grip-limited in practice (mu ~1.3 on dirt caps it near
   // 12.7 m/s^2), so the raise mostly guarantees the tyres are the limit, not
   // the brake, and engine braking now gives real deceleration off-throttle.
-  enginePower: 9000,         // N of drive force at full throttle, low speed
-  topSpeed: 44,              // m/s (~158 km/h) — reads fast at this camera height
+  // A FORCE CAP AND A POWER CAP, BECAUSE 180 km/h NEEDS BOTH — AND ONLY THE
+  // POWER CAP MAY MOVE.
+  //
+  // The client asked for 180 km/h (50 m/s); the car did 148.5. The old drive
+  // curve was `enginePower * (1 - (v/topSpeed)^3)` with topSpeed 44, which is a
+  // GOVERNOR: the force is identically zero at 44, so the car settles a few m/s
+  // under it whatever the power. MEASURED (tools/speed-test.mjs, old tune):
+  // drag-limited terminal 41.24 m/s, 93.7% of the governor, real route 41.06.
+  // So top speed was not limited by power or by drag — 720 N of surplus was
+  // still on the table at 40 m/s — it was limited by the governor collapsing
+  // the torque curve underneath it.
+  //
+  // The obvious fix, moving the governor up, was tried and MEASURED and it is
+  // wrong. `1 - (v/x)^3` with x well clear of 50 is nearly flat everywhere
+  // below it, so the drive force at 40 m/s went from 2238 N to 5720 N — 2.6x —
+  // and the car did not just gain a top end, it gained a third more thrust out
+  // of every corner. The route showed it: 15% of the run above 45 m/s, and the
+  // 90-degree left at road sample ~900 went from never being missed in 700 s
+  // to putting the car off the outside and onto a 67-degree bank it cannot
+  // climb, every single lap.
+  //
+  // The right shape is the one a geared car actually has, and it is quoted the
+  // way engines are quoted: a traction-limited force cap off the line, a power
+  // peak, and power falling away past it toward the limiter.
+  //
+  //     P(v)     = peakPower below powerPeakSpeed, then straight down to
+  //                limitPower at revLimit
+  //     drive(v) = min(enginePower, P(v) / v) * governor(v)
+  //
+  // Each number owns exactly one thing, which is the point:
+  //   enginePower     the LAUNCH. Force cap below 17 m/s. Untouched — the
+  //                   play-testing round that set 9000 N owns it.
+  //   peakPower       the MID-RANGE, and therefore 0-100 km/h.
+  //   limitPower      the TOP END. It alone decides where drive crosses drag.
+  //   revLimit        a wall, not a fade. Does nothing until 52 m/s.
+  //
+  // MEASURED (tools/speed-test.mjs), drive force in N against the old car:
+  //     v m/s      20     25     30     35     40     45     50
+  //     old      8155   7350   6147   4470   2238      0      0
+  //     new      8750   7000   5424   4299   3455   2798   2273
+  // Below the old car through 25-35 m/s, which is the whole point: the extra
+  // is delivered where the client asked for it and NOWHERE ELSE. 0-100 km/h
+  // comes out at 4.15 s against the old car's 4.17 — the launch is the same
+  // car — while terminal goes 148.5 -> 182.5 km/h.
+  //
+  // The first attempt at this task raised the governor instead, and that put
+  // 5720 N at 40 m/s (2.6x the old car) and a third more thrust out of every
+  // corner: the 90-degree left at road sample ~900 went from never being missed
+  // in 700 s of autopilot to putting the car off the outside and onto a
+  // 67-degree bank it cannot climb, on every lap. A top-end change must not be
+  // a mid-range change, and only splitting power from force makes that possible.
+  //
+  // Two other settings were measured and rejected: pure constant power at
+  // 113 kW (top speed right, but 0-100 fell from 4.17 s to 5.39 s), and 150 kW
+  // to 102 kW (0-100 4.47 s, and the route only reached 165 km/h).
+  enginePower: 9000,         // N — the traction-limited force cap, low speed
+  peakPower: 175000,         // W at the wheels, at and below powerPeakSpeed
+  powerPeakSpeed: 25,        // m/s where peak power is made
+  limitPower: 94000,         // W left at the limiter — this sets top speed
+  // The governor proper. Not a fade: a wall in the last 10% of the rev range,
+  // so it does nothing at all at any speed the car actually uses and only stops
+  // the number running away downhill. A cubic fade from here would eat 58% of
+  // the drive force at 50 m/s and put us back where we started.
+  revLimit: 58,              // m/s (209 km/h) — hard limiter
+  revLimitBand: 0.10,        // fraction of revLimit over which it closes
+  // `topSpeed` now means what its name says: the speed the car is expected to
+  // REACH. It is the gearbox spacing here (`span = topSpeed / GEAR_COUNT`), the
+  // rev needle in ui/hud.js, the engine note in audio/audio.js and the
+  // speed-driven FX in fx/feel.js — every one of which wants the speed you see,
+  // not the limiter. Leaving those on 44 while the car did 50 would have pinned
+  // the needle and saturated the speed FOV a fifth of the way short.
+  topSpeed: 50,              // m/s (180 km/h) — the speed the car reaches
   driveBiasRear: 0.66,       // rear-biased AWD: launches hard, still oversteers
   // 27000 N is the PEDAL, not the deceleration: it is far above what any
   // surface can hold (tarmac tops out near 20600 N), so the tyres are always
@@ -420,11 +490,27 @@ export class Vehicle {
     // The rev limiter watches TOTAL speed, not forward speed: otherwise a car
     // sitting at 40 degrees reads as "slow" and gets full power, and a drift
     // becomes an accelerator instead of the speed-scrubbing move it should be.
-    const sr = clamp(speed / T.topSpeed, 0, 1);
     let drive = 0;
     let reverse = 0;
     if (throttle > 0) {
-      drive = T.enginePower * throttle * Math.max(0, 1 - sr * sr * sr);
+      // See the § FORCE CAP AND A POWER CAP note in DEFAULT_TUNE. The rev
+      // limiter watches TOTAL speed, not forward speed: otherwise a car sitting
+      // at 40 degrees reads as "slow" and gets full power, and a drift becomes
+      // an accelerator instead of the speed-scrubbing move it should be.
+      if (T.peakPower === undefined) {
+        // Legacy tune (no peakPower): the old cubic fade against topSpeed,
+        // byte-for-byte, so an old tune object still drives exactly as it did.
+        const sr = clamp(speed / T.topSpeed, 0, 1);
+        drive = T.enginePower * throttle * Math.max(0, 1 - sr * sr * sr);
+      } else {
+        const rev = T.revLimit ?? T.topSpeed;
+        const band = Math.max(1e-3, rev * (T.revLimitBand ?? 0.10));
+        const gov = clamp((rev - speed) / band, 0, 1);
+        const vp = T.powerPeakSpeed ?? 25;
+        const fade = clamp((speed - vp) / Math.max(1e-3, rev - vp), 0, 1);
+        const power = lerp(T.peakPower, T.limitPower ?? T.peakPower, fade);
+        drive = Math.min(T.enginePower, power / Math.max(speed, 2)) * throttle * gov;
+      }
     }
     // Brake force acts along the wheels' ROLLING direction, and `vx` is
     // body-frame FORWARD speed — so a car sliding at 88 deg has vx near zero
