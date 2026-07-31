@@ -165,6 +165,59 @@ const TUNE = {
   topSpeed: 44,
 };
 
+/**
+ * SLOW MOTION OVER A JUMP.
+ *
+ * Armed only by the `jump` event, which `game.js _stepVertical` fires exactly
+ * once per flight and only when the car left a surface that was climbing steeply
+ * AND had a real drop behind it — a built ramp, never a road crest and never a
+ * bridge. See the SEPARATION note in `_stepVertical` for how those are told
+ * apart; nothing in this file re-decides it.
+ *
+ * DEPTH. 0.40, and the number comes from the flight, not from taste. The design
+ * jump measures 0.906 s of air (tools/jump-test.mjs at the autopilot's real
+ * 39.5 m/s approach); 0.906 / 0.40 = 2.27 s on the wall clock, which is the
+ * "couple of seconds" that was asked for. 0.35 stretches it to 2.6 s and the car
+ * starts to read as stalled in mid-air rather than hanging; 0.50 gives 1.8 s,
+ * which is over before the eye has found the car. It also keeps the SHORT jumps
+ * legible: a 27 m/s take-off is 0.64 s of air, 1.6 s slowed, still a beat.
+ *
+ * SHAPE. Eased at both ends, because a hard cut to 0.4x and back is nauseating —
+ * and asymmetrically, 0.18 s in and 0.34 s out, so the drop into slow motion
+ * lands with the take-off while the return is a release rather than a snap. The
+ * ramps are in REAL seconds and the curve is a smoothstep, so there is no
+ * discontinuity in the first derivative at either end.
+ *
+ * CEILING. 1.6 s of SIM time. The flight normally ends it (the car lands), but a
+ * jump that turns into a long fall down a hillside must not hold the whole game
+ * at 0.4x while it happens.
+ *
+ * IT CANNOT MOVE THE CAR. `game.update` scales dt and then spends it in a fixed
+ * 1/120 accumulator, so time scaling changes how many frames a given sequence of
+ * identical physics steps is spread over and nothing else. Proved, not asserted:
+ * `tools/jump-test.mjs --slowmo` drives the same jump with it on and off and
+ * compares the two flights step index for step index.
+ *
+ * IT DOES NOT TOUCH THE LEDGER EITHER. Everything above that has a clock —
+ * `chainTime`, `chainGrace`, `payoutAge`, `impactCool`, the FOV filters — is
+ * advanced by `rdt`, which is this module's own recovered REAL time (`dt` back
+ * out through `timeScale`). That was already true for hit-stop and it is why
+ * hit-stop never distorted the chain; slow motion inherits it unchanged. The
+ * payout count-up therefore beats at the same wall-clock rate at 0.4x as at 1x,
+ * and nothing is banked or counted twice.
+ */
+const SLOW_SCALE = 0.40;
+const SLOW_IN = 0.18;        // real seconds to full depth
+const SLOW_OUT = 0.34;       // real seconds back to normal
+const SLOW_MAX = 1.60;       // sim seconds, a hard ceiling on one flight
+const SLOW_COOLDOWN = 1.20;  // real seconds before another jump may arm it
+
+/** How wide of the car the two batteries stand, in metres. The jump's crown is
+ *  13.3 m across and its crib walls retain the edges, so 9.5 m puts them on the
+ *  verge just outside the earthwork — clear of the racing line, and far enough
+ *  apart that the car flies BETWEEN them rather than through one. */
+const FIREWORK_SPREAD = 9.5;
+
 export function createFeel(ctx = {}) {
   const particles = ctx.particles;
 
@@ -184,8 +237,17 @@ export function createFeel(ctx = {}) {
   let payoutSeq = 0;
   let slideSeq = 0;
 
+  let slowArmed = false;       // a jump is in progress and owns the clock
+  let slowBlend = 0;           // 0..1, eased into SLOW_SCALE
+  let slowSim = 0;             // sim seconds spent slowed in this flight
+  let slowCool = 0;            // real seconds before another jump may arm it
+
   const feel = {
     timeScale: 1,
+    /** Diagnostic switch for tools/jump-test.mjs --slowmo. */
+    slowMoEnabled: true,
+    /** Take-offs celebrated. Read by tools/jump-test.mjs's control run. */
+    jumpCount: 0,
     fovBoost: 0,
     chainMultiplier: 1,
     chainStep: 0,
@@ -216,17 +278,46 @@ export function createFeel(ctx = {}) {
       const rdt = Math.min(0.1, dt / Math.max(0.05, this.timeScale));
 
       // ---------------------------------------------------------- hit-stop
+      let scale = 1;
       if (hitStop > 0) {
         hitStop -= rdt;
-        this.timeScale = TUNE.hitStopScale;
+        scale = TUNE.hitStopScale;
         if (hitStop <= 0) hitEase = TUNE.hitStopEase;
       } else if (hitEase > 0) {
         hitEase -= rdt;
-        this.timeScale = lerp(1, TUNE.hitStopScale, clamp(hitEase / TUNE.hitStopEase, 0, 1));
-      } else {
-        this.timeScale = 1;
+        scale = lerp(1, TUNE.hitStopScale, clamp(hitEase / TUNE.hitStopEase, 0, 1));
       }
       impactCool = Math.max(0, impactCool - rdt);
+
+      // ------------------------------------------------------ slow motion
+      // Held for as long as the car is off the ground, then released.
+      //
+      // ON `ballisticAir` AND NOT ON `onGround`. `onGround` is written twice per
+      // step — the suspension writes it and then `_stepVertical`'s ballistic
+      // clamp writes it — and the suspension's copy is the one that survives to
+      // be read here. Measured: over the design jump `v.onGround` reads `true`
+      // for all 0.9 s of the flight, with the car 3.11 m in the air, so slow
+      // motion armed and was released again on the very next frame and the
+      // effect never appeared at all. `ballisticAir` is written only by the
+      // clamp and means exactly what it says.
+      //
+      // The two time scales COMPOSE by taking the smaller: an impact during a
+      // flight still gets its hit-stop, and the flight still owns the frames
+      // either side of it.
+      slowCool = Math.max(0, slowCool - rdt);
+      if (slowArmed) {
+        slowSim += dt;
+        if (!v.ballisticAir || slowSim > SLOW_MAX) { slowArmed = false; slowCool = SLOW_COOLDOWN; }
+      }
+      const slowWant = slowArmed ? 1 : 0;
+      const slowRate = slowWant > slowBlend ? 1 / SLOW_IN : 1 / SLOW_OUT;
+      slowBlend = clamp(slowBlend + Math.sign(slowWant - slowBlend) * slowRate * rdt, 0, 1);
+      if (slowBlend > 0) {
+        // smoothstep, so neither the entry nor the exit has a corner in it
+        const e = slowBlend * slowBlend * (3 - 2 * slowBlend);
+        scale = Math.min(scale, lerp(1, SLOW_SCALE, e));
+      }
+      this.timeScale = scale;
 
       // -------------------------------------------------- vehicle one-shots
       // The vehicle publishes impacts and landings as sticky values; we are the
@@ -312,6 +403,25 @@ export function createFeel(ctx = {}) {
       this.shakeTrauma = camera?.shakeAmount ?? 0;
     },
 
+    /**
+     * Drop every transient that owns the clock.
+     *
+     * `game.resetPose()` forgets where the car was standing; this forgets what
+     * time was doing while it stood there. Without it a run that ended mid
+     * hit-stop hands the next one a time scale of 0.09, and since the shell
+     * spends scaled dt in a fixed-step accumulator, that changes how many
+     * physics steps a frame of input covers. Measured in tools/jump-test.mjs:
+     * two supposedly identical runs landed 0.32 m apart because of it, which is
+     * enough to make an A/B comparison meaningless. The LEDGER is deliberately
+     * untouched — a respawn is not a reason to lose your score.
+     */
+    reset() {
+      hitStop = 0; hitEase = 0; impactCool = 0;
+      slowArmed = false; slowBlend = 0; slowSim = 0; slowCool = 0;
+      fovPunch = 0;
+      this.timeScale = 1;
+    },
+
     event(name, payload = {}) {
       const v = ctx.vehicle;
       const camera = ctx.camera;
@@ -320,8 +430,10 @@ export function createFeel(ctx = {}) {
           this._hit(payload.speed ?? 0, v, camera, false);
           break;
         case 'land':
-        case 'jump':
           this._land(payload.speed ?? 4, v, camera);
+          break;
+        case 'jump':
+          this._takeoff(payload, v, camera);
           break;
         case 'shift':
           fovPunch += 0.55;
@@ -355,6 +467,45 @@ export function createFeel(ctx = {}) {
       this._burst(v, Math.round(clamp(speed * 1.6, 6, 40)), 2.2 + speed * 0.09, 0xcfc6b4, v?.impactDir);
       // Hitting things breaks the chain. It has to cost something.
       if (speed > 8) chainGrace = Math.min(chainGrace, 0.12);
+    },
+
+    /**
+     * TAKE-OFF. Fired once per flight by `game.js _stepVertical`, and only for a
+     * launch off a real ramp — see the SEPARATION note there. Everything in here
+     * is a one-shot; the sustained part of the effect is `slowArmed`, which the
+     * update loop releases when the wheels come back down.
+     */
+    _takeoff(p, v, camera) {
+      if (!v) return;
+      this.jumpCount++;
+      // Punch the FOV OUT as the car lifts — the opposite sign to an impact,
+      // because the world is falling away rather than arriving.
+      fovPunch += 1.05;
+      camera?.addShake?.(0.10);
+      if (this.slowMoEnabled && !slowArmed && slowCool <= 0) {
+        slowArmed = true;
+        slowSim = 0;
+      }
+      this._fireworks(p, v);
+    },
+
+    /** One battery either side of the take-off, at the lip's own height. */
+    _fireworks(p, v) {
+      if (!particles?.firework) return;
+      const r = v.right;
+      const y = p.y ?? (v._groundY ?? 0);
+      let n = 0;
+      for (const side of [1, -1]) {
+        n += particles.firework({
+          x: v.position.x + r.x * FIREWORK_SPREAD * side,
+          y,
+          z: v.position.z + r.z * FIREWORK_SPREAD * side,
+          // Fixed seeds, not a running counter: every take-off must produce the
+          // same frame, or the screenshot harness stops being a comparison.
+          seed: side > 0 ? 0x5eed01 : 0x5eed02,
+        });
+      }
+      this.fireworkCost = n;
     },
 
     _land(speed, v, camera) {

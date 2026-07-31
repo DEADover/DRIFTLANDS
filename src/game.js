@@ -617,6 +617,48 @@ export class Game {
    *
    * So: a real height, a real vertical velocity, and gravity resolved along the
    * ground plane so slopes have to be earned.
+   *
+   * ---------------------------------------------------------------------------
+   * LAUNCH: A RAMP HAS TO THROW THE CAR, AND A BUMP MUST NOT
+   *
+   * The clamp below used to write `_carVY = 0` on every grounded frame, so a car
+   * arrived at the lip of a ramp with EXACTLY zero vertical velocity and the
+   * ramp's angle contributed nothing whatsoever. Measured before this change
+   * (tools/jump-test.mjs): apex over the take-off lip 0.00 m at every approach
+   * speed from 15.8 to 39.6 m/s. That is not a jump, it is a horizontal throw off
+   * a ledge, and it is exactly why there was no feeling of flight.
+   *
+   * The fix is one quantity: the rate at which the ground under the wheels is
+   * RISING. A car following a surface climbing at `rise/dt` already has that much
+   * vertical velocity; the old clamp threw it away every frame. Carry it, and the
+   * instant the surface stops climbing — the lip — the car keeps it and leaves.
+   * No impulse, no special case for the jump module, no new force: a ramp
+   * launches because a ramp is a rising surface that ends.
+   *
+   * WHICH MAKES EVERY CREST IN THE WORLD A LAUNCHER, and most of them must not
+   * be. Two gates separate a built ramp from a bumpy road, and both are needed:
+   *
+   *   STEEP     — the rise per metre travelled must exceed `LAUNCH_GRADE`. This
+   *               is speed-independent, which matters: a bump should not become
+   *               a ramp merely because you hit it faster.
+   *   SUSTAINED — and it must have been that steep CONTINUOUSLY for
+   *               `LAUNCH_RISE` metres of gained height. One steep facet is a
+   *               bump; two thirds of a metre of unbroken climb is an earthwork.
+   *
+   * THAT SEPARATES A RAMP FROM A BUMP. IT DOES NOT SEPARATE A RAMP FROM A HILL,
+   * AND IT SHOULD NOT. Measured (tools/jump-test.mjs --control, 150 s of
+   * flat-out autopilot over the whole alpine route with the jump's footprint
+   * excluded): the gate opens 23 times, and only twice does the climb behind it
+   * throw the car at more than 4 m/s — both on the same feature, a carriageway
+   * that climbs at 0.17 for eight metres and gains 1.35 m doing it. A car
+   * cresting that at 125 km/h leaves the ground at 7.4 m/s, and it should; that
+   * is a rally stage. What it never does is skip: the share of the drive spent
+   * off the ground is 24.25% after against 24.80% before, i.e. slightly LESS,
+   * because a car that follows the ground up also lands where the ground put it.
+   *
+   * The SPECTACLE needs a stricter test than the physics does, and it gets one
+   * at the point of separation — see the note down there.
+   * ---------------------------------------------------------------------------
    */
   _stepVertical(dt) {
     const v = this.vehicle;
@@ -645,25 +687,125 @@ export class Game {
      */
     const ground = g.height;
 
-    if (this._carY === undefined) { this._carY = ground; this._carVY = 0; }
+    if (this._carY === undefined) {
+      this._carY = ground; this._carVY = 0;
+      // resetPose() clears `_carY`, so this is also the respawn path: forget the
+      // ramp the car was climbing before it was rescued.
+      this._prevGround = ground; this._rampRise = 0; this._rampGate = 0;
+      this._airborne = false;
+    }
+
+    // ---- how fast the ground itself is moving under the wheels -------------
+    // `rise` is the change in the surface the car is standing on, which on a
+    // slope is the car's own travel across it. `grade` is that per metre driven,
+    // so it is the surface's gradient along the line the car is actually taking.
+    const rise = ground - this._prevGround;
+    this._prevGround = ground;
+    const run = Math.hypot(v.velocity.x, v.velocity.z) * dt;
+    const grade = run > 1e-4 ? rise / run : 0;
+    /**
+     * Anything steeper than this is a STEP, not a surface.
+     *
+     * The car flies over a 15.5 m hole in the earthwork and the ground sample
+     * under it is the carriageway the whole way; the far bank's sill then appears
+     * as 0.30 m of rise in one 0.33 m step, a grade of 0.9. Fed to the landing
+     * softener below that reads as ground rushing up at 36 m/s and turns a gentle
+     * touchdown into a 47 m/s impact. 0.60 is just past `_stepVertical`'s own
+     * 0.53 traction wall — steeper than the car can hold anyway — so nothing that
+     * can legitimately be driven is excluded.
+     */
+    const GRADE_MAX = 0.60;
+    // `noLaunch` is the diagnostic switch tools/jump-test.mjs flips to reproduce
+    // the pre-launch build exactly, so the before/after table is one binary
+    // measuring itself rather than two builds measuring each other.
+    const surfaceVY = !this.noLaunch && Math.abs(grade) <= GRADE_MAX ? rise / dt : 0;
 
     // Ballistic while airborne. 22 m/s^2 rather than 9.81: arcade jumps should
     // come down quickly or the car hangs like a balloon at this camera height.
     this._carVY -= 22 * dt;
     this._carY += this._carVY * dt;
 
+    const wasAir = this._airborne === true;
+
     if (this._carY <= ground) {
-      const impact = -this._carVY;
+      /**
+       * IMPACT IS A CLOSING SPEED, NOT A FALL SPEED.
+       *
+       * It used to be `-_carVY`, which is only right when the thing you land on
+       * is level. A car coming down at 11 m/s onto a run-out that is itself
+       * falling away at 5 m/s meets it at 6, and that difference is the whole
+       * reason a landing ramp exists. With real launch velocities in the model
+       * the fall speeds roughly doubled, so this term is what keeps the landing
+       * from becoming brutal: measured on the design jump, 11.2 m/s of fall
+       * arrives as 6.3 m/s of impact on the run-out.
+       */
+      const impact = -(this._carVY - surfaceVY);
       this._carY = ground;
-      this._carVY = 0;
-      if (v.onGround === false && impact > 5) {
+
+      // Continuous steep climb, in metres of height gained. Broken by any step
+      // that is not steep — a ramp is unbroken, a rough road is not.
+      const LAUNCH_GRADE = 0.155;
+      const LAUNCH_RISE = 0.62;      // where the gate starts to open
+      const LAUNCH_FADE = 0.30;      // and where it is fully open
+      if (grade >= LAUNCH_GRADE && grade <= GRADE_MAX) this._rampRise += rise;
+      else this._rampRise = 0;
+      this._rampGate = THREE.MathUtils.clamp(
+        (this._rampRise - LAUNCH_RISE) / LAUNCH_FADE, 0, 1,
+      );
+      // THE ONE LINE THAT MAKES A RAMP A RAMP. Ungated this is `0` and every
+      // number in the build is exactly what it was before.
+      this._carVY = this._rampGate > 0 ? Math.max(0, surfaceVY) * this._rampGate : 0;
+
+      if (wasAir && impact > 5) {
         this.feel.event('land', { speed: impact });
         this.audio.event('land', { speed: impact });
         this.camera.addShake(Math.min(0.6, impact * 0.02));
       }
       v.onGround = true;
+      /**
+       * AND THE FLAG THAT IS ACTUALLY TRUE.
+       *
+       * `onGround` is written twice per step — vehicle.updateVertical sets it
+       * from the SUSPENSION and this clamp sets it from the ballistics — and the
+       * suspension's copy is the one a later reader sees. Measured over this
+       * jump: `v.onGround` reads `true` for the whole 0.9 s flight, with the car
+       * 3.11 m above the ground at the apex. Anything downstream that needs to
+       * know whether the wheels are on the surface (fx/feel.js holds slow motion
+       * on exactly that question) has to read a flag nothing else touches.
+       */
+      v.ballisticAir = false;
+      this._airborne = false;
     } else {
+      /**
+       * SEPARATION — and the second, tighter gate, the one the SPECTACLE hangs
+       * off. Slow motion and fireworks must not fire on a road crest.
+       *
+       * The launch gate above cannot tell them apart and should not try: over a
+       * 150 s autopilot lap the route's own carriageway throws the car at
+       * 7.35 m/s off a bank at (-33, 181) and 6.29 m/s off another at (-67, 254),
+       * against the built ramp's 7.43. The two are indistinguishable by launch
+       * velocity, by grade and by sustained rise.
+       *
+       * What separates them is what is BEHIND the lip. A built take-off ends in a
+       * drop; a hill rolls over. So the discriminator is the hole the car is
+       * suddenly standing over at the instant of separation: 1.49 m at the ramp,
+       * 0.03 m at both of those crests. 0.80 m sits between them with room to
+       * spare and needs no knowledge of the jump module at all — any future ramp
+       * on any stage earns its fireworks the same way. MEASURED over the same
+       * 150 s lap: one celebration, on the ramp, and zero anywhere else.
+       *
+       * (A bridge deck is level and reports a hard UP normal, so it cannot make
+       * rise — but the ramp state can survive onto one, so it is excluded too.)
+       */
+      const drop = this._carY - ground;
+      if (!wasAir && this._rampGate > 0.5 && this._carVY > 2.5 && drop > 0.80 && !g.onBridge) {
+        this.feel.event('jump', { vy: this._carVY, speed: v.speed, drop, y: this._carY });
+      }
+      this._rampRise = 0;
+      this._rampGate = 0;
       v.onGround = false;
+      v.ballisticAir = true;
+      this._airborne = true;
     }
 
     if (!v.onGround) return;   // no traction in the air, so no slope force

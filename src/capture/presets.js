@@ -136,11 +136,18 @@ export const PRESETS = {
     label: 'The jump — airborne over the stream',
     biome: 'alpine',
     seed: 1337,
-    warmup: 108.72,
-    tape: [drive(108.72, { throttle: 1 })],
+    // 108.72 -> 107.15. The preset's MEANING is unchanged — it is still the car
+    // in the air over the ford — but the settle time had to follow the world:
+    // the take-off lip came down from 5.0 m to 1.5 m and the earthwork shortened
+    // from 76 m to 55 m, which moved the sited crest, and the jump now runs in
+    // slow motion, so a WALL-CLOCK warmup buys less sim time than it used to.
+    // At 108.72 the car is past the run-out and back on the road; 107.15 is
+    // 0.40 s after take-off with the car over the middle of the water.
+    warmup: 107.15,
+    tape: [drive(107.15, { throttle: 1 })],
     camera: { zoom: 0.86 },
     autopilot: { aggression: 1 },
-    notes: 'Judge the earthwork, the crib revetments, the stream and the air.',
+    notes: 'Judge the earthwork, the crib revetments, the stream, the air and the take-off fireworks.',
   },
 };
 

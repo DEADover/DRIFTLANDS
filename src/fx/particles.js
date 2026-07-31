@@ -5,10 +5,11 @@ import { FX_CONTACT } from './contact.js';
 /**
  * PARTICLE FX — owned by the fx builder.
  *
- * CONTRACT (unchanged, `game.js` calls exactly these):
+ * CONTRACT (`game.js` calls exactly these; `firework` is new — see WHY below):
  *   new ParticleSystem(max)
  *   .points        Object3D added to the scene
  *   .spawn(opts)   one-shot puff, legacy signature
+ *   .firework(o)   one-shot pyrotechnic burst, returns the particle count
  *   .update(dt)    step + upload
  *   .clear()
  *
@@ -376,6 +377,142 @@ export class ParticleSystem {
       r: this._c.r, g: this._c.g, b: this._c.b,
       drag, acc: 0.9, turb: 0.9, opacity: 0.26, type: T_SOFT,
     });
+  }
+
+  /**
+   * A FIREWORK — fired either side of a take-off when the wheels leave.
+   *
+   * WHY THIS IS A NEW ENTRY POINT AND NOT `spawn()`.
+   * `spawn()` cannot do it, and not by a little: it hard-codes `type: T_SOFT`
+   * (dust), so there is no way to reach the additive T_SPARK streak or the
+   * specular T_DROP glint from outside this file — and it early-returns whenever
+   * the wheel driver has already run this frame, which is exactly every frame a
+   * car is moving fast enough to jump. Everything else here is unchanged.
+   *
+   * WHAT IT LOOKS LIKE, AND WHY.
+   * The camera is 140 m up at about 60 degrees from horizontal. At that scale a
+   * photographic starburst is a smudge four pixels across — the eye reads
+   * MOTION and SILHOUETTE, not detail. So this is a fast, hard, expanding RING:
+   *
+   *   - the sparks are GROUND-ALIGNED (`flat: 1`), which under this camera makes
+   *     the ring a wide ellipse filling real estate rather than a dot edge-on,
+   *     and — the reason it is worth doing at all — it makes `rot` exact.
+   *     In flat mode the billboard basis IS world (+X, +Z), so `atan2(vz, vx)`
+   *     points every streak precisely along its own velocity. Radial trails,
+   *     for free, with no camera knowledge in this module.
+   *   - they GROW along their length as they fly (`gw`), so the ring is drawn by
+   *     lengthening trails rather than by travelling dots.
+   *   - two rings, not one: a fast wide gold shell and a slow tight ember core,
+   *     so the burst has a centre. Plus a handful of rising glints and a warm
+   *     smoke puff, which is what stops it reading as a decal on the grass.
+   *
+   * DETERMINISTIC. No Math.random anywhere in here: the ring angles are exact
+   * divisions of the circle and every jitter comes from the caller's `seed`
+   * through a hash. The same jump produces the same frame every run, which the
+   * screenshot harness requires.
+   *
+   * COST: 64 particles per call, one-shot, in the existing single draw call.
+   *
+   * @returns {number} particles emitted
+   */
+  firework({ x, y, z, seed = 0, scale = 1 }) {
+    // Cheap deterministic hash: integer index -> [0,1). Replaces Math.random.
+    const h = (i) => {
+      let t = (i * 374761393 + seed * 668265263) >>> 0;
+      t = Math.imul(t ^ (t >>> 13), 1274126177) >>> 0;
+      return ((t ^ (t >>> 16)) >>> 0) / 4294967296;
+    };
+    const TAU = 6.283185307179586;
+    let n = 0;
+
+    // ---- the shell: a wide fast gold ring ---------------------------------
+    const N1 = 30;
+    for (let i = 0; i < N1; i++) {
+      // Exact divisions, jittered by a fraction of the step: an unbroken ring
+      // reads as a machined washer, a scattered one stops reading as a ring.
+      const a = (i / N1) * TAU + (h(i) - 0.5) * (TAU / N1) * 0.8;
+      // FAST AND SHORT, so it is a RING and not a starburst.
+      //
+      // The first cut ran at 16-22 m/s with 1.5 m streaks and drag 2.1, and at
+      // the instant the car is over the middle of the gap — which is the frame
+      // anyone will actually see — the radius was 2.9 m against a 1.5 m streak,
+      // so the trails met in the middle and it read as a sea urchin. 28-34 m/s
+      // into drag 3.0 puts the front at 4.0 m by then with a 1.6 m streak
+      // behind it: a hollow ring with the trails ON its perimeter, which is what
+      // survives being four hundred pixels away from the eye. Terminal radius is
+      // unchanged at about 10 m — the ring still ends up the width of the crown.
+      const sp = (28.0 + h(i + 91) * 6.0) * scale;
+      const vx = Math.cos(a) * sp, vz = Math.sin(a) * sp;
+      const warm = h(i + 200);
+      this._emit({
+        x, y: y + 0.9, z,
+        vx, vy: 2.6 + h(i + 17) * 2.4, vz,
+        w: 0.90 * scale, h: 0.26 * scale,
+        gw: 4.0 * scale, gh: 0,
+        life: 0.46 + h(i + 33) * 0.16,
+        // Saturated on purpose: T_SPARK adds `vCol * alpha * 1.6` on top of
+        // itself and the grade blooms it, so anything that starts near white
+        // arrives as white. Gold has to be requested in the raw colour.
+        r: 1.0, g: 0.70 + warm * 0.16, b: 0.10 + warm * 0.30,
+        drag: 3.0, acc: -7.0, turb: 0,
+        rot: Math.atan2(vz, vx), seed: h(i + 5),
+        opacity: 1, type: T_SPARK, flat: 1,
+      });
+      n++;
+    }
+
+    // ---- the core: a slower, tighter, hotter ember ring --------------------
+    const N2 = 18;
+    for (let i = 0; i < N2; i++) {
+      const a = (i / N2) * TAU + 0.31 + (h(i + 400) - 0.5) * 0.35;
+      const sp = (11.0 + h(i + 411) * 4.0) * scale;
+      const vx = Math.cos(a) * sp, vz = Math.sin(a) * sp;
+      this._emit({
+        x, y: y + 0.75, z,
+        vx, vy: 1.4 + h(i + 421) * 1.8, vz,
+        w: 0.85 * scale, h: 0.24 * scale,
+        gw: 2.2 * scale, gh: 0,
+        life: 0.62 + h(i + 431) * 0.22,
+        r: 1.0, g: 0.30 + h(i + 441) * 0.20, b: 0.04,
+        drag: 2.6, acc: -6.0, turb: 0.6,
+        rot: Math.atan2(vz, vx), seed: h(i + 451),
+        opacity: 1, type: T_SPARK, flat: 1,
+      });
+      n++;
+    }
+
+    // ---- glints: the vertical component, so it is a burst and not a decal --
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * TAU + 1.1;
+      this._emit({
+        x: x + Math.cos(a) * 0.5, y: y + 1.0, z: z + Math.sin(a) * 0.5,
+        vx: Math.cos(a) * 3.5, vy: 7.5 + h(i + 600) * 5.5, vz: Math.sin(a) * 3.5,
+        w: 0.30 + h(i + 610) * 0.20,
+        life: 0.75 + h(i + 620) * 0.35,
+        r: 1.0, g: 0.96, b: 0.80,
+        drag: 0.9, acc: -13, turb: 0.5,
+        rot: h(i + 630) * TAU, seed: h(i + 640),
+        opacity: 0.95, type: T_DROP,
+      });
+      n++;
+    }
+
+    // ---- the smoke it leaves behind ---------------------------------------
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * TAU + 0.7;
+      this._emit({
+        x: x + Math.cos(a) * 0.8, y: y + 1.1, z: z + Math.sin(a) * 0.8,
+        vx: Math.cos(a) * 1.6, vy: 0.9 + h(i + 700) * 0.7, vz: Math.sin(a) * 1.6,
+        w: 1.1 + h(i + 710) * 0.7, gw: 2.6,
+        life: 1.0 + h(i + 720) * 0.6,
+        r: 0.98, g: 0.86, b: 0.68,
+        drag: 1.5, acc: 0.5, turb: 1.0,
+        rot: h(i + 730) * TAU, seed: h(i + 740),
+        opacity: 0.16, type: T_SOFT,
+      });
+      n++;
+    }
+    return n;
   }
 
   // ------------------------------------------------------- the fx driver ---

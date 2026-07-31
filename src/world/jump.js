@@ -42,43 +42,79 @@ import { lakeColors } from './water.js';
  * ---------------------------------------------------------------------------
  * THE PHYSICS THIS IS SIZED TO — MEASURED, NOT ASSUMED
  *
- * `game.js _stepVertical` integrates `_carVY -= 22 * dt` and then CLAMPS:
+ * THE MODEL CHANGED UNDER THIS MODULE, AND THE EARTHWORK CHANGED WITH IT.
  *
- *     if (this._carY <= ground) { this._carY = ground; this._carVY = 0; }
+ * `game.js _stepVertical` used to write `_carVY = 0` on every grounded frame, so
+ * a car arrived at the lip with exactly zero vertical velocity and the ramp's
+ * ANGLE CONTRIBUTED NOTHING. Measured, not guessed: apex over the lip was
+ * 0.00 m at every approach speed from 15.8 to 39.6 m/s (the 5.0 m build's own rows), i.e. the trajectory was
+ * a horizontal throw off a ledge. That is why the first build of this thing was
+ * 5.0 m tall — height was the only variable that did anything, so it had to be
+ * a wall.
  *
- * The clamp runs every frame the wheels are down, so a car climbing a ramp
- * arrives at the lip with `_carVY` EXACTLY ZERO. **The ramp angle contributes
- * nothing to the launch.** There is no upward impulse anywhere in the build —
- * a jump here is a horizontal throw off a ledge, and its range is set by two
- * numbers only: how high the lip stands over the surface it lands on, and how
- * fast the car is going.
+ * `_stepVertical` now carries the ground's own rate of rise into `_carVY`, gated
+ * on a sustained steep climb, so a rising surface that ENDS throws the car. Two
+ * consequences dictate every constant below:
  *
- *     t = sqrt(2 * drop / 22)          range = speed * t
+ *   1. THE LIP MUST BE THE STEEPEST POINT OF THE RAMP. The old profile was a
+ *      smoothstep, whose gradient is zero at BOTH ends, followed by 2.6 m of flat
+ *      table "so the car leaves level" — between them they guaranteed a launch
+ *      velocity of zero even after the fix. Measured with the fix in and the old
+ *      earthwork unchanged: apex over the lip -0.00 m, launch -0.37 m/s. The
+ *      profile is now a kicker — a rounded toe, then a CONSTANT grade held right
+ *      up to a hard cut at the lip.
+ *   2. THE LIP MUST BE LOW. Launch velocity and drop both add range and both add
+ *      landing speed; with the launch doing the work the height is free to come
+ *      down, and it must, or the landing gets brutal. 5.0 m became 1.5 m.
  *
- * Measured on this route (tools/jump-site.mjs, autopilot at aggression 0.85,
- * full throttle): the car crosses the chosen straight at 39.6 m/s and holds it
- * to within 0.3 m/s over the whole 322 m. So the design point is 39.6 m/s and
- * every constant below is derived from it. What the build actually does with
- * them (tools/jump-test.mjs, the real vehicle at the real 60 Hz step):
+ * Design point (tools/jump-site.mjs, autopilot at aggression 0.85, full
+ * throttle): the car crosses the chosen straight at 39.5 m/s and holds it to
+ * within 0.3 m/s over the whole 322 m.
  *
- *   target  take-off   air     flown   landed at   on
- *   39.6      37.8    0.600 s  22.9 m    22.8 m    the landing ramp, past the crest
- *   31.7      31.2    0.600    19.4      19.0      the bank face, 3.5 m past the water
- *   23.8      23.3    0.667    16.8      16.4      the bank face, 0.9 m past the water
- *   19.8      19.8    0.700    15.3      15.0      WET, 0.5 m short
+ *     vy = grade * v        apex over lip = vy^2 / 44
+ *     t  = (vy + sqrt(vy^2 + 44 * drop)) / 22        range = v * t
  *
- * So the 15.5 m of water is cleared from about 21 m/s — 53% of the speed the
- * straight is really driven at — comfortably at 80%, and at 100% the car comes
- * down past the landing crest onto the run-out. That is the client's fairness
- * bar with room to spare, and it is where the gap width came from: 20 m would
- * need 68% and 24 m would need 82%, which stops being a jump and starts being a
- * gate.
+ * What the build actually does with them (tools/jump-test.mjs, the real vehicle
+ * at the real 60 Hz step, every row driven and not teleported):
  *
- * The climb costs 1.8 m/s, measured, not estimated: the approach face is 1:4 at
- * its steepest and `_stepVertical` only bleeds speed hard past a 0.53 slope, so
- * 0.25 stays well clear of the wall and all that is paid is g*sin(theta) over
- * 30 m. Landing speed is HIGHER than take-off speed in every row above — the
- * run-out gives it all back.
+ *   target  launch   apex over  air      flown   landing  landed at   on
+ *    m/s     m/s      the lip    s         m       fall
+ *   39.5     7.43      1.35 m   0.906 s  35.5 m   11.8 m/s   35.4   the road past the run-out
+ *   35.5     6.91      1.17     0.859    31.3     11.4       30.9   the road past the run-out
+ *   31.6     6.17      0.94     0.772    25.4     10.1       24.9   the run-out
+ *   27.6     5.23      0.69     0.639    18.7      8.2       18.5   the bank face
+ *   19.7     3.73      0.36     0.586    13.0      8.6       12.9   the bank face, 0.9 m past the water
+ *   15.8     3.18      0.27     0.592    11.1      9.3       11.0   WET, 0.9 m short
+ *
+ * So the 12.0 m of water is cleared from 19.7 m/s — 50% of the speed the
+ * straight is really driven at — and at 80% the car is 13 m past it and coming
+ * down on the run-out. That is the fairness balance the previous build was tuned
+ * to (53%, comfortable at 80%), preserved deliberately.
+ *
+ * AND THE SAME EARTHWORK WITH THE LAUNCH MODEL SWITCHED OFF
+ * (tools/jump-test.mjs --before), which is what says the kicker is a kicker
+ * because of the model and not because of its shape: apex over the lip -0.00 m
+ * at every speed, and 39.5 m/s flies 13.7 m instead of 35.5 — barely across the
+ * water this thing is supposed to be cleared from half speed.
+ *
+ * LANDING SPEEDS DID NOT GET WORSE. The 5.0 m version fell onto its landing at
+ * 12.8 m/s at ITS design point and 15.0 m/s at half speed. This one arrives at
+ * 11.8 and 8.6: the drop that used to do all the work shrank by 3.5 m, and the
+ * launch that replaced it puts the energy into HEIGHT OVER THE LIP instead of
+ * into the far side of the parabola.
+ *
+ * WHAT IT COSTS TO GET UP THERE: 0.5 m/s, against 1.8 m/s for the old 5 m wall.
+ * The face is 1:4.2 at its steepest, well clear of `_stepVertical`'s 0.53
+ * traction wall, and only 7.9 m long.
+ *
+ * THE ONE THING THIS GEOMETRY CANNOT DO. At the full 39.5 m/s the arc is still
+ * 0.7 m up when it passes the end of the run-out and it comes down on the flat
+ * carriageway 8.6 m further on. That is not a tuning failure, it is arithmetic:
+ * the earthwork is built ON the road, so the run-out can only descend by its own
+ * crest height before it reaches the road again, and no landing under 3 m tall
+ * can catch a 35 m flight on a surface that is falling away. The 60-85% band —
+ * where a driver who is not flat out lands — comes down on the run-out and pays
+ * 4.6 m/s less for it.
  *
  * ---------------------------------------------------------------------------
  * WHY THE STREAM IS A FORD AND NOT A CHASM
@@ -89,7 +125,7 @@ import { lakeColors } from './water.js';
  * nothing here can put a hole in either without reaching into another owner's
  * geometry at runtime. So the road stays whole and the stream crosses it the
  * way a stream actually crosses a rally road: as a ford. The gap between the
- * two revetments is 13 m of water lying on the carriageway, the channel is
+ * two revetments is 12 m of water lying on the carriageway, the channel is
  * incised into the meadow on the uphill side, and on the downhill side — where
  * this route runs along the lip of a 10 m fall to the tarn — it goes over as a
  * cascade. Which is also why the car being short is survivable: you land in a
@@ -108,39 +144,78 @@ const EDGE = 1e-6;
 // above; do not move one without re-running tools/jump-test.mjs.
 // ---------------------------------------------------------------------------
 
-const LIP_H = 5.0;      // take-off lip over the carriageway
-const LAND_H = 1.55;    // landing crest over the carriageway
-const GAP = 15.5;       // lip to the toe of the landing bank — the water
-const TABLE = 2.6;      // flat top before the lip, so the car leaves level
+/**
+ * THE KICKER.
+ *
+ * `LIP_GRADE` is the whole jump: it is the tangent of the take-off angle, and
+ * `_stepVertical` hands the car `LIP_GRADE * speed` of vertical velocity the
+ * moment the crown ends. 0.24 (13.5 degrees) is the largest angle that still
+ * clears three separate bars at once —
+ *
+ *   - it is well under the 0.53 slope at which `_stepVertical` bleeds speed, so
+ *     the climb costs 0.4 m/s and not a corner's worth;
+ *   - `_stepVertical`'s launch gate wants 0.92 m of continuous rise steeper than
+ *     0.155 before it opens fully, and this face delivers 1.38 m even with the
+ *     road's own 4% grade working against it — a 1.5x margin;
+ *   - and it is the angle at which the design arc still comes down on an
+ *     earthwork that can only be 1.15 m tall (see THE LANDING). Steeper flies
+ *     further than any landing built on a road can catch.
+ *
+ * `LIP_H` is then almost incidental — it adds drop, which adds range AND landing
+ * speed in equal measure. 1.5 m is the height at which the thing reads as a
+ * built kicker from 140 m up rather than as a wall across the road, and it is
+ * what keeps the design-point landing at 12.0 m/s: LESS than the 12.8 m/s the
+ * 5 m version already produced.
+ */
+const LIP_H = 1.5;      // take-off lip over the carriageway
+const LIP_GRADE = 0.24; // and the gradient it is still climbing at when it ends
+/** The rounded toe, over which the grade eases 0 -> LIP_GRADE. Long enough that
+ *  the car is not kicked in the floorpan on the way in, short enough that most
+ *  of the face is at full grade where the launch gate can see it. */
+const TOE = 3.2;
+const LAND_H = 1.15;    // landing crest over the carriageway
+/**
+ * The water. NOT a free parameter — it is set to the range the car flies at half
+ * the speed the straight is really driven at, which is the fairness bar the
+ * previous build was tuned to and the one thing about it that had to survive.
+ * Measured: 11.0 m was cleared from 15.8 m/s (40%), which is too easy; 12.0 m is
+ * cleared from 19.7 m/s by 0.9 m and missed at 15.8 by 0.9 m.
+ */
+const GAP = 12.0;       // lip to the toe of the landing bank — the water
 /** A timber sill at the water's edge, so the far bank reads as built. Low
  *  enough that clipping it on a short jump is a bump, not a wall — and it is
- *  the height every "does it clear" number below is measured to. */
+ *  the height every "does it clear" number above is measured to. */
 const LAND_TOE = 0.30;
 
-/** Approach face. The smoothstep doubles the mean slope at its midpoint, so the
- *  run has to be 1.5x what a straight 1:4 would need to keep the MAXIMUM at
- *  0.25 — well under `_stepVertical`'s 0.53 speed-bleed wall. */
-const APPROACH = (1.5 * LIP_H) / 0.25;              // 30.0 m
+/** Approach face: `TOE` of easing plus enough constant grade to reach the lip.
+ *  A smoothstep integrates to half its length, hence the TOE/2. */
+const APPROACH = LIP_H / LIP_GRADE + TOE * 0.5;     // 7.85 m
 
 /**
- * THE LANDING, and why it is LOW.
+ * THE LANDING, and why its FACE must be shallower than the launch gate.
  *
- * With no launch impulse the flight is a falling parabola, so the trajectory is
- * already on its way down when it reaches the far bank and it keeps steepening.
- * A tall landing crest is therefore worse than a short one: the arc runs into
- * its UPHILL face and the car lands into a rise. Sized so the design trajectory
- * passes 0.35 m OVER the crest and comes down on the far side —
+ * A landing hill has to do two things that pull against each other. It must
+ * catch the arc on a surface that is FALLING AWAY — `_stepVertical` scores an
+ * impact as a closing speed, so a run-out dropping at 1:7 under a car falling at
+ * 11 m/s turns it into a 6 m/s touchdown — and it must not itself become a
+ * second ramp. The bank face rises, and with the launch model in place a rising
+ * surface that ends throws the car: at 0.227 (the old figure) a car landing
+ * short would have been fired off the knuckle at 9 m/s. 0.115 is comfortably
+ * under `_stepVertical`'s 0.155 launch grade, so the far bank is a bank.
  *
- *     crest 1.55 m at s = 21.0     design arc there: 1.76 m
+ * The crest is LOW for the same reason it always was: the arc is on its way down
+ * and steepening when it arrives, so a tall crest is met head-on by its uphill
+ * face. 1.15 m, rounded by the softmin to about 1.01 m, and then the steepest
+ * run-out the height budget allows.
  *
- * — and the run-out is then a shallow 1:8 rather than matched to the arc,
- * because a run-out matched to the arc is tangent to it and the car grazes all
- * the way to the bottom before it touches (measured: it did exactly that, and
- * landed 24.2 m out on ground 8 cm above the road, which is a jump with no
- * landing ramp in it).
+ * THE HONEST LIMIT: this earthwork is built ON the carriageway, so the run-out
+ * can only descend by LAND_H before it reaches the road again — 8.2 m of it.
+ * That catches everything from 26 to 34 m/s. Above that the car overflies the
+ * run-out and lands on the flat road, which is exactly what the 5 m version did
+ * at its own design point, at a slightly higher fall speed.
  */
-const LAND_FACE = (LAND_H - LAND_TOE) / 0.227;      // 5.5 m
-const LAND_RUN = LAND_H / 0.125;                    // 12.4 m
+const LAND_FACE = (LAND_H - LAND_TOE) / 0.115;      // 7.4 m
+const LAND_RUN = LAND_H / 0.14;                     // 8.2 m
 
 /** Half width of the crown.
  *
@@ -158,13 +233,19 @@ const CRIB_BATTER = 0.125;
 /** How far the ramp footprint reaches beyond the earthwork, so the surface
  *  hands back to the road with a 4 cm lip rather than a step. */
 const APRON = 5.0;
+/** The approach apron is LONGER than the far one: the ramp itself shrank from
+ *  30 m to 7.9 m and the chevron boards that warn you it is coming have to stand
+ *  somewhere flat in front of it. */
+const LEAD = 11.0;
 
-const S0 = -(APPROACH + TABLE + APRON);
+const S0 = -(APPROACH + LEAD);
 const S1 = GAP + LAND_FACE + LAND_RUN + APRON;
 
 /** Node pitch of the (s, u) lattice. The mesh and `heightAt` share it, so the
- *  query is the drawn triangle and not an approximation of it. */
-const DS = 1.05;
+ *  query is the drawn triangle and not an approximation of it. Finer than the
+ *  1.05 the 30 m ramp used: the kicker is 7.9 m long and its 3.2 m toe would be
+ *  three facets at the old pitch. */
+const DS = 0.85;
 const DU = 0.83;
 
 // ---------------------------------------------------------------------------
@@ -320,12 +401,29 @@ function softmin(a, b, k = 5) {
   return -Math.log(Math.exp(-k * a) + Math.exp(-k * b)) / k;
 }
 
-/** Height of the earthwork above the carriageway, `s` metres past the lip. */
+/**
+ * Height of the earthwork above the carriageway, `s` metres past the lip.
+ *
+ * THE APPROACH IS AN INTEGRATED GRADE, NOT A SHAPE.
+ *
+ * The old profile was `LIP_H * smoothstep(...)`, which is a nice shape and a
+ * useless ramp: a smoothstep's gradient is zero at both ends, so the surface is
+ * FLAT exactly where the car leaves it and the launch velocity is zero. This
+ * integrates the gradient instead — smoothstep the GRADE from 0 to LIP_GRADE
+ * over the toe, then hold it — so the ramp is climbing at its steepest at the
+ * lip, which is the only place it matters.
+ *
+ *   d < TOE:  grade = LIP_GRADE * smoothstep(d/TOE),  h = its integral
+ *   d >= TOE: grade = LIP_GRADE,                      h = LIP_GRADE*(d - TOE/2)
+ */
 function profile(s) {
-  if (s <= -(APPROACH + TABLE) || s >= GAP + LAND_FACE + LAND_RUN) return 0;
+  if (s <= -APPROACH || s >= GAP + LAND_FACE + LAND_RUN) return 0;
   if (s <= 0) {
-    if (s >= -TABLE) return LIP_H;
-    return LIP_H * smooth((s + APPROACH + TABLE) / APPROACH);
+    const d = s + APPROACH;                    // 0 at the toe, APPROACH at the lip
+    if (d >= TOE) return LIP_GRADE * (d - TOE * 0.5);
+    const t = d / TOE;
+    // integral of 3t^2 - 2t^3 is t^3 - t^4/2, scaled back into metres
+    return LIP_GRADE * TOE * (t * t * t - 0.5 * t * t * t * t);
   }
   if (s < GAP) return 0;                       // the water: no surface at all
   const a = s - GAP;
@@ -550,8 +648,10 @@ function build(ctx) {
 
   const lipY = (() => {
     // The lip's own height, taken at the centreline, is the number every
-    // measurement in the report is quoted against.
-    const [wx, wz] = toWorld(-0.5, 0);
+    // measurement in the report is quoted against. At s = 0 exactly: with the
+    // table gone the crown is still climbing here, so half a metre back is no
+    // longer the same height.
+    const [wx, wz] = toWorld(0, 0);
     return baseAt(wx, wz) + LIP_H;
   })();
   const fordY = (() => {
@@ -705,8 +805,12 @@ function build(ctx) {
   // reads the take-off point from, and at this camera an unmarked drop simply
   // disappears into the shadow of its own wall.
   {
-    const [wx, wz] = toWorld(-0.22, 0);
-    timber.box(2 * CROWN_HW - 0.3, 0.34, 0.52, wx, lipY + 0.05, wz, site.heading, TIMBER_HI);
+    // On the module's OWN answer, not on lipY: the crown is still climbing at
+    // 1:4.2 here, so a beam pinned to the lip height floats 8 cm clear of the
+    // surface a third of a metre behind it.
+    const [wx, wz] = toWorld(-0.30, 0);
+    const beamY = heightAt(wx, wz) ?? lipY;
+    timber.box(2 * CROWN_HW - 0.3, 0.34, 0.52, wx, beamY + 0.05, wz, site.heading, TIMBER_HI);
     const [lx, lz] = toWorld(GAP + 0.30, 0);
     timber.box(2 * CROWN_HW - 0.3, 0.30, 0.62, lx,
       baseAt(lx, lz) + LAND_TOE + 0.06, lz, site.heading, TIMBER);
@@ -1039,8 +1143,11 @@ function dressApproach(kit, o) {
     kit.box(0.20, h, 0.20, wx, y + h * 0.5, wz, 0, TIMBER_DK);
     kit.box(0.95, 0.62, 0.16, wx, y + h + 0.30, wz, 0, col);
   };
+  // On the LEAD-IN apron, all four pairs in front of the toe. The kicker is only
+  // 7.9 m long now; spacing the boards across it the way the 30 m ramp did put
+  // the last pair 4.6 m out into the ford.
   for (let n = 0; n < 4; n++) {
-    const s = -APPROACH - TABLE + 2 + n * 5.5;
+    const s = -APPROACH - LEAD + 1.4 + n * 2.6;
     post(s, CROWN_HW - 0.9, 1.15, n & 1 ? 0xe8e2d2 : 0xc0392b);
     post(s, -CROWN_HW + 0.9, 1.15, n & 1 ? 0xe8e2d2 : 0xc0392b);
   }
