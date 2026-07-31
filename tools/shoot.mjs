@@ -30,7 +30,7 @@ function parseArgs(argv) {
     if (a === '--all') out.all = true;
     else if (a === '--w') out.w = +argv[++i];
     else if (a === '--h') out.h = +argv[++i];
-    else if (a === '--out') out.out = argv[++i];
+    else if (a === '--out') { out.out = argv[++i]; out.explicitOut = true; }
     else if (a === '--hud') out.hud = argv[++i];
     else if (a === '--base') out.base = argv[++i];
     // --times 4,6,8,10 shoots each preset at several settle times, producing a
@@ -42,6 +42,29 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+
+/**
+ * WHERE THE SHOTS GO, WHEN NOBODY SAYS.
+ *
+ * These directories used to be named by hand — `shots/r21-steel`, `r22-chain`,
+ * `r24-jump`, then just `r27`, `r28`, `r29`, `r30`. Those numbers were never
+ * round numbers; they were labels I invented per capture and incremented on
+ * feel. Meanwhile progress/data.json keeps the real round counter, which had
+ * reached 26. So the History tab showed r30 while the Timeline showed ROUND 26 —
+ * two counters for one thing, and only one of them meant anything. The client
+ * spotted it before I did.
+ *
+ * One number now: with no `--out`, a capture lands in the round it belongs to.
+ */
+if (!args.explicitOut) {
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const d = JSON.parse(await readFile(path.join(ROOT, 'progress/data.json'), 'utf8'));
+    const round = d?.rounds?.[0]?.round;
+    if (Number.isFinite(round)) out_default(args, `shots/r${round}`);
+  } catch { /* no progress data — shots/latest is a fine fallback */ }
+}
+function out_default(a, dir) { a.out = dir; }
 
 // Read the preset list straight from the source of truth.
 const presetsMod = await import(pathToFileURL(path.join(ROOT, 'src/capture/presets.js')).href);
