@@ -35,5 +35,11 @@ export default defineConfig({
       ],
     },
   },
-  build: { target: 'es2022', sourcemap: true },
+  /**
+   * './' so the built game runs from a folder, not only from a web root — a
+   * distributable that has to be served from '/' is a distributable most people
+   * cannot open.
+   */
+  base: './',
+  build: { target: 'es2022', sourcemap: false },
 });

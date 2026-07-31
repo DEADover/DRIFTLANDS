@@ -10,3 +10,6 @@ music/*
 # Engine samples the player supplies: local, and not ours to commit.
 sfx/*
 !sfx/README.md
+
+# Packaged distributables — rebuild with tools/package.mjs.
+release/
