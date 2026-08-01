@@ -117,6 +117,44 @@ export const PRESETS = {
   },
 
   /**
+   * THE CAR ITSELF, BIG ENOUGH TO JUDGE.
+   *
+   * Every other preset frames the world; these two frame the model. The camera's
+   * near plane is 14 m, so there is a floor under how close it can get — at
+   * distance 20 m (zoom 0.26) and fov 26 the frame is 16.4 m across and the car
+   * reads ~29% of frame width, about seven times its in-game size. That is
+   * enough to judge chamfers, arch clearance and wheel spokes, and it is still
+   * the real world, the real light and the real materials rather than a turntable.
+   *
+   * The tape brakes to a stop on purpose: at rest the camera's velocity lead is
+   * zero so the car sits centred, and the wheel-in-arch relationship the client
+   * asked about is shown in its neutral state rather than mid-lean.
+   */
+  car_studio: {
+    id: 'car_studio',
+    label: 'The car, three-quarter — judge the model itself',
+    biome: 'alpine',
+    seed: 1337,
+    warmup: 11.0,
+    tape: [drive(5.0, { throttle: 1 }), drive(11.0, { brake: 1 })],
+    camera: { zoom: 0.26, pitchDeg: 34 },
+    autopilot: { aggression: 1 },
+    notes: 'Judge bevels, roofline, arch gap, spokes, livery. NOT a composition shot.',
+  },
+
+  car_plan: {
+    id: 'car_plan',
+    label: 'The car, plan view at the game camera angle',
+    biome: 'alpine',
+    seed: 1337,
+    warmup: 11.0,
+    tape: [drive(5.0, { throttle: 1 }), drive(11.0, { brake: 1 })],
+    camera: { zoom: 0.26 },
+    notes: 'The in-game angle, magnified. This is the read that has to survive.',
+    autopilot: { aggression: 1 },
+  },
+
+  /**
    * THE JUMP. Car airborne over the stream, mid-flight.
    *
    * WHY THE WARMUP IS TWO MINUTES. Every other preset frames something that is
