@@ -585,7 +585,8 @@ export class Hud {
     const el = this.el.now;
     if (!el) return;
     if (!t) { el.classList.remove('show'); return; }
-    el.innerHTML = `<i>${t.index + 1}/${t.count}</i>${escapeHtml(t.name)}`;
+    const tail = t.loading ? ' <i>loading…</i>' : '';
+    el.innerHTML = `<i>${t.index + 1}/${t.count}</i>${escapeHtml(t.name)}${tail}`;
     el.classList.add('show');
     clearTimeout(this._nowTimer);
     this._nowTimer = setTimeout(() => el.classList.remove('show'), 4200);

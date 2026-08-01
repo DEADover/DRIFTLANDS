@@ -10,6 +10,14 @@
  * open with a double click.
  *
  *   node tools/package.mjs
+ *
+ * NOTE ON MUSIC: build with `DRIFTLANDS_NO_MUSIC=1 npx vite build` first. The
+ * player's own tracks are compiled into the bundle by import.meta.glob, and a zip
+ * handed to someone else is redistribution. Do NOT do what I did the first time
+ * and move the files out of the folder by hand — the dev server re-expands the
+ * glob the moment they vanish and, if the watcher has been told to ignore that
+ * folder, never notices them return. The music silently stopped working and it
+ * took a bug report to find out.
  */
 import { readFile, writeFile, mkdir, rm, cp } from 'node:fs/promises';
 import { existsSync } from 'node:fs';

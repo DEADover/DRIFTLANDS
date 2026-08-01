@@ -30,8 +30,15 @@ export default defineConfig({
         '**/shots/**',
         '**/ab/**',
         '**/.git/**',
-        '**/music/**',
-        '**/sfx/**',
+        // NOT music/ or sfx/. Those two are the one place a player is INVITED to
+        // add files, and the whole promise is that dropping a track in and
+        // letting the page reload is all it takes. Ignoring them here broke that
+        // promise silently: the folder was emptied once to build a distributable
+        // without redistributing someone's licensed music, Vite re-expanded the
+        // glob with nothing in it, and then could not see the files come back.
+        // The dev server served a music module with an empty playlist until it
+        // was restarted, and nothing anywhere said so. They change rarely enough
+        // that watching them costs no reloads worth having.
       ],
     },
   },

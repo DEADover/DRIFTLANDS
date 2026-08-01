@@ -76,7 +76,17 @@ class Music {
 
   get current() {
     const t = this.tracks[this.index];
-    return t ? { name: t.name, index: this.index, count: this.tracks.length } : null;
+    if (!t) return null;
+    return {
+      name: t.name, index: this.index, count: this.tracks.length,
+      // `readyState < 3` is HAVE_CURRENT_DATA or less: the element cannot play
+      // through yet. A four-megabyte track takes about ten seconds to buffer on
+      // a cold cache — MEASURED, readyState 0 -> 4 over ten seconds on a 4.8 MB
+      // file — and for that whole time the old HUD announced the track by name
+      // over silence, which reads as "the music is broken" rather than "the
+      // music is coming". Say which it is.
+      loading: !!this._el && this._el.readyState < 3,
+    };
   }
 
   onTrack(fn) { if (typeof fn === 'function') this._listeners.push(fn); }
@@ -106,6 +116,8 @@ class Music {
       // with several tracks the player expects a playlist, and with exactly one
       // `ended` wraps straight back to it anyway.
       el.addEventListener('ended', () => this.next());
+      // The HUD showed "loading" and had no reason to ever take it down again.
+      el.addEventListener('canplay', () => this._emit());
       // A file that will not decode must not end the playlist: skip it and say
       // so, rather than leaving the player in silence wondering.
       //
