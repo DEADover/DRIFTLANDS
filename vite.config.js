@@ -1,6 +1,31 @@
 import { defineConfig } from 'vite';
 
+/**
+ * Drop the player's own music from a DISTRIBUTABLE build.
+ *
+ * `import.meta.glob` compiles whatever is in music/ straight into the bundle, and
+ * a zip handed to someone else is redistribution — the first release quietly
+ * carried 9.6 MB of commercial soundtrack. The obvious workaround, moving the
+ * files out of the folder by hand, is what silently broke music playback for a
+ * day: the dev server re-expanded the glob over an empty folder and, with the
+ * watcher told to ignore that folder, never noticed the files return.
+ *
+ * So the exclusion happens HERE, at transform time, and never touches the disk.
+ */
+function withoutMusic() {
+  return {
+    name: 'driftlands-no-music',
+    apply: 'build',
+    transform(code, id) {
+      if (!id.endsWith('/src/audio/music.js')) return null;
+      return code.replace(/const FILES = import\.meta\.glob\([\s\S]*?\n\}\);/,
+        'const FILES = {};   // stripped for distribution — see vite.config.js');
+    },
+  };
+}
+
 export default defineConfig({
+  plugins: process.env.DRIFTLANDS_NO_MUSIC ? [withoutMusic()] : [],
   server: {
     port: 5173,
     strictPort: true,

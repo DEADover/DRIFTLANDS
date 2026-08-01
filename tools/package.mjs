@@ -24,6 +24,67 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
+
+/**
+ * Shipped beside the game. Written HERE rather than by hand, because this script
+ * wipes the release directory on every run — a README added afterwards is a
+ * README that vanishes the next time anyone rebuilds, which is exactly what
+ * happened to the first one.
+ */
+const README = String.raw`DRIFTLANDS — Alpine Meadows, Stage 01
+=====================================
+
+TO PLAY
+  Open index.html in a browser. Double-clicking it works — everything is in that
+  one file, there is no server to run and nothing to install. Chrome, Edge,
+  Firefox and Safari are all fine. WebGL is required.
+
+CONTROLS
+  W A S D    drive
+  SPACE      handbrake
+  R          reset the car back to the road
+  L          lap times and results (pauses the game)
+  M  route ribbon      H  hide the HUD      N  mute
+  [ ]  change track    P  pause music       - =  volume
+
+THE RACE
+  Five laps. Crossing the start line completes one; time and drift score are
+  kept per lap and totalled at the end. Press L at any time for the table.
+
+  Drift score rewards CONTINUITY. Linking slides without straightening up climbs
+  a multiplier from x1 to x100 over about forty-five seconds of continuous
+  sliding; breaking the chain drops it back to x1. Chasing that is the game.
+
+  There is a jump on the long straight, over a ford. It is meant to be taken
+  flat out.
+
+MUSIC
+  This build ships with no music, on purpose: the playlist is compiled in, and
+  the tracks in the development copy are someone's own licensed music, which is
+  not ours to hand on. The engine, tyres, impacts and the lap chime are all
+  synthesised and are all here. The music/ folder is where a soundtrack would
+  live, but a built copy cannot pick up files dropped into it — that has to
+  happen when the build is made.
+
+WHAT THIS IS
+  A single-stage technical demo. One world, generated procedurally: there is not
+  one image file anywhere in it. Every surface, tree, rock, bridge, guardrail and
+  cloud is geometry and vertex colour computed at load, and the engine note is
+  synthesised rather than sampled. That is why the whole thing is under a
+  megabyte.
+
+KNOWN
+  The first load takes a moment while the world is built — nothing is being
+  downloaded, it is being computed.
+  Frame rate depends on your GPU; this is a lot of geometry for an integrated one.
+
+FEEDBACK WORTH HAVING
+  Anything that looks WRONG rather than merely hard. Wheels or bodywork passing
+  through scenery, the car stuck with no way out, the camera losing the car, a
+  bridge or barrier that reads oddly, sound that does not match what happened.
+  Screenshots help far more than descriptions — press H first if the HUD is in
+  the way.
+`;
 const DIST = path.join(ROOT, 'dist');
 const OUT = path.join(ROOT, 'release', 'DRIFTLANDS');
 
@@ -50,4 +111,5 @@ await mkdir(path.join(OUT, 'music'), { recursive: true });
 if (existsSync(path.join(ROOT, 'music/README.md'))) {
   await cp(path.join(ROOT, 'music/README.md'), path.join(OUT, 'music/README.md'));
 }
+await writeFile(path.join(OUT, 'README.txt'), README);
 console.log('PACKAGED ' + (html.length / 1048576).toFixed(2) + ' MB -> ' + path.relative(ROOT, OUT));
