@@ -31,6 +31,29 @@ const ROOT = path.resolve(import.meta.dirname, '..');
  * README that vanishes the next time anyone rebuilds, which is exactly what
  * happened to the first one.
  */
+const HOSTED_README = String.raw`DRIFTLANDS — the ordinary build
+==============================
+
+This folder is the same game as the one beside it, built the normal way: an
+index.html plus an assets/ folder.
+
+USE THIS ONE if you are putting the game on a web host — GitHub Pages, itch.io,
+Netlify, a company server, anything that serves files over http. Upload the whole
+folder and open index.html. Paths are relative, so it works from a subdirectory.
+
+DO NOT open it by double-clicking. A browser refuses to load a JavaScript module
+over file://, so you will get a blank page. That restriction is the entire reason
+the single-file version next door exists.
+
+To try it locally you need any static server, for example:
+
+    npx serve .
+    python3 -m http.server
+
+Everything else — controls, adding your own music, what the game is — is in the
+other folder's README.txt.
+`;
+
 const README = String.raw`DRIFTLANDS — Alpine Meadows, Stage 01
 =====================================
 
@@ -126,4 +149,25 @@ if (existsSync(path.join(ROOT, 'music/README.md'))) {
   await cp(path.join(ROOT, 'music/README.md'), path.join(OUT, 'music/README.md'));
 }
 await writeFile(path.join(OUT, 'README.txt'), README);
+
+/**
+ * AND THE ORDINARY BUILD, BESIDE IT.
+ *
+ * Inlining exists to solve exactly one problem: a `<script type="module" src>`
+ * is blocked over file://, so a conventional build needs a server and a
+ * recipient who will not run one sees a white page with no explanation.
+ *
+ * It is not free. There is no separate caching, so a new version re-downloads
+ * the whole megabyte rather than the part that changed; source maps are gone;
+ * and one large inline script is re-parsed on every open. For handing a copy to
+ * one person that is the right trade. For putting it on a web host, where a
+ * server is a given, it is the wrong one.
+ *
+ * So ship both and let whoever is sharing it decide, rather than deciding for
+ * them at package time.
+ */
+const HOSTED = path.join(ROOT, 'release', 'DRIFTLANDS-hosted');
+await mkdir(HOSTED, { recursive: true });
+await cp(DIST, HOSTED, { recursive: true });
+await writeFile(path.join(HOSTED, 'README.txt'), HOSTED_README);
 console.log('PACKAGED ' + (html.length / 1048576).toFixed(2) + ' MB -> ' + path.relative(ROOT, OUT));
