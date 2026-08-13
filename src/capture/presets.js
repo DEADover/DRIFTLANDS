@@ -117,6 +117,29 @@ export const PRESETS = {
   },
 
   /**
+   * THE CROWD, AT THE ONLY PLACE IT IS ALLOWED TO BE.
+   *
+   * Spectators only ever stand behind steel guardrails, and guardrails only
+   * exist at corners roads.js has judged dangerous — so a shot of the crowd is
+   * necessarily a shot of a hard corner, and it cannot be framed by picking a
+   * pretty spot. 47.75 s is the measured moment on this route where the most
+   * spectators are inside the frustum at once (67 of them, all within 55 m):
+   * the guarded left-hander with the drop on its outside. If this comes back
+   * with an empty verge, the guardrail layout has moved, not the crowd.
+   */
+  crowd_alpine: {
+    id: 'crowd_alpine',
+    label: 'Spectators — the gallery behind the guardrail',
+    biome: 'alpine',
+    seed: 1337,
+    warmup: 47.75,
+    tape: [drive(47.75, { throttle: 1 })],
+    camera: { zoom: 0.78 },
+    autopilot: { aggression: 1 },
+    notes: 'Judge the crowd: silhouette, colour, clustering, and that every one of them is behind steel.',
+  },
+
+  /**
    * THE CAR ITSELF, BIG ENOUGH TO JUDGE.
    *
    * Every other preset frames the world; these two frame the model. The camera's

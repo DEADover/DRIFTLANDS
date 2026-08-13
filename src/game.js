@@ -15,6 +15,7 @@ import { createJump } from './world/jump.js';
 import { Vehicle } from './entities/vehicle.js';
 import { CarView } from './entities/car.js';
 import { createAnimals } from './entities/animals.js';
+import { createCrowd } from './entities/crowd.js';
 import { SkidMarks } from './fx/skidmarks.js';
 import { ParticleSystem } from './fx/particles.js';
 import { createFeel } from './fx/feel.js';
@@ -127,6 +128,21 @@ export class Game {
     this._sized = { w, h };
   }
 
+  /**
+   * How many device pixels to draw per CSS pixel. The frame governor
+   * (src/core/pacer.js) moves this to hold the frame inside a refresh interval;
+   * it is the first thing it spends, before frame rate.
+   *
+   * Every render target in post.js is sized from the renderer's pixel ratio, so
+   * the resize path below is the whole of the plumbing — but it does reallocate
+   * eight targets, which is why the pacer rate-limits how often it calls this.
+   */
+  setRenderScale(scale) {
+    if (Math.abs(this.renderer.getPixelRatio() - scale) < 1e-3) return;
+    this.renderer.setPixelRatio(scale);
+    this.resize();
+  }
+
   /** Re-fit whenever the container actually gains or changes size. */
   _watchSize() {
     this.resize();
@@ -192,6 +208,17 @@ export class Game {
 
     this.animals = createAnimals({ ...ctx, roads: this.roads });
     this.worldGroup.add(this.animals.group);
+
+    // LAST, because it needs everything that came before it: the guardrails to
+    // stand behind, and the props, landmarks, bridge and ford footprints to keep
+    // out of. Spectators are deliberately NOT added to `this.colliders` — they
+    // stand behind steel precisely so that the steel is what the car hits.
+    this.crowd = createCrowd({
+      ...ctx,
+      roads: this.roads, props: this.props, landmarks: this.landmarks,
+      bridges: this.bridges, jump: this.jump, water: this.water,
+    });
+    this.worldGroup.add(this.crowd.group);
 
     this.colliders = [
       ...this.props.colliders,
@@ -1225,6 +1252,7 @@ export class Game {
     this.particles.update(scaled);
     this.water.update(scaled);
     this.animals.update(scaled, { position: v.position, speed: v.speed });
+    this.crowd.update(scaled, { position: v.position, speed: v.speed });
     this.roads.barriers?.update?.(scaled);   // tumbling fence debris
 
     this.feel.update(scaled, {
@@ -1364,6 +1392,7 @@ export class Game {
       drawCalls: info.render.calls,
       triangles: info.render.triangles,
       animals: this.animals.count ?? 0,
+      spectators: this.crowd?.count ?? 0,
       roadLength: Math.round(this.roads.length ?? 0),
       post: this.post.enabled === true,
     };
