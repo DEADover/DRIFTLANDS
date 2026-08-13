@@ -170,4 +170,14 @@ const HOSTED = path.join(ROOT, 'release', 'DRIFTLANDS-hosted');
 await mkdir(HOSTED, { recursive: true });
 await cp(DIST, HOSTED, { recursive: true });
 await writeFile(path.join(HOSTED, 'README.txt'), HOSTED_README);
+/**
+ * AND ONE MORE ARCHIVE, SHAPED THE WAY A HOST WANTS IT.
+ *
+ * itch.io, Netlify Drop, Cloudflare Pages and Vercel all expect index.html at
+ * the ROOT of what you give them. The two folders above are nested inside the
+ * hand-over zip, which is right for a person and wrong for an uploader — itch in
+ * particular will accept the file, serve the directory listing, and leave you
+ * wondering why the game does not start. So the web drop gets its own archive
+ * with nothing above index.html.
+ */
 console.log('PACKAGED ' + (html.length / 1048576).toFixed(2) + ' MB -> ' + path.relative(ROOT, OUT));
