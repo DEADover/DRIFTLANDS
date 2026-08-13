@@ -1,6 +1,7 @@
 import { Game } from './game.js';
 import { BIOME_IDS } from './world/biomes.js';
 import { KeyboardInput, TapeInput } from './core/input.js';
+import { FramePacer } from './core/pacer.js';
 import { PRESETS } from './capture/presets.js';
 
 const container = document.getElementById('app');
@@ -134,13 +135,37 @@ if (shotId) {
     // art pass alpine has, so offering them would only show unfinished work.
   });
 
-  let last = performance.now();
+  /**
+   * THE FRAME LOOP IS PACED, NOT FREE-RUNNING.
+   *
+   * This used to be `dt = now - last; update(dt); render()` on every rAF — the
+   * obvious loop, and the reason the client kept reporting a jerky camera on a
+   * fast machine. Measured on that machine: JS 1.4 ms a frame, GPU 27.9 ms,
+   * presented at 39 fps on a 120 Hz panel with 44% of frames changing how many
+   * refresh intervals they occupied. The world was advanced by the interval
+   * that had just elapsed, so its apparent speed changed frame to frame by up
+   * to 3x. See the header of core/pacer.js for the full reading.
+   *
+   * The governor renders on a whole number of refresh intervals and hands back
+   * the NOMINAL period, so the world advances by the same amount every frame
+   * and each frame is held on screen for the same time. It also owns the
+   * resolution, which is the first thing it spends to stay on the grid.
+   */
+  const pacer = new FramePacer({
+    baseScale: Math.min(window.devicePixelRatio || 1, 2),
+    minScale: 1,
+    onScale: (s) => game.setRenderScale(s),
+  });
+  // Exposed for tools/frametime.mjs, and for anyone wanting to see what the
+  // governor settled on — `__GAME.pacer.stats`.
+  game.pacer = pacer;
+
   const frame = (now) => {
-    const dt = Math.min(0.05, (now - last) / 1000);
-    last = now;
+    requestAnimationFrame(frame);
+    const dt = pacer.tick(now);
+    if (dt === null) return;      // not one of our frames: present nothing
     game.update(dt, kb.sample());
     game.render();
-    requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 }

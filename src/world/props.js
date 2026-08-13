@@ -2753,11 +2753,75 @@ export class PropScatter {
     const col = new THREE.Color();
     let tris = 0;
 
+    /**
+     * ONE MESH PER SPECIES PER TILE — AND THIS IS THE FRAME BUDGET.
+     *
+     * MEASURED on the client's machine (tools/frametime.mjs, headed Chromium,
+     * real GPU, 3024x1800): the JS costs 1.4 ms a frame and the GPU costs 28,
+     * so the game presented at 39 fps on a 120 Hz display with 44% of frames
+     * changing how many refresh intervals they occupied. That alternation —
+     * one frame lasting 16.6 ms, the next 33.2, the next 50 — is the "jerky
+     * camera" the client has reported for rounds. The camera maths was never
+     * involved.
+     *
+     * Where the 28 ms went, by turning one thing off at a time
+     * (tools/gpu-breakdown.mjs): props 5.17 ms, pixel ratio 5.66, shadows 3.74,
+     * post 3.01. Props were the largest single item, and the reason was ONE
+     * LINE — `inst.frustumCulled = false`, a few lines below this comment.
+     *
+     * It was not wrong to write it. An InstancedMesh's own bounding sphere is
+     * the sphere of ONE flower at the origin, so leaving culling on would have
+     * culled every scatter away the moment the camera left the map centre. But
+     * the cost of switching it off is that ALL of it is drawn, always: the
+     * census read 19,953,954 triangles in the scene graph and 30,674,774 drawn
+     * per frame (the difference is the shadow pass drawing most of it again).
+     * The camera sees about 120 m of a 1700 m map — roughly 0.6% of the area —
+     * so upwards of 99% of those triangles were vertex-shaded to be thrown
+     * away, twice a frame.
+     *
+     * So give culling something it can cull. Splitting each species by tile
+     * makes every mesh's bounding sphere LOCAL, and three's ordinary per-object
+     * frustum test then keeps only the tiles actually on screen. The shadow
+     * pass gets it for free: it culls against the sun's ortho box (+/-120 m,
+     * see renderer.js) with the same test.
+     *
+     * THE TILE SIZE IS MEASURED, AND IT CAME OUT THE OPPOSITE WAY ROUND FROM
+     * THE OBVIOUS GUESS. Smaller tiles cull better and draw fewer triangles, so
+     * the first version used 200 m on the reasoning that fewer triangles must
+     * be faster. Swept on the real GPU while driving (median of 80 frames at
+     * 1.5x, cost of one whole rendered frame):
+     *
+     *     tile   meshes  calls    triangles   cpu ms   gpu ms   total
+     *     150     9106     941    3,809,311     6.00    14.85   20.85
+     *     200     5636     775    4,625,228     3.60    15.54   19.14
+     *     300     2441     656    6,285,419     1.90    16.03   17.93
+     *     450     1105     508    8,840,695     1.30    15.96   17.26
+     *
+     * Triangles more than double across that range and the GPU does not care —
+     * 14.85 to 16.03 ms — because this frame is FILL-bound, not vertex-bound
+     * (measured separately: dropping the pixel ratio from 2x to 1x saves
+     * 13.5 ms, hiding every prop in the world saves 3.5). What the small tiles
+     * really bought was thousands of extra scene-graph objects and hundreds of
+     * extra draw calls, and that is CPU: 1.30 ms at 450 m against 6.00 at 150.
+     *
+     * 300 and not 450 because the ceiling here is one machine's. A weaker GPU
+     * is vertex-bound sooner, and 8.8M triangles a frame would be the wrong
+     * thing to have shipped to someone else's laptop; 300 keeps nearly all of
+     * the CPU win at two thirds of the geometry.
+     *
+     * THE ART IS BYTE-FOR-BYTE UNCHANGED. Per-instance colour is drawn from a
+     * seeded Rng walked in list order, so partitioning the list first would
+     * hand every prop a different colour and quietly repaint the world. The
+     * colours are therefore drawn in the ORIGINAL order, below, and carried to
+     * whichever tile the instance lands in.
+     */
+    const TILE = 300;
+    const tileOf = (x, z) => `${Math.floor(x / TILE)},${Math.floor(z / TILE)}`;
+    let meshCount = 0;
+
     for (const [key, list] of buckets) {
       if (!list.length) continue;
       const entry = lib.get(key);
-      const inst = new THREE.InstancedMesh(entry.geo, mat, list.length);
-      const instColors = new Float32Array(list.length * 3);
       const cr = new Rng((strHash(key) ^ 0x5bd1) >>> 0);
       // Blooms keep a tight, warm-neutral multiplier. The general 0.84-1.14 with
       // a colour-temperature twist is right for foliage and stone, but on a
@@ -2785,29 +2849,104 @@ export class PropScatter {
       // crown, i.e. SALMON — the exact note the client opened with. 0.075 on a
       // 1.10 ceiling keeps the tan-to-cool spread and cannot reach flesh.
       const wAmp = bloom ? 0.012 : stone ? 0.075 : 0.055;
+
+      // Colours first, in list order, so the Rng walk is identical to what it
+      // was before tiling. `rgb` is parallel to `list`.
+      const rgb = new Float32Array(list.length * 3);
       for (let i = 0; i < list.length; i++) {
-        const t = list[i];
-        dummy.position.set(t.x, t.y, t.z);
-        dummy.rotation.set(t.tx ?? 0, t.r, t.tz ?? 0);
-        dummy.scale.set(t.s, t.s * (t.sy ?? 1), t.s);
-        dummy.updateMatrix();
-        inst.setMatrixAt(i, dummy.matrix);
         // Near-white multiplier: value plus a touch of colour temperature.
         const k = cr.float(kLo, kHi);
         const w = cr.float(-wAmp, wAmp);
         col.setRGB(k * (1 + w), k, k * (1 - w));
-        instColors[i * 3] = col.r; instColors[i * 3 + 1] = col.g; instColors[i * 3 + 2] = col.b;
+        rgb[i * 3] = col.r; rgb[i * 3 + 1] = col.g; rgb[i * 3 + 2] = col.b;
       }
-      inst.instanceColor = new THREE.InstancedBufferAttribute(instColors, 3);
-      inst.castShadow = true;
-      inst.receiveShadow = true;
-      inst.frustumCulled = false;
-      inst.name = key;
-      this.group.add(inst);
+
+      const tiles = new Map();
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i];
+        const tk = tileOf(t.x, t.z);
+        let bucket = tiles.get(tk);
+        if (!bucket) tiles.set(tk, (bucket = []));
+        bucket.push(i);
+      }
+
+      /**
+       * How far ONE of these reaches from its own origin, unscaled. Used to
+       * size each tile's bounding sphere below without asking three to do it.
+       *
+       * NOT the geometry's bounding-sphere radius. These are authored standing
+       * on the ground plane, so a 9 m fir has a bounding sphere of radius ~4.5
+       * centred 4.5 m UP — and the instance matrix places the origin, not that
+       * centre. Using the radius alone would understate a tree's reach by half
+       * its height, and an understated sphere does not merely cull early: it is
+       * the same sphere InstancedMesh.raycast rejects against, so ground probes
+       * and collision queries would start missing props that are really there.
+       * Centre-offset plus radius is the true reach, and it is invariant under
+       * the per-instance rotation because that rotation is about this origin.
+       */
+      if (!entry.geo.boundingSphere) entry.geo.computeBoundingSphere();
+      const unitR = entry.geo.boundingSphere.center.length() + entry.geo.boundingSphere.radius;
+
+      for (const idxs of tiles.values()) {
+        const inst = new THREE.InstancedMesh(entry.geo, mat, idxs.length);
+        const instColors = new Float32Array(idxs.length * 3);
+        let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+        let maxR = 0;
+        for (let j = 0; j < idxs.length; j++) {
+          const i = idxs[j];
+          const t = list[i];
+          dummy.position.set(t.x, t.y, t.z);
+          dummy.rotation.set(t.tx ?? 0, t.r, t.tz ?? 0);
+          dummy.scale.set(t.s, t.s * (t.sy ?? 1), t.s);
+          dummy.updateMatrix();
+          inst.setMatrixAt(j, dummy.matrix);
+          instColors[j * 3] = rgb[i * 3];
+          instColors[j * 3 + 1] = rgb[i * 3 + 1];
+          instColors[j * 3 + 2] = rgb[i * 3 + 2];
+          const r = unitR * t.s * Math.max(1, t.sy ?? 1);
+          if (r > maxR) maxR = r;
+          if (t.x < lo[0]) lo[0] = t.x; if (t.x > hi[0]) hi[0] = t.x;
+          if (t.y < lo[1]) lo[1] = t.y; if (t.y > hi[1]) hi[1] = t.y;
+          if (t.z < lo[2]) lo[2] = t.z; if (t.z > hi[2]) hi[2] = t.z;
+        }
+        inst.instanceColor = new THREE.InstancedBufferAttribute(instColors, 3);
+        inst.castShadow = true;
+        inst.receiveShadow = true;
+        // THE POINT OF ALL OF THE ABOVE. three computes an InstancedMesh's
+        // bounding sphere over its instance matrices, so now that a mesh holds
+        // one tile the sphere is local and the frustum test is decisive.
+        inst.frustumCulled = true;
+        /**
+         * ...but it computes it LAZILY, the first time the mesh is frustum
+         * tested, by walking every instance matrix and decomposing it. Spread
+         * over 2441 meshes that is not a load cost, it is a cost paid a few
+         * milliseconds at a time, on whichever frame each tile first comes into
+         * view — which is a stutter, arriving exactly when the player drives
+         * somewhere new. We know the answer analytically here (the tile's own
+         * extent, grown by the largest instance in it), so write it down and
+         * three never computes anything.
+         */
+        const cx = (lo[0] + hi[0]) * 0.5, cy = (lo[1] + hi[1]) * 0.5, cz = (lo[2] + hi[2]) * 0.5;
+        inst.boundingSphere = new THREE.Sphere(
+          new THREE.Vector3(cx, cy, cz),
+          0.5 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + maxR
+        );
+        // Nothing in a scatter ever moves. Bake the world matrix once instead
+        // of re-deriving it for a few thousand meshes every frame.
+        inst.matrixAutoUpdate = false;
+        inst.updateMatrix();
+        // The name stays the species, not the tile: every audit, the scene
+        // census and window.__PROPS group by it.
+        inst.name = key;
+        this.group.add(inst);
+        meshCount++;
+      }
       tris += (entry.geo.attributes.position.count / 3) * list.length;
     }
 
     this.stats = {
+      meshes: meshCount,
+      tileSize: TILE,
       instances: Object.values(this.counts).reduce((a, b) => a + b, 0),
       // Collider count is the number that actually trades against the drive.
       // Without it "raise the density" and "the car got slower" are two
