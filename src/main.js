@@ -70,6 +70,28 @@ if (shotId) {
   // where audio comes from; this line is the whole of the coupling.
   game.music.onTrack?.((t) => game.hud?.setTrack(t));
 
+  /**
+   * MUSIC CAN BE ADDED WITHOUT REBUILDING THE GAME.
+   *
+   * The compiled-in playlist is whatever was in music/ when the build was made,
+   * and a packaged copy cannot read the folder beside it — a browser has no way
+   * to list a directory. So the two runtime doors are opened here: drag anything
+   * onto the window, or use the button, which asks for a FOLDER where the
+   * browser supports it and for files where it does not.
+   */
+  game.music.installDropTarget?.();
+  const musicBtn = document.getElementById('addmusic');
+  if (musicBtn) {
+    musicBtn.textContent = game.music.canPickFolder ? 'Add a music folder' : 'Add music files';
+    musicBtn.addEventListener('click', async (e) => {
+      // Must not fall through to the title screen's start handler: choosing
+      // music should not also drop the flag.
+      e.stopPropagation();
+      const n = await game.music.pick();
+      if (n > 0) musicBtn.textContent = n + (n === 1 ? ' track added' : ' tracks added');
+    });
+  }
+
   const kb = new KeyboardInput();
 
   /**

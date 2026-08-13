@@ -58,13 +58,27 @@ THE RACE
   There is a jump on the long straight, over a ford. It is meant to be taken
   flat out.
 
-MUSIC
-  This build ships with no music, on purpose: the playlist is compiled in, and
-  the tracks in the development copy are someone's own licensed music, which is
-  not ours to hand on. The engine, tyres, impacts and the lap chime are all
-  synthesised and are all here. The music/ folder is where a soundtrack would
-  live, but a built copy cannot pick up files dropped into it — that has to
-  happen when the build is made.
+MUSIC — PUT YOUR OWN IN, NO REBUILD NEEDED
+  This build ships with no music of its own: the development copy's tracks are
+  someone's licensed music and are not ours to hand on. Everything else you hear
+  — engine, tyres, impacts, the lap chime — is synthesised and is all here.
+
+  Two ways to add your own, both working straight from the file, with no server:
+
+    DRAG    drop audio files, or a whole folder of them, anywhere on the window.
+            Works at the title screen or mid-race.
+    BUTTON  "Add a music folder" on the title screen. In Chrome and Edge it asks
+            for a FOLDER and takes everything playable in it; elsewhere it asks
+            for files.
+
+  mp3, ogg, m4a, aac, wav, flac and webm. Tracks are sorted by filename, so
+  numbering them sets the running order. Playback starts as soon as you add them.
+
+    ]  next track     [  previous     P  pause     - =  volume     N  mute all
+
+  Note the music/ folder next to this file is NOT read automatically — a browser
+  is not allowed to list a directory on its own, which is exactly why the drag
+  and the button exist.
 
 WHAT THIS IS
   A single-stage technical demo. One world, generated procedurally: there is not
