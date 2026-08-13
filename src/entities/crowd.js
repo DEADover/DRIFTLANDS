@@ -837,6 +837,22 @@ export function createCrowd(ctx) {
     mesh.name = 'crowd:spectators';
     mesh.castShadow = true;
     mesh.receiveShadow = true;
+    /**
+     * AND KEEP THE SHADOW. renderer.js rations the shadow map by demoting any
+     * instanced scatter with 300+ copies whose instances are under 2 m — the
+     * rule that keeps 25,951 daisies out of the depth pass, where each of them
+     * would be smaller than one shadow texel and the contact AO in post.js is
+     * the better likeness anyway.
+     *
+     * A crowd trips that rule by arithmetic (561 > 300, and a spectator's
+     * bounding radius is 1.27 m) while being the opposite case. A standing
+     * figure at this camera casts a readable couple of metres of shadow, and it
+     * stands beside guardrail posts, saplings and firs that all cast theirs.
+     * A/B'd at 4x on the crowd_alpine preset: without it the gallery sits ON
+     * the grass instead of IN it — flat colour on flat green, no contact. The
+     * whole crowd is 28,050 triangles, which is 0.5% of a frame.
+     */
+    mesh.userData.mustCast = true;
     mesh.frustumCulled = false;
     mesh.customDepthMaterial = depthMaterial;
 

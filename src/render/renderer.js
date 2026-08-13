@@ -741,8 +741,37 @@ export class LightRig {
       }
       const r = o.geometry?.boundingSphere?.radius
         ?? (o.geometry?.computeBoundingSphere?.(), o.geometry?.boundingSphere?.radius ?? 0);
-      // Mass scatter smaller than the contact-AO radius: not worth a shadow pass.
-      if (o.isInstancedMesh && o.count >= SCATTER_COUNT && r < MIN_CASTER) {
+      /**
+       * Mass scatter smaller than the contact-AO radius: not worth a shadow
+       * pass.
+       *
+       * COUNT THE SCATTER, NOT THE MESH. This used to read `o.count`, which was
+       * the same thing for as long as one species meant one InstancedMesh. It
+       * stopped being the same thing when props.js began splitting each species
+       * across 300 m tiles so that frustum culling could work: a meadow with
+       * 8601 daisies became 36 tiles of ~240, every one of them under this
+       * threshold, and 42 species that had been deliberately kept out of the
+       * shadow map walked straight back into it. MEASURED after the split and
+       * before this line: 2243 of 2441 prop meshes casting, 86.2% of all prop
+       * triangles going through the shadow pass — a large, silent cost with no
+       * visible return, since the reason for the rule (a daisy's shadow is
+       * smaller than one shadow texel) is a property of the daisy and not of
+       * how many meshes we happened to cut the meadow into.
+       *
+       * `scatterCount` is the species' total, published by whoever built the
+       * scatter. Falling back to o.count keeps every untiled caller correct.
+       */
+      const scatter = o.userData.scatterCount ?? o.count;
+      if (o.isInstancedMesh && scatter >= SCATTER_COUNT && r < MIN_CASTER
+          // ...unless the scatter says it is not that kind of scatter. The rule
+          // is calibrated on undergrowth, where one instance is smaller than a
+          // shadow texel and the contact AO is a better likeness than a shadow
+          // would be. A standing spectator is 1.7 m of upright silhouette on
+          // open grass, next to guardrail posts and trees that all cast; drop
+          // its shadow and the crowd reads as stickers laid on the field. It
+          // fell under this rule only because 561 is more than 300 and 1.27 m
+          // is less than 2.0 — an arithmetic accident, not a judgement.
+          && !o.userData.mustCast) {
         if (o.castShadow) o.castShadow = false;
         return;
       }

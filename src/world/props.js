@@ -2938,6 +2938,11 @@ export class PropScatter {
         // The name stays the species, not the tile: every audit, the scene
         // census and window.__PROPS group by it.
         inst.name = key;
+        // ...and so does the count the shadow budget is rationed by. A tile is
+        // an accident of culling; the rule in renderer.js is about how big and
+        // how numerous the THING is. Without this, splitting a meadow into
+        // tiles quietly readmits every daisy in it to the shadow map.
+        inst.userData.scatterCount = list.length;
         this.group.add(inst);
         meshCount++;
       }
