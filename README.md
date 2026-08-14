@@ -6,8 +6,14 @@
 </p>
 
 <p align="center">
-  <a href="https://deadover.github.io/DRIFTLANDS/"><b>▶ Play it now, in your browser</b></a><br>
-  <sub>No install, no download. Arrow keys or WASD, and hold Space through the corners.</sub>
+  <a href="https://deadover.github.io/DRIFTLANDS/">
+    <img src="docs/play-button.png" alt="Play DRIFTLANDS in your browser" width="380">
+  </a>
+</p>
+
+<p align="center">
+  <b><a href="https://deadover.github.io/DRIFTLANDS/">deadover.github.io/DRIFTLANDS</a></b><br>
+  <sub>No install, no download. Arrow keys or WASD — and hold <b>Space</b> through the corners.</sub>
 </p>
 
 <p align="center">
