@@ -9,15 +9,15 @@
  * removes that requirement entirely — the archive becomes one folder anyone can
  * open with a double click.
  *
- *   node tools/package.mjs
+ *   node tools/package.mjs        # builds, then packages. Nothing to remember.
  *
- * NOTE ON MUSIC: build with `DRIFTLANDS_NO_MUSIC=1 npx vite build` first. The
- * player's own tracks are compiled into the bundle by import.meta.glob, and a zip
- * handed to someone else is redistribution. Do NOT do what I did the first time
- * and move the files out of the folder by hand — the dev server re-expands the
- * glob the moment they vanish and, if the watcher has been told to ignore that
- * folder, never notices them return. The music silently stopped working and it
- * took a bug report to find out.
+ * NOTE ON MUSIC: the build is run from here with DRIFTLANDS_NO_MUSIC=1, because
+ * the player's own tracks are compiled into the bundle by import.meta.glob and a
+ * zip handed to someone else is redistribution. Do NOT do what I did the first
+ * time and move the files out of the folder by hand — the dev server re-expands
+ * the glob the moment they vanish and, if the watcher has been told to ignore
+ * that folder, never notices them return. The music silently stopped working and
+ * it took a bug report to find out.
  */
 import { readFile, writeFile, mkdir, rm, cp } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -125,6 +125,34 @@ FEEDBACK WORTH HAVING
 const DIST = path.join(ROOT, 'dist');
 const OUT = path.join(ROOT, 'release', 'DRIFTLANDS');
 
+/**
+ * BUILD FIRST. THIS SCRIPT USED TO TRUST WHATEVER WAS LYING IN dist/.
+ *
+ * It read dist/, inlined it, wiped release/, wrote the archive and printed
+ * "PACKAGED 0.94 MB" — with no idea whether that bundle was five seconds or
+ * five days old. It was a day old, and it was packaged and reported as done
+ * with a whole round's work missing from it: no crowd, no frame governor, none
+ * of the culling. Nothing in the output said so. The recipient would have found
+ * out, not us.
+ *
+ * The instruction to build first was in this file's own header the whole time,
+ * which is exactly why it is no longer an instruction. A packaging step that
+ * depends on a command someone has to remember is a packaging step that ships
+ * the wrong thing eventually.
+ *
+ * DRIFTLANDS_NO_MUSIC is set here for the same reason: the player's own tracks
+ * are pulled into the bundle by import.meta.glob, and a zip handed to someone
+ * else is redistribution. Leaving that to be remembered once cost 9.6 MB of a
+ * commercial soundtrack in a release.
+ */
+const { execFileSync } = await import('node:child_process');
+console.log('building...');
+execFileSync('npx', ['vite', 'build'], {
+  cwd: ROOT,
+  stdio: ['ignore', 'pipe', 'inherit'],
+  env: { ...process.env, DRIFTLANDS_NO_MUSIC: '1' },
+});
+
 let html = await readFile(path.join(DIST, 'index.html'), 'utf8');
 const m = html.match(/<script type="module"[^>]*src="\.\/(assets\/[^"]+)"[^>]*><\/script>/);
 if (!m) throw new Error('could not find the module script tag in dist/index.html');
@@ -179,5 +207,20 @@ await writeFile(path.join(HOSTED, 'README.txt'), HOSTED_README);
  * particular will accept the file, serve the directory listing, and leave you
  * wondering why the game does not start. So the web drop gets its own archive
  * with nothing above index.html.
+ *
+ * This paragraph described something that did not exist. The archive was made by
+ * hand last time, and since this script wipes release/ on every run, the next
+ * run deleted it — the same way the first README vanished, for the same reason,
+ * two rounds apart. Anything a release is supposed to contain has to be built
+ * here or it is not part of the release.
+ *
+ * `-r` from INSIDE the hosted folder, and `-x` the macOS metadata, or the
+ * archive gains a __MACOSX/ directory and an uploader may serve that instead.
  */
+const WEB_ZIP = path.join(ROOT, 'release', 'DRIFTLANDS-web.zip');
+execFileSync('zip', ['-r', '-q', WEB_ZIP, '.', '-x', '.DS_Store', '__MACOSX/*'], { cwd: HOSTED });
+
+const zipped = await readFile(WEB_ZIP);
 console.log('PACKAGED ' + (html.length / 1048576).toFixed(2) + ' MB -> ' + path.relative(ROOT, OUT));
+console.log('         ' + (zipped.length / 1048576).toFixed(2) + ' MB -> '
+  + path.relative(ROOT, WEB_ZIP) + '  (index.html at the root, for a web host)');
