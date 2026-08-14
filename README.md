@@ -99,7 +99,7 @@ The shape of it: you give a **lead agent** a goal and a real example of what gre
 
 What made it work here was that the critics were not allowed to have opinions about the code. They had to look at the **real running output** — screenshots from a headless browser, and numbers pulled out of the live game — so "the car sinks into the road" became *max penetration 2.144 m, 44.8% of frames over 10 cm*, and the fix became *0.016 m, 0.0%*. Roughly a third of this repository is the measuring equipment: 38 harnesses under `tools/` that boot the game, drive it, and audit the result.
 
-**27 rounds, 129 commits.** The commit log is worth reading if you're curious how it went — the messages record what was measured, what was wrong, and a fair number of the agent's own mistakes:
+**Twenty-seven rounds of build-and-critique.** The commit log is worth reading if you're curious how it went — the messages record what was measured, what was wrong, and a fair number of the agent's own mistakes:
 
 > *The jerky camera was never the camera: the frame loop had no clock of its own*
 >
