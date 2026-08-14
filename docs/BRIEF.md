@@ -1,5 +1,12 @@
 # DRIFTLANDS — shared brief
 
+> **Note for readers of the public repository.** This file refers to `ref/`, the eight
+> reference frames every round was judged against. They are screenshots of
+> *art of rally* by Funselektor — the bar this project aimed at, and not ours to
+> redistribute, so they are not in this repository. The method is described in the
+> README; the images are the one part of it you have to bring yourself.
+
+
 > ## ⚠ DIRECTION CHANGE — READ `docs/ART_DIRECTION.md` FIRST
 >
 > The client supplied eight new reference frames and the target moved upward.

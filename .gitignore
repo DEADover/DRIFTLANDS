@@ -13,3 +13,17 @@ sfx/*
 
 # Packaged distributables — rebuild with tools/package.mjs.
 release/
+
+# NOT PUBLISHED, AND DELIBERATELY SO.
+#
+# ref/  the eight reference frames the critics judged every round against.
+#       They are screenshots of somebody else's game (art of rally, Funselektor)
+#       and they are the bar, not our work — usable to aim at, not ours to
+#       redistribute in a public repository.
+# ab/   the A/B panels that pair our frames against those references, which
+#       embed them, and run to ~90 MB besides.
+# progress/  the live build-progress page. A working instrument, not part of
+#       the game, and it is full of the same reference imagery.
+ref/
+ab/
+progress/

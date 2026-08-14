@@ -1,5 +1,12 @@
 # ART DIRECTION v3 — THE REAL TARGET IS NOW ON DISK
 
+> **Note for readers of the public repository.** This file refers to `ref/`, the eight
+> reference frames every round was judged against. They are screenshots of
+> *art of rally* by Funselektor — the bar this project aimed at, and not ours to
+> redistribute, so they are not in this repository. The method is described in the
+> README; the images are the one part of it you have to bring yourself.
+
+
 **Read this before `BRIEF.md`. Then OPEN THE REFERENCE FILES AND LOOK AT THEM.**
 
 ```
