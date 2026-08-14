@@ -6,7 +6,12 @@
 </p>
 
 <p align="center">
-  <a href="#play-it">Play it</a> ·
+  <a href="https://deadover.github.io/DRIFTLANDS/"><b>▶ Play it now, in your browser</b></a><br>
+  <sub>No install, no download. Arrow keys or WASD, and hold Space through the corners.</sub>
+</p>
+
+<p align="center">
+  <a href="#run-it-yourself">Run it yourself</a> ·
   <a href="#controls">Controls</a> ·
   <a href="#bring-your-own-soundtrack">Music</a> ·
   <a href="#how-this-was-built">How this was built</a>
@@ -38,9 +43,9 @@ No textures, no sprites, no models, no baked lighting. Every tree, rock, wheel r
 - **Deer, birds and hares** that notice you coming.
 - **180 km/h** flat out, in sixth.
 
-## Play it
+## Run it yourself
 
-You need [Node.js](https://nodejs.org) 20+.
+The [playable build](https://deadover.github.io/DRIFTLANDS/) is deployed from `main` on every push. To run it locally you need [Node.js](https://nodejs.org) 20+.
 
 ```bash
 git clone https://github.com/DEADover/DRIFTLANDS.git
