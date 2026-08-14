@@ -4,6 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>DRIFTLANDS</title>
+    <!--
+      A favicon, inline, because the browser asks for /favicon.ico on every load
+      and a hosted copy answered that with the only 404 on the page.
+
+      SVG rather than a .ico for the reason everything else here is procedural:
+      there is not one raster asset in this project and this is not going to be
+      the first. It is the game in one glyph — a drift arc with the car at the
+      end of it, laying the rubber it just came through.
+    -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0d12'/%3E%3Cpath d='M11 47c9-24 25-33 42-30' stroke='%232fb8ff' stroke-width='6' stroke-linecap='round' fill='none' opacity='.55'/%3E%3Cpath d='M13 51c9-24 25-33 40-31' stroke='%2357e08a' stroke-width='5' stroke-linecap='round' fill='none'/%3E%3Crect x='42' y='11' width='17' height='11' rx='3' transform='rotate(14 50 16)' fill='%23f2f6fa'/%3E%3C/svg%3E" />
     <style>
       :root { color-scheme: dark; }
       * { margin: 0; padding: 0; box-sizing: border-box; }
