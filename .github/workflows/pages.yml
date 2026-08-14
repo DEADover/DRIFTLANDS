@@ -1,0 +1,84 @@
+# Build the game and publish it to GitHub Pages on every push to main.
+#
+# WHY A BUILD STEP AND NOT JUST "SERVE THE REPO". The index.html at the root is
+# the DEVELOPMENT entry point: it loads /src/main.js, which imports `three` by
+# bare name. A browser cannot resolve that — only Vite can, and only at build
+# time. Publishing the repository as-is would serve a page that dies on its
+# first import. So Pages gets dist/, not the source.
+#
+# vite.config.js sets `base: './'`, so every asset path in the build is
+# relative. That is what lets the same build work at the root of a domain, at
+# /DRIFTLANDS/ on github.io, inside an itch.io iframe, and off a file:// URL,
+# without knowing in advance which one it is.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  # ...and on demand, from the Actions tab.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Playwright is a devDependency and `npm ci` would otherwise spend
+      # several minutes downloading browsers that only the local test
+      # harnesses in tools/ ever use. Nothing in the build touches it.
+      - name: Install
+        run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
+      # DRIFTLANDS_NO_MUSIC keeps import.meta.glob from compiling in anything
+      # sitting in music/. There is nothing there in this repository — the
+      # folder is git-ignored — but a build that publishes a soundtrack should
+      # not be one forgotten commit away. Players add their own at runtime:
+      # drag a folder onto the window, or use the button on the title screen.
+      - name: Build
+        run: npx vite build
+        env:
+          DRIFTLANDS_NO_MUSIC: 1
+
+      # Fail loudly rather than deploying a page that cannot start. The string
+      # is a name in the scene graph, and string literals survive minification,
+      # so this genuinely answers "did the game end up in this bundle" — the
+      # check that caught a packager shipping a day-old build.
+      - name: Check the build is really the game
+        run: |
+          test -f dist/index.html || { echo "no dist/index.html"; exit 1; }
+          grep -rq "crowd:spectators" dist/assets/*.js || { echo "bundle is missing the game"; exit 1; }
+          ! grep -q "progress/index.html" dist/index.html || { echo "dead progress link in the build"; exit 1; }
+          echo "dist looks right: $(du -sh dist | cut -f1)"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

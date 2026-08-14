@@ -24,8 +24,34 @@ function withoutMusic() {
   };
 }
 
+/**
+ * THE TITLE SCREEN LINKS TO THE BUILD-PROGRESS PAGE, WHICH IS NOT SHIPPED.
+ *
+ * `progress/` is a development instrument: it is not in the build, and it is not
+ * in the public repository either. The link to it is in index.html, so every
+ * build carried a dead `/progress/index.html` on the title screen.
+ *
+ * tools/package.mjs has stripped it since the first release — but only from the
+ * SINGLE-FILE build, because it rewrites that one's HTML by hand and merely
+ * copies the ordinary build. So the hosted variant, which is the one that goes
+ * to GitHub Pages, itch.io and Netlify, has been shipping a link that 404s.
+ * Doing it here instead fixes every output at once, which is the difference
+ * between fixing a bug and fixing one instance of it.
+ */
+function withoutProgressLink() {
+  return {
+    name: 'driftlands-no-progress-link',
+    apply: 'build',
+    transformIndexHtml(html) {
+      return html.replace(/\s*&middot;\s*<a href="[^"]*progress[^"]*"[^>]*>.*?<\/a>/g, '');
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: process.env.DRIFTLANDS_NO_MUSIC ? [withoutMusic()] : [],
+  plugins: process.env.DRIFTLANDS_NO_MUSIC
+    ? [withoutMusic(), withoutProgressLink()]
+    : [withoutProgressLink()],
   server: {
     port: 5173,
     strictPort: true,
