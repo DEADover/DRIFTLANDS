@@ -105,5 +105,49 @@
     </div>
 
     <script type="module" src="/src/main.js"></script>
+    <!--
+      DOUBLE-CLICKING THIS FILE CANNOT WORK, AND USED TO FAIL SILENTLY.
+
+      This is the DEVELOPMENT entry. It loads /src/main.js, which imports `three`
+      by bare name — only Vite can resolve that, and only while it is serving.
+      Opened straight off disk the browser refuses the script outright:
+
+        Access to script at 'file:///src/main.js' from origin 'null'
+        has been blocked by CORS policy
+
+      ...and the page just sits there black, with the explanation hidden in a
+      console the person who double-clicked it has no reason to open. The
+      packaged build has no such problem — it is one self-contained file — so
+      the fix is to say which file that is.
+
+      The check keys on an EXTERNAL module script still being present: the
+      packager replaces this tag with an inline one, so this block is inert in
+      every build and only ever speaks in the source tree.
+    -->
+    <script>
+      if (location.protocol === 'file:' && document.querySelector('script[type=module][src]')) {
+        addEventListener('DOMContentLoaded', function () {
+          document.body.innerHTML =
+            '<div style="font:16px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#dfe7ef;'
+            + 'background:#0b0d12;position:fixed;inset:0;display:flex;align-items:center;'
+            + 'justify-content:center;padding:40px"><div style="max-width:560px">'
+            + '<div style="font-size:26px;font-weight:700;letter-spacing:.04em;margin-bottom:18px">'
+            + 'This file is the source, not the game</div>'
+            + '<p style="margin:0 0 16px">You have opened the development page directly from disk. '
+            + 'It loads its code through a build tool, and a browser will not do that from a '
+            + '<code>file://</code> address.</p>'
+            + '<p style="margin:0 0 10px"><b>To play right now:</b> open '
+            + '<code style="background:#182030;padding:2px 6px;border-radius:4px">'
+            + 'release/DRIFTLANDS/index.html</code> — that one is a single self-contained file '
+            + 'and works with a double click.</p>'
+            + '<p style="margin:0 0 10px">Not there yet? Build it with '
+            + '<code style="background:#182030;padding:2px 6px;border-radius:4px">'
+            + 'node tools/package.mjs</code></p>'
+            + '<p style="margin:0">Or run the dev server: '
+            + '<code style="background:#182030;padding:2px 6px;border-radius:4px">npm run dev</code>'
+            + '</p></div></div>';
+        });
+      }
+    </script>
   </body>
 </html>
