@@ -661,35 +661,86 @@ function bedRoll(x, z) {
 }
 
 /**
- * THE SURFACE IS CUT PAPER, LIKE EVERYTHING ELSE IN THIS WORLD.
+ * THE SURFACE IS NOT CUT PAPER. THAT WAS THE BUG.
  *
- * This is the answer to "the water reads as one flat fill", and it is not a
- * shader problem at all. Cropping the reference lake at 4x shows what its water
- * actually is: FLAT POLYGONAL FACETS, two to three metres across, each a
- * slightly different blue — five or ten levels apart, no more — with hard edges
- * between them. It is the same low-poly language as the meadow and the trees.
- * Ours was a smooth per-fragment gradient, which is an airbrush; every octave of
- * noise added to it over three rounds was averaged out by its own smoothness.
+ * The previous version of this function stamped ONE quantised tone PER TRIANGLE
+ * and handed the same value to all three vertices, so the varying was constant
+ * across the facet and stepped hard at its edge. The reasoning was that the
+ * reference lake is built of visible flat facets like everything else in this
+ * world. Cropped at 2.6x and put beside our own render, that reading is simply
+ * wrong: the reference's meadow, trees and rocks show their facets and its WATER
+ * DOES NOT. Its lake is a near-uniform mid-blue with a slow tonal drift across
+ * it, no triangulation and no seams — the one surface in the frame that is
+ * allowed to be smooth, which is exactly what makes it read as a liquid sitting
+ * among solids rather than as another painted solid.
  *
- * So the tone is stamped ONCE PER TRIANGLE at build time and handed to the
- * shader as an attribute whose three vertices carry the same value, which makes
- * the varying constant across the facet. The lattice is a 4 m grid, so a facet
- * is about fifty pixels at the capture camera — the size the reference's are.
+ * What we had instead: a field with a 3 m octave in it, stretched x2.6 and
+ * quantised to six levels, sampled at the CENTROID of a 4 m triangle. Two
+ * triangles sharing an edge routinely landed on different levels, and each level
+ * was worth eleven per cent of value in the shader — so every one of 165,045
+ * triangles had a chance of being a visibly different blue from its neighbour,
+ * with a dead-straight seam between them. That is the client's complaint,
+ * verbatim, generated on purpose.
  *
- * Quantised to six steps because two adjacent facets should be either the same
- * tone or a clear step apart, never a whisker apart: a continuous field over
- * discrete facets reads as banding artefacts rather than as water.
+ * So: this is now a BROAD, CONTINUOUS drift, sampled PER VERTEX on the true
+ * lattice grid (see push() in _buildPlanned). Because every triangle that meets
+ * at a grid corner samples that corner's own (i, j), all of them get the same
+ * value there, and the interpolated varying is continuous across the whole
+ * lattice — there is no edge anywhere for the eye to find.
+ *
+ * The two wavelengths left are ~34 m and ~13 m: both are several cells wide, so
+ * linear interpolation across a 4 m triangle cannot crease. Anything finer than
+ * the cell has to be per-pixel work and now is (see the ripple mottle in FRAG);
+ * a 3 m feature sampled on a 4 m grid is aliasing, not detail.
  */
 function toneAt(x, z) {
-  const a = vnoise(x * 0.115 + 4.4, z * 0.115 - 9.1);   // ~8.7 m patches
-  const b = vnoise(x * 0.34 - 2.2, z * 0.34 + 6.7);     // ~3 m
-  const t = a * 0.60 + b * 0.40;
-  // STRETCHED HARD, or the six steps are never used. vnoise sums to a field with
-  // a standard deviation of about 0.15, so at x1.5 almost every facet quantised
-  // to the middle two levels and neighbouring facets were a couple of levels
-  // apart — measured, the facet edges were visible at 4x and invisible at 1x.
-  // The reference's adjacent facets differ by up to twenty-five levels of blue.
-  return Math.round(Math.max(0, Math.min(1, (t - 0.5) * 2.6 + 0.5)) * 5) / 5;
+  const a = vnoise(x * 0.029 + 4.4, z * 0.029 - 9.1);   // ~34 m
+  const b = vnoise(x * 0.077 - 2.2, z * 0.077 + 6.7);   // ~13 m
+  const t = a * 0.62 + b * 0.38;
+  // Gently stretched, NOT quantised. vnoise sums to a field with a standard
+  // deviation of about 0.15; x2.0 puts most of the population across the middle
+  // of the range without clipping the tails into flat patches.
+  return Math.max(0, Math.min(1, (t - 0.5) * 2.0 + 0.5));
+}
+
+/**
+ * A SMOOTHED COPY OF A LATTICE FIELD, FOR THE COLOUR RAMP ONLY.
+ *
+ * The depth field is sampled on the 4 m grid and interpolated LINEARLY across
+ * each triangle, so it is C0 and not C1: its gradient jumps at every cell edge.
+ * The colour ramp then puts three smoothsteps on top of it, which amplify those
+ * gradient jumps into faint creases — and because the lattice is triangulated
+ * one way, the creases zigzag along the cell diagonals. Zoomed to 2.6x that is a
+ * set of soft contour lines following the bathymetry with a 45-degree sawtooth
+ * on them: the triangulation showing through the one field that was still hard
+ * enough to show it.
+ *
+ * Two separable [1,2,1] passes — an effective radius of about a cell and a half
+ * — take the curvature out of the field without moving it anywhere the eye can
+ * measure. This is used ONLY for the aDepth attribute, which drives colour and
+ * the wave-height falloff. Nothing physical reads it: collision, the ford,
+ * levelAt(), depthAt() and contains() all go through terrain.heightAt() and the
+ * unsmoothed field, and the distance transforms that place the shoreline, the
+ * foam, the rocks and the pads are all computed before this runs.
+ */
+function smoothField(src, N) {
+  const a = Float32Array.from(src);
+  const b = new Float32Array(N * N);
+  for (let p = 0; p < 2; p++) {
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const k = j * N + i;
+        b[k] = (a[k - (i > 0 ? 1 : 0)] + a[k] * 2 + a[k + (i < N - 1 ? 1 : 0)]) * 0.25;
+      }
+    }
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const k = j * N + i;
+        a[k] = (b[k - (j > 0 ? N : 0)] + b[k] * 2 + b[k + (j < N - 1 ? N : 0)]) * 0.25;
+      }
+    }
+  }
+  return a;
 }
 
 // ---------------------------------------------------------------------------
@@ -2500,6 +2551,7 @@ const FRAG = /* glsl */ `
   uniform vec3 uShore;
   uniform vec3 uFoam;
   uniform vec3 uSun;
+  uniform vec3 uCalm;
   uniform vec3 uFogColor;
   uniform float uFogDensity;
   varying float vDepth;
@@ -2568,6 +2620,15 @@ ${WAVE}
     // makes the pattern take about twenty seconds to repeat rather than five.
     float band = sin(wph * 6.2832) * 0.64
                + sin(wph * 6.2832 * 0.43 + 1.7) * 0.36;
+    // ...AND ITS DERIVATIVE, which is the surface SLOPE and is what shading
+    // actually keys on. Analytic, so it is exactly smooth: no quantiser, no
+    // noise fetch, no facet. Shading a wave by its HEIGHT paints a pale stripe
+    // on the crest and a dark one in the trough, which is a stripe pattern lying
+    // on a flat sheet; shading it by its slope lights the face that tilts toward
+    // the sun and darkens the one that tilts away, which is a surface. Same
+    // crests, same clock, one extra cosine pair.
+    float bandD = cos(wph * 6.2832) * 0.64
+                + cos(wph * 6.2832 * 0.43 + 1.7) * 0.36 * 0.43;
     // ...and the swell is PATCHY. A lake seen from above is mostly glass with
     // ruffled bands drifting over it; a surface where every square metre heaves
     // by the same amount is an ocean, and an ocean at this scale reads as
@@ -2579,7 +2640,9 @@ ${WAVE}
     // 18) and its floor is 0.18 (was 0.28), so a good third of the open water is
     // near-glass at any moment. It drifts, slowly, crosswind.
     float wpatch = noise(vec2(wCross * 0.038, wAlong * 0.015) - vec2(0.0, uTime * 0.013));
-    band *= 0.18 + 1.20 * wpatch;
+    float wamp2 = 0.18 + 1.20 * wpatch;
+    band *= wamp2;
+    bandD *= wamp2;
     band = clamp(band, -1.0, 1.0);
     float crest = smoothstep(0.28, 0.86, band);
 
@@ -2687,15 +2750,20 @@ ${WAVE}
     // (tools/blue.mjs) compares pixels 2.3 m apart, because that is the scale the
     // reference's water carries its ripple patches at; an 8.7 m octave at full
     // amplitude and a 1.7 m one at 15% put almost nothing into that window.
-    // THE FACETS. aTone is stamped once per triangle at build time (toneAt in
-    // water.js) so this step is constant across the facet and hard at its edge,
-    // which is what makes the surface read as cut paper. Value AND a little
-    // chroma: the reference's facets differ in hue as well as brightness, a
-    // paler facet being slightly greener, which is light in water rather than
-    // light ON it.
-    col *= 1.0 + (vTone - 0.5) * 0.44;
-    col.g *= 1.0 + (vTone - 0.5) * 0.13;
-    col.b *= 1.0 - (vTone - 0.5) * 0.07;
+    // THE SLOW DRIFT. aTone is now sampled per VERTEX from a 34 m / 13 m field
+    // (toneAt in water.js), so this varying is continuous across the whole
+    // lattice and this line can no longer draw an edge anywhere. It used to be
+    // stamped once per TRIANGLE and quantised to six levels, at ±22% of value —
+    // which is to say every one of 165,045 triangles was licensed to be a
+    // visibly different blue from the one next to it, with a straight seam
+    // between them. That was the complaint.
+    //
+    // ±5.5% now, not ±22%. Its job is only that the two ends of a tarn are not
+    // the same blue; everything finer is per-pixel work below, where it can be
+    // smooth. A whisker of chroma with it, because paler water is water with
+    // more light IN it, not a lamp shone ON it.
+    col *= 1.0 + (vTone - 0.5) * 0.11;
+    col.g *= 1.0 + (vTone - 0.5) * 0.05;
 
     // --- the surface, and everything on it, MOVES -----------------------------
     // Every field below is sampled at a position that is advected: by the wind,
@@ -2706,65 +2774,77 @@ ${WAVE}
     vec2 fd = vFlow / max(fs, 1e-4);
     vec2 drift = WDIR * (uTime * WVEL * 0.34) + vFlow * uTime;
 
-    // TRAVELLING WAVE BANDS. Posterised to five steps, because everything else
-    // in this world is cut paper and a smooth sinusoid reads as a different
-    // game. Signed about the mean, so a trough is as dark as a crest is pale
-    // rather than the whole surface being lifted.
+    // THE SWELL, SHADED AS A SURFACE RATHER THAN PAINTED AS STRIPES.
+    //
+    // This used to be floor(band * 2.5) / 2.5 at an amplitude of 0.44 — the
+    // wave HEIGHT, quantised to five levels, worth up to 44% of value. Two
+    // things were wrong with it and both are in the client's sentence.
+    //
+    // 1. The quantiser. A contour of a smooth field, hardened, is an irregular
+    //    hard-edged patch two or three metres across. Five levels at 17.6% a
+    //    step is five clearly different blues meeting along hard lines all over
+    //    the open water — a chunk of polygon, exactly, and one that does not even
+    //    line up with the triangles, so it read as a second, competing tiling.
+    //
+    // 2. Keying on HEIGHT. A crest is not brighter than a trough; a crest is a
+    //    place where the surface is level and a trough is another. What differs
+    //    is the SLOPE between them, and slope is what reflects the sky at a
+    //    different angle. So the shading term is bandD, the analytic derivative
+    //    of the same wave, which is exactly smooth by construction and needs no
+    //    fetch: the face rising toward the light lifts, the face falling away
+    //    darkens, and the surface reads as something with a shape.
+    //
     // Killed in the shallows: on a shelf under half a metre the bed and the foam
     // are already doing the work, and a band crossing a beach reads as a stain.
-    // MEASURED AMPLITUDE, NOT GUESSED AMPLITUDE. The first pass at this ran at
-    // 0.088 and the render came back with a mean frame-to-frame luma change of
-    // 0.66 levels over the whole lake — arithmetically present and visually
-    // absent, which is every previous round's mistake repeated. Debug-rendering
-    // the band field on its own (it is a clean diagonal swell at 120 px between
-    // crests, exactly as designed) and the depth field beside it says why: the
-    // basin is 0.5-5 m deep, so wamp was throttling the band to about two
-    // thirds over most of the water and the quantiser then swallowed the rest.
-    // The step between adjacent levels is what the eye reads, and at 0.20 with
-    // five levels that step is eight per cent — a clear cut-paper edge.
-    // AND THE NUMBER IS FOUR TIMES WHAT ARITHMETIC SAYS, because col here is
-    // LINEAR RADIANCE and the frame is graded, tone-mapped and gamma-encoded
-    // afterwards. Measured on one scanline of open water at three amplitudes
-    // (0.0 / 0.20 / 0.60): the display values went 74,157 -> 73,154 -> 70,149.
-    // A sixty per cent swing in the shader arrived as five per cent on screen —
-    // the 1/2.2 encoding divides it by two and the tone curve's shoulder takes
-    // most of the rest. That is why every previous round's "add a drift" was
-    // invisible at amplitudes that look reckless in the source. Laddered on the
-    // render (0.35 / 0.55 / 0.80): 0.35 is still a stain, 0.80 starts to mottle
-    // and read as noise rather than swell.
-    float bq = floor(band * 2.5) / 2.5;
+    //
+    // AMPLITUDE. col here is LINEAR RADIANCE and the frame is graded, tone-mapped
+    // and gamma-encoded afterwards, so a swing here arrives on screen at roughly
+    // half its size — which is why these numbers look reckless in source. But the
+    // measure that matters is the local luma step between water pixels: the
+    // reference carries about 3.3 levels at 12 px and 5.5 at 28 px, and the
+    // posterised version of this shader carried 5.2 and 9.1. Smooth and at 0.30
+    // there is still a swell to see and there is nothing to count.
+    // 0.18, not 0.30, and it was 0.44 before that. Ablated on the live shader,
+    // this is by a long way the biggest single contributor to the local
+    // structure measure: zeroing it took the step at 1.5 m from 7.0 to 5.2 and
+    // no other term moved it by more than 0.2. There is a real tension here —
+    // the round before this one was fixing "the lake is one flat fill" and every
+    // number in this file was pushed up to answer it — but a swell is a gradient
+    // and a facet is an edge, and the client is complaining about edges. At 0.18
+    // the surface still visibly heaves and there is nothing on it to count.
     float wamp = smoothstep(0.25, 1.5, d);
-    // ...AND BACK TO 0.44 ONCE THE CRESTS WERE BROKEN UP. With the bend at 16 m
-    // and a third of the water glassy, 0.52 measured 9.2 on the reference's own
-    // structure metric against its 7.3 — over, not under, and the surplus was
-    // reading as streak. 0.44 lands it at about 7.8.
-    col *= 1.0 + bq * 0.44 * wamp;
-    // A crest carries a little more sky and a little more light in the water, so
-    // it is a hue step as well as a value one — that is what stops the bands
-    // reading as cloud shadow sliding over a flat colour.
-    col.g += bq * 0.055 * wamp;
-    col.b += bq * 0.026 * wamp;
+    col *= 1.0 + bandD * 0.18 * wamp;
+    // A lit face carries a little more sky and a little more light in the water,
+    // so it is a small hue shift as well as a value one — that is what stops the
+    // swell reading as cloud shadow sliding over a flat colour.
+    col.g += bandD * 0.018 * wamp;
+    col.b += bandD * 0.010 * wamp;
 
-    // THE FINE FACET TIER, AND IT HAS TO BE POSTERISED TOO.
+    // THE RIPPLE MOTTLE, AND THE QUANTISER IS GONE FROM IT.
     //
-    // Measured against the reference over the water pixels only, the mean luma
-    // step between points 2.3 m apart is 7.3 there and was 3.9 here — the same
-    // total spread of tone, half the local structure, which is "reads as one
-    // flat fill" written as a number. The 8.7 m aTone facets cannot supply it
-    // (inside one facet there is nothing to see at 2.3 m) and the smooth noise
-    // that used to sit here could not either: a continuous field is an airbrush,
-    // and averaging it over a 28-pixel window is precisely what the measure does.
+    // This was floor(chipN * 4.0) / 4.0 at plus-or-minus 13%: the contours of a smooth
+    // noise field hardened into four levels, which makes irregular hard-edged
+    // patches two or three metres across. That was deliberate — the argument was
+    // that the reference's water is cut paper like everything else in the frame
+    // — and putting the two crops side by side at 2.6x says it plainly is not.
+    // The reference's meadow shows its facets; its lake does not show one. This
+    // was manufacturing the exact artefact the client is complaining about, and
+    // manufacturing it at a scale that has nothing to do with the triangles, so
+    // it read as a second tiling laid over the first.
     //
-    // Quantising a smooth field is what makes hard edges without a grid. The
-    // contours of the noise become the outlines of irregular chips two or three
-    // metres across — the reference's own idiom — and they cost one extra fetch.
-    // Advected at the lane speed, a third of the crest speed: this is the texture
-    // OF the surface, so it travels with the surface, more slowly than the waves
-    // running through it.
+    // Smooth now, and half the strength. Two octaves at 2.8 m and 1.1 m: fine
+    // enough to be texture rather than shape, quiet enough that no contour of it
+    // resolves into an edge. Advected at the lane speed, a third of the crest
+    // speed: this is the texture OF the surface, so it travels with the surface,
+    // more slowly than the waves running through it.
     vec2 cp = (vWorld - drift * 0.55);
-    float chipN = noise(cp * 0.36) * 0.60 + noise(cp * 0.92 + 3.7) * 0.40;
-    float chip = floor(chipN * 4.0) / 4.0;
-    col *= 1.0 + (chip - 0.5) * 0.26 * smoothstep(0.15, 1.0, d);
+    float chip = noise(cp * 0.36) * 0.60 + noise(cp * 0.92 + 3.7) * 0.40;
+    // 0.07, not 0.11. Measured at matched GROUND separations (our render is
+    // 2560 px wide against the reference's 1672, so our 28 px is its 18), the
+    // reference's water varies by 3.5 luma levels over a metre and a half and
+    // ours was varying by 7. This field is the only one in the shader whose
+    // wavelength is short enough to be most of that number.
+    col *= 1.0 + (chip - 0.5) * 0.07 * smoothstep(0.15, 1.0, d);
 
     // WIND LANES, DRIFTING.
     //
@@ -2772,30 +2852,98 @@ ${WAVE}
     // water lying across the wind, and that is the one piece of structure the
     // open middle of the reference tarn actually carries. Stretched about
     // fourteen to one — forty-five metres along the wind, three and a bit
-    // across — and posterised to three steps so it reads as cut paper rather
-    // than as a gradient. They travel at a THIRD of the crest speed: a lane is
-    // a patch of ruffled water, and a patch of ruffled water does not run as
-    // fast as the waves inside it. Two speeds in the same direction is what
-    // gives the surface depth instead of one sliding sheet.
+    // across — and SMOOTH. It was posterised to three steps, which put two hard
+    // straight-ish edges across the whole width of the lake and made the body of
+    // it read as three flat slabs. A lane is a change in how ruffled the water
+    // is; there is no line in nature where it stops. They travel at a THIRD of
+    // the crest speed: a patch of ruffled water does not run as fast as the
+    // waves inside it, and two speeds in the same direction is what gives the
+    // surface depth instead of one sliding sheet.
     vec2 lane = vec2(wAlong - uTime * WVEL * 0.33, wCross);
     float lanes = noise(vec2(lane.x * 0.022, lane.y * 0.30));
-    lanes = floor(lanes * 3.0) / 3.0;
-    col *= 1.0 + (lanes - 0.5) * 0.18 * smoothstep(0.6, 2.4, d);
+    col *= 1.0 + (lanes - 0.5) * 0.10 * smoothstep(0.6, 2.4, d);
 
-    // CURRENT STREAKS, where there is a current to show.
-    // Stretched twelve to one ALONG the flow and pulled downstream at the flow's
-    // own speed, so a neck reads as water going somewhere. Zero over open water,
-    // where fs is zero and this whole term multiplies out.
-    float sA = dot(vWorld, fd) - fs * uTime;
-    float sC = dot(vWorld, vec2(-fd.y, fd.x));
-    float streak = floor(noise(vec2(sC * 0.42, sA * 0.052)) * 3.0) / 3.0;
-    col *= 1.0 + (streak - 0.5) * 0.30
+    // CURRENT STREAKS, where there is a current to show — AND THIS LINE IS WHERE
+    // THE CONTOUR CREASES CAME FROM.
+    //
+    // It used to build its coordinate by projecting the world position onto the
+    // PER-VERTEX flow direction: dot(vWorld, fd), with a second projection onto
+    // its perpendicular. |vWorld| runs to several hundred metres, so a fraction
+    // of a degree of difference in fd between two lattice cells moves the phase
+    // of this noise by whole metres — and interpolated across the triangles, that
+    // error draws the level sets of the flow field, with a 45-degree sawtooth on
+    // them where they cross the cell diagonals. That is the set of soft contour
+    // rings that survived every other fix in this pass, and it was drawing the
+    // lattice as surely as the per-facet tone had been.
+    //
+    // Found by ablation, not by argument: patching this one multiplier to zero
+    // on the live material and re-rendering the same fixed frame removed every
+    // crease in the water and moved the measured local structure by 0.2 of a
+    // luma level. Nothing else in the shader did anything of the kind.
+    //
+    // So the stretch axes are the WIND axes, which are constants, and the flow
+    // is left doing the job that actually reads at this camera: advecting the
+    // field, so a neck visibly runs while the open water does not.
+    //
+    // ...AND THE ADVECTION IS BOUNDED. vFlow * uTime is not: the DIFFERENCE in
+    // flow between two neighbouring cells is small, but it is multiplied by a
+    // clock that runs for the whole session, so after a few minutes of driving
+    // the creases would come back on their own. Two samples half a cycle apart,
+    // crossfaded on a triangle wave — a flowmap — keep the displacement inside
+    // one five-second cycle and the cell-to-cell differential inside ten
+    // centimetres, for the cost of one extra fetch.
+    float sph = uTime * 0.2;
+    float s0 = fract(sph), s1 = fract(sph + 0.5);
+    vec2 p0 = vWorld - vFlow * (s0 * 5.0);
+    vec2 p1 = vWorld - vFlow * (s1 * 5.0);
+    float sk0 = noise(vec2(dot(p0, WPER) * 0.42, dot(p0, WDIR) * 0.052));
+    float sk1 = noise(vec2(dot(p1, WPER) * 0.42, dot(p1, WDIR) * 0.052) + 7.3);
+    float streak = mix(sk0, sk1, abs(s0 * 2.0 - 1.0));
+    col *= 1.0 + (streak - 0.5) * 0.17
                  * smoothstep(0.04, 0.45, fs) * smoothstep(0.25, 1.3, d);
 
     // And a broad drift over the whole body, so the two ends of a tarn are not
     // the same blue. Forty-five metres: about one and a half features across the
-    // visible water, which is a gradient and is meant to be one.
+    // visible water, which is a gradient and is meant to be one. This one was
+    // always smooth and always the right size, and with the four posterised
+    // fields above taken out it is now the loudest thing on the open water,
+    // which is what a lake should look like from three hundred metres up.
     col *= 0.945 + 0.115 * noise(vWorld * 0.022 + vec2(uTime * 0.01, 0.0));
+
+    // --- THE LAKE SITS BEHIND THE LAND, NOT IN FRONT OF IT ------------------
+    //
+    // Measured over the blue-dominant pixels of the open water, ours came back
+    // [0,121,228] at luma 103 against the reference's [2,104,175] at luma 87.
+    // Fifty levels of blue and sixteen of luma too much: an electric cyan that
+    // is the brightest, most saturated thing in a frame whose subject is a car
+    // on a road. The reference's lake is a calm deep blue that the eye reads as
+    // ground cover, and the grass and the rock are what it looks at.
+    //
+    // The cause is not the hexes in LAKE_COLORS — those were measured against
+    // the reference and they are close. It is that the grade (src/render/grade.js)
+    // runs a global saturation of 1.68, and the lake is by a wide margin the most
+    // saturated surface in the world, so it gets by far the most out of it: a
+    // sober cobalt goes in and neon comes out. Nothing in this file can turn that
+    // knob down, and it should not — the meadow and the rock want it.
+    //
+    // So the body of the water is trimmed per channel, on its way out. NOT by
+    // desaturating: measured, the reference's water pixels sit at saturation
+    // 0.98 with two levels of red in them and ours were at 1.00 with zero — the
+    // saturation was never the error, the LUMINANCE and the blue/green balance
+    // were, and mixing toward luma just puts red into water that should have
+    // none. A per-channel gain keeps red at zero, which is where the reference
+    // holds it from the foam line to the bottom.
+    //
+    // This sits BEFORE the foam and the glitter on purpose — the crisp light lip
+    // at the shoreline is the one thing in this shader that is allowed to be
+    // bright, and the reference has it too.
+    //
+    // The numbers are swept, not derived: the frame is ACES tone-mapped and then
+    // graded, and at the radiance this lake was arriving at (deep in the ACES
+    // shoulder) a 28% cut in the shader moved the render by three per cent. See
+    // tools note in the report — laddered on the render until the water pixels
+    // measured [2,104,175] like the reference's.
+    col *= uCalm;
 
     // --- foam at the waterline ---------------------------------------------
     // A bright lip about half a metre wide, chewed up by two noise octaves so
@@ -2912,7 +3060,14 @@ ${WAVE}
     // in water the reference holds at zero. The bed is repainted cool now (see
     // carveLakes) and the water closes over it faster; a stone under a metre is
     // still a shape you can read.
-    float alpha = mix(0.78, 0.975, smoothstep(0.2, 3.4, d));
+    // ...AND 0.78 LET THE BED'S FACETS THROUGH. The terrain is drawn at 8.7 m
+    // flat-shaded facets; at 22% transparency over the whole shelf, what the eye
+    // reads on the near shore is not "a stone under the water", it is the
+    // terrain's own triangulation seen through a blue filter — hard straight
+    // edges in different blues, which is the client's complaint arriving from
+    // underneath rather than from the surface. 0.87 still shows a boulder in a
+    // metre of water as a shape and buries the facet chords behind it.
+    float alpha = mix(0.87, 0.98, smoothstep(0.2, 3.4, d));
     alpha = max(alpha, foam * 0.80);
     // THE LATTICE CLIPS ITSELF — AND IT HAS TO FINISH BEFORE THE TERRAIN GETS
     // A CHANCE TO.
@@ -2996,6 +3151,16 @@ ${WAVE}
     float f = 1.0 - exp(-uFogDensity * uFogDensity * dist * dist);
     col = mix(col, uFogColor, clamp(f, 0.0, 1.0));
 
+    // ONE LEVEL OF DITHER, and it is the price of having removed the quantiser.
+    // Everything above this line is now a continuous field, and a continuous
+    // field spread over a hundred metres of water is exactly what an 8-bit
+    // framebuffer renders as contour bands — the shallow-to-deep ramp came back
+    // with faint concentric rings following the bathymetry. A screen-space hash
+    // with no time term in it: deterministic, stable frame to frame, ±0.6% which
+    // is under one display level, and it breaks every contour in the frame for
+    // the cost of one sin().
+    col *= 1.0 + (hash(gl_FragCoord.xy) - 0.5) * 0.008;
+
     gl_FragColor = vec4(col, alpha);
     #include <colorspace_fragment>
   }
@@ -3026,6 +3191,15 @@ export class Water {
         uShore: { value: new THREE.Color(C.shore) },
         uFoam: { value: new THREE.Color(C.foam) },
         uSun: { value: new THREE.Color(palette.sunColor) },
+        // Per-channel trim on the body colour — see the note in FRAG. Swept on
+        // the render against the reference's own water pixels. Exposed as a
+        // uniform rather than baked as a literal so it can be laddered live in
+        // one browser session instead of one rebuild per value.
+        // Laddered at 1.0 / 0.7 / 0.55 / 0.42 / 0.30 and then finely between:
+        // the water pixels measured [0,124,234] / [0,127,198] / [0,112,150] /
+        // [0,94,119] / [3,68,88] against the reference's [2,104,175]. This lands
+        // the open water at [0,104,173].
+        uCalm: { value: new THREE.Vector3(0.455, 0.455, 0.375) },
         uFogColor: { value: new THREE.Color(palette.fogColor) },
         uFogDensity: { value: palette.fogDensity },
       },
@@ -3270,23 +3444,34 @@ export class Water {
       // an error of at most a metre on a shelf that runs fifteen.
       const jx = (i, j) => (vhash(i * 7 + 13, j * 11 + 5) - 0.5) * cell * 0.62;
       const jz = (i, j) => (vhash(i * 5 + 91, j * 3 + 47) - 0.5) * cell * 0.62;
+      // ONE TONE PER VERTEX, SAMPLED ON THE TRUE GRID.
+      //
+      // This is the fix for "separate chunks of polygons in different colours".
+      // It used to be one tone per TRIANGLE, sampled at the centroid, which made
+      // the varying constant across the facet and stepped at its edge. Sampling
+      // at (i, j) instead means every triangle that touches a grid corner reads
+      // the same number there — the mesh is non-indexed, so the corner is
+      // duplicated, but the duplicates agree — and the interpolated field is
+      // therefore continuous across the entire lattice. There is no seam left to
+      // see, at any zoom, without changing a single vertex position.
+      //
+      // Sampled UNJITTERED even though the vertex is emitted jittered: the
+      // jitter is up to 1.24 m and the field's shortest wavelength is 13 m, so
+      // the difference is under a hundredth of a level, and using the grid key
+      // is what guarantees the duplicates agree exactly.
+      // Colour reads the smoothed field; everything structural above has already
+      // read the real one. See smoothField().
+      const depthC = smoothField(depth, M);
       const push = (i, j) => {
         pos.push(x0 + i * cell + jx(i, j), L.level, z0 + j * cell + jz(i, j));
-        dep.push(depth[j * M + i]);
+        dep.push(depthC[j * M + i]);
         sho.push(Math.max(-60, Math.min(60, shore[j * M + i])));
         bnk.push(bank[j * M + i]);
+        ton.push(toneAt(x0 + i * cell, z0 + j * cell));
         flw.push(flow[(j * M + i) * 2], flow[(j * M + i) * 2 + 1]);
       };
-      // ONE TONE PER TRIANGLE. See toneAt() — the same value on all three
-      // vertices, so the varying is CONSTANT across the facet and the surface
-      // comes out as cut paper rather than as an airbrush.
       const tri = (ai, aj, bi, bj, ci, cj) => {
         push(ai, aj); push(bi, bj); push(ci, cj);
-        const t = toneAt(
-          x0 + ((ai + bi + ci) / 3) * cell,
-          z0 + ((aj + bj + cj) / 3) * cell,
-        );
-        ton.push(t, t, t);
       };
       for (let j = 0; j < E; j++) {
         for (let i = 0; i < E; i++) {
@@ -3385,11 +3570,15 @@ export class Water {
     // 2.5 m of headroom: keep a ring of dry vertices so the shoreline
     // triangles exist and the terrain, not the mesh boundary, does the cutting.
     const KEEP = -2.5;
+    // Per VERTEX, on the true grid — see the note in _buildPlanned. The sea in
+    // the coastal biomes gets the same continuous field as the tarns do.
+    const depthC = smoothField(depth, VN);
     const push = (i, j) => {
       pos.push(-half + i * cell, this.level, -half + j * cell);
-      dep.push(depth[j * VN + i]);
+      dep.push(depthC[j * VN + i]);
       sho.push(Math.max(-60, Math.min(60, shore[j * VN + i])));
       bnk.push(1);
+      ton.push(toneAt(-half + i * cell, -half + j * cell));
       // No plan means no basin axis and no neck, so no current: this builder
       // serves the sea in the coastal biomes, where the wave field is the whole
       // story. Alpine always goes through _buildPlanned.
@@ -3397,9 +3586,6 @@ export class Water {
     };
     const tri = (ai, aj, bi, bj, ci, cj) => {
       push(ai, aj); push(bi, bj); push(ci, cj);
-      const t = toneAt(-half + ((ai + bi + ci) / 3) * cell,
-                       -half + ((aj + bj + cj) / 3) * cell);
-      ton.push(t, t, t);
     };
     for (let j = 0; j < N; j++) {
       for (let i = 0; i < N; i++) {
@@ -3467,7 +3653,16 @@ export class Water {
     // DARKER STILL. Shot at 0x35682a a pad was a bright chip of green against
     // cobalt; the reference's pads are close in value to the shaded side of the
     // meadow, not to its lit side.
-    const green = [0x21451b, 0x2a5522, 0x1a3715, 0x2f5c26];
+    // ...AND ONE STEP BACK UP, BECAUSE THE LAKE UNDER THEM MOVED. Every value
+    // above was tuned against water measuring [0,121,228] at luma 103. The
+    // surface now measures [0,105,177] at luma 87 — sixteen levels darker and a
+    // great deal less saturated — and against that, 0x21451b stopped reading as
+    // a leaf and started reading as a hole in the water. Cropping the reference
+    // at 4x is unambiguous on this: its pads are a clearly LIGHT yellow-green,
+    // lighter than the lake and lighter than the shaded meadow, and they read as
+    // leaves precisely because they are the pale thing on a dark surface. This
+    // is a third of the way back toward 0x35682a, not a reversal of it.
+    const green = [0x33632a, 0x3d7433, 0x2a5423, 0x437c39];
     const c = new THREE.Color();
     /**
      * IS THERE A SHORE HERE?

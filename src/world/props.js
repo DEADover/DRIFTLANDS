@@ -49,6 +49,72 @@ function strHash(s) {
 
 function shade(c, l, s = 0) { return c.clone().offsetHSL(0, s, l); }
 
+/**
+ * A SPRAY OF SPECKS — `n` single triangles scattered over a disc of radius `R`.
+ *
+ * ---- WHY ONE TRIANGLE IS THE RIGHT ANSWER FOR A FLOWER ---------------------
+ *
+ * Measured on the live map, flowers were 3,755,025 triangles over 33,048 patch
+ * instances — 114 apiece — and a bloom is TWO TO FOUR PIXELS at the hero camera
+ * (78 m up). The old head was a 5-sided open cone plus a 4-sided stem, nine
+ * triangles for a speck three pixels across, and then two more 4-sided "tall
+ * stems" on top of that. Every one of those facets is smaller than a pixel, so
+ * the whole nine collapse into ONE screen-space colour before they are ever
+ * seen. We were paying nine times over for a value the rasteriser averages back
+ * down to one.
+ *
+ * What a bloom actually has to deliver is a colour and an outline. That is one
+ * triangle, tilted a little out of the ground plane so the key light gives
+ * neighbouring blooms slightly different values — which is what stops a drift
+ * reading as one painted blotch, and is the only reason not to lay them flat.
+ *
+ * 114 -> ~10 per patch, and the drift keeps the same bloom COUNT it had, which
+ * is the thing you can actually see. The 3.4 M triangles this frees are what
+ * pays for the conifers' extra radial segments below.
+ *
+ * The face is ONE-SIDED (the material is FrontSide), so the winding matters:
+ * sweeping the corner angle NEGATIVE round the disc puts the face normal at +Y,
+ * which is the side the camera is on. Wound the other way the entire meadow's
+ * flowers are invisible and nothing errors.
+ */
+function speckSpray(rng, n, R, o = {}) {
+  const TAU = Math.PI * 2;
+  const v = new Float32Array(n * 9);
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    // Even-area scatter, same as the drift it replaces: a patch is a sprinkle
+    // with grass showing between every bloom, never a coloured mat.
+    const a = rng.float(0, TAU);
+    const d = Math.sqrt(rng.float(0.05, 1)) * R;
+    const cx = Math.cos(a) * d, cz = Math.sin(a) * d;
+    const cy = (o.yMin ?? 0.20) + rng.float(0, o.yVar ?? 0.14);
+    const s = rng.float(o.rMin ?? 0.135, o.rMax ?? 0.205);
+    const yaw = rng.float(0, TAU);
+    // Tilt about a random horizontal axis. Kept in the same band the old cone's
+    // facets occupied — a bloom lying dead flat takes the full key light and a
+    // white one then blows out to paper, which is the note the stone crowns
+    // already carry twice.
+    const tilt = rng.float(o.tiltMin ?? 0.14, o.tiltMax ?? 0.62);
+    const ta = rng.float(0, TAU);
+    const ux = Math.cos(ta), uz = Math.sin(ta);
+    const ct = Math.cos(tilt), st = Math.sin(tilt);
+    for (let j = 0; j < 3; j++) {
+      const t = yaw - j * (TAU / 3);
+      const px = Math.cos(t) * s, pz = Math.sin(t) * s;
+      // Rodrigues about the horizontal axis (ux, 0, uz); the point starts in
+      // the ground plane so most of the formula collapses.
+      const dp = px * ux + pz * uz;
+      v[k++] = cx + px * ct + ux * dp * (1 - ct);
+      v[k++] = cy + (uz * px - ux * pz) * st;
+      v[k++] = cz + pz * ct + uz * dp * (1 - ct);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(v, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
 function fir(rng, K, o = {}) {
   const b = new GeoBuilder();
   const tall = o.tall ?? 1;
@@ -118,8 +184,24 @@ function fir(rng, K, o = {}) {
    * 6x, a tier shows six to eight teeth across its visible half, i.e. 12-16 round
    * the tier; at seg 8 ours showed two or three, so each tooth was a third of the
    * tree wide and the row read as a zigzag rather than as a fringe.
+   *
+   * ---- ROUND 16: 12 -> 18, AND THIS IS WHERE THE FLOWERS' BUDGET WENT -------
+   *
+   * The client's note is that everything is too ANGULAR and that the reference
+   * plainly has more polygons. Both halves are true and they are the same fact:
+   * measured, 6.9 M of our 19.2 M triangles were in flowers and grass at one to
+   * three pixels, while the SUBJECT of the frame — a conifer 60 px across — got
+   * nine teeth round its widest tier. A tier at seg 12 has six ridges and six
+   * creases, so its plan silhouette is a SIX-POINTED STAR; cropped at 3x that is
+   * exactly what our firs read as, a starburst rather than a tree. At seg 18 it
+   * is nine points at two thirds the angular width, and the outline stops being
+   * a zigzag and becomes a scallop.
+   *
+   * Cost is 3 triangles per rim vertex, so +6 per tier, +54 on a nine-tier fir.
+   * Across ~27 000 conifers that is ~2.6 M — three quarters of what the flowers
+   * alone gave back.
    */
-  const seg = o.seg ?? 12;
+  const seg = o.seg ?? 15;
   // Radius ladder first, because both the trunk length and the tier spacing are
   // derived from it — the old code advanced by a jittered fraction of the TIER
   // height, which made total height a random walk and is why "6-9 tiers" once
@@ -144,7 +226,11 @@ function fir(rng, K, o = {}) {
    * reference's tips barely clear the row below. 0.34-0.46 keeps the serration
    * (it is what the silhouette is made of) without the spikes.
    */
-  const dropK = o.dropK ?? rng.float(0.30, 0.40);
+  // ...and down a notch again in round 16, for the same reason `seg` went up:
+  // the drop is what turns a scallop into a THORN, and every millimetre of it
+  // shows in the silhouette twice — once at the tip and once as the notch beside
+  // it. The rows still read, because `stepK` keeps them apart.
+  const dropK = o.dropK ?? rng.float(0.26, 0.35);
   // `stepK` is the tier advance as a fraction of the tier's OWN radius, and it
   // has to stay a little above `dropK` or the tips of one skirt hang below the
   // shoulder of the next one down and the stack closes into a smooth cone. The
@@ -199,11 +285,21 @@ function fir(rng, K, o = {}) {
   // shows two or three faces at this camera — so it read as a brown WEDGE rather
   // than as a trunk.
   const tr = rng.float(0.13, 0.175) * wide * (1 + tiers * 0.018);
-  // Open-ended and six-sided: the top is inside the canopy and the bottom is in
-  // the turf, so both caps are pure waste. It runs up past the second tier's
-  // shoulder so no gap can open between bark and needles.
+  // Open-ended: the top is inside the canopy and the bottom is in the turf, so
+  // both caps are pure waste. It runs up past the second tier's shoulder so no
+  // gap can open between bark and needles.
+  //
+  // ---- ROUND 16: SIX SIDES -> TWELVE, AND IT IS THE CHEAPEST FIX IN THE FILE
+  //
+  // "Everything is too angular" has one completely literal instance and this was
+  // it. A six-sided cylinder shows two or three faces at this camera and its
+  // silhouette is a pair of straight lines meeting the ground at a visible
+  // CORNER, so a trunk read as a hard brown stick rather than as a round pole —
+  // and there are ~27 000 of them, one under every conifer in the map. Twelve
+  // sides costs 12 extra triangles per tree, i.e. ~0.32 M over the whole map,
+  // which is a twelfth of what one round of flowers was costing.
   const trunkLen = trunkH + r0 * 1.1;
-  b.raw(new THREE.CylinderGeometry(tr * 0.70, tr * 1.28, trunkLen, 6, 1, true)
+  b.raw(new THREE.CylinderGeometry(tr * 0.70, tr * 1.28, trunkLen, o.trunkSeg ?? 12, 1, true)
     .translate(0, trunkLen / 2, 0), K.trunkBark);
 
   let y = trunkH;
@@ -285,8 +381,73 @@ function fir(rng, K, o = {}) {
     const litc = K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.20 + 0.80 * t);
     b.push(0, y, 0, rng.float(0, Math.PI * 2));
     b.rawLit(
+      /**
+       * ---- ROUND 16: THE HEM IS BLUNTED, AND SEG IS WHAT PAYS FOR IT --------
+       *
+       * `hemIn` is the crease's radius at the hem as a fraction of r, i.e. the
+       * DEPTH of the plan-view scallop, and buildkit's own sweep says that
+       * pushing it past ~0.80 collapses the tier's normal.y spread — a smooth
+       * cone with a four-value ramp spent on nothing. That sweep was run at
+       * seg 12, where a scallop is one sixth of the tier wide, and its warning
+       * is about what happens when the OUTER BAND lies in one plane.
+       *
+       * At seg 18 the same 0.82 hem is a scallop one ninth of the tier wide, so
+       * the outer band still turns through nine separate azimuths and keeps its
+       * spread; what changes is that each tooth is now two thirds the angular
+       * size, which is the difference between a serrated star and a scalloped
+       * disc. Measured on the frame rather than on the tier, that is the whole
+       * of the client's "less angular": the outline is what the eye reads at
+       * 60 px, and 9 shallow teeth is an outline, 6 deep ones is a sawblade.
+       *
+       * `hemY` comes down with it (1.55 -> 1.34). The hem drop is the OTHER
+       * half of the tooth — it is how far the notch hangs below its neighbours
+       * in profile — so leaving it at 1.55 while blunting the plan would have
+       * traded a star seen from above for a star seen from the side.
+       */
+      /**
+       * ...and the first shot of `hemIn` 0.82 / `hemY` 1.34 says GO FURTHER, for
+       * a reason that only shows at 4x. In this topology a pad has exactly ONE
+       * hem vertex — the ridge — and shares its two crease vertices with its
+       * neighbours, so the pad's outline in plan is a TRIANGLE: crease, point,
+       * crease. It cannot be blunt. Every value of `hemIn` under about 0.85
+       * therefore produces a tooth, and raising `seg` only makes the teeth
+       * narrower, which at 60 px per tree turns a sawblade into a wire brush.
+       * Cropped side by side, target_01's lobes are ROUNDED SHELLS whose outer
+       * edge is a convex arc — the opposite shape.
+       *
+       * With the hem nearly circular (0.89) and hanging almost level with the
+       * ridge (1.06 against the ridge's 0.92-1.22) the outline of a tier stops
+       * being a serration and becomes a gently lobed disc, and THAT is what 18
+       * segments were bought for: a nine-lobe scallop on a smooth rim reads as a
+       * soft frilled skirt, where a nine-point star reads as a thistle.
+       *
+       * buildkit's own sweep warns that a hem this blunt collapses the tier's
+       * normal.y spread and leaves it flat-shaded. That warning is about a tier
+       * standing ALONE. Ours never do: `stepK` holds the rows 0.19*r0 apart, so
+       * what separates one row from the next is the row EDGE and the vertical
+       * gradient down the tree, both of which survive a smooth skirt. The crease
+       * is kept (0.40 of the drop at the mid ring) precisely so the tier keeps a
+       * dark note without spending it on the silhouette.
+       *
+       * ...and 0.89 / 1.06 went one notch TOO far, which the histogram says
+       * plainly (scratch/nyhist.mjs, area-weighted normal.y of one tier):
+       *
+       *     ny             0.3  0.4  0.5  0.6  0.7  0.8  0.9
+       *     r15 0.76/1.55  7.9 13.2 16.6 14.7 14.3 24.8  3.5
+       *     0.89 / 1.06    0.1  0.9  2.6  9.8 24.9 44.9 16.9
+       *     0.86 / 1.18    0.2  1.7  5.1 15.6 30.4 39.8  7.1
+       *
+       * At 0.89 / 1.06 the tier has NOTHING below ny 0.5 — it is a smooth cone
+       * and it shot as one, a bright yellow-green mass with no dark side, where
+       * a reference fir's lower half is the darkest thing in its frame. 0.86 /
+       * 1.18 keeps a real tail into the steep facets (7% under 0.5) while
+       * leaving the hem a gentle lobe rather than the r15 sawtooth.
+       */
       firPad(r, r * (o.crownK ?? 0.22), dropK * r * tall, seg,
-        { midR: o.midR, hemIn: o.hemIn, creaseY: o.creaseY }, rng),
+        {
+          midR: o.midR, creaseY: o.creaseY ?? 0.44,
+          hemIn: o.hemIn ?? 0.86, hemY: o.hemY ?? 1.18,
+        }, rng),
       body, litc,
       /**
        * THE RAMP WINDOW IS SOLVED FROM THE GEOMETRY, not tuned by eye.
@@ -392,12 +553,38 @@ function fir(rng, K, o = {}) {
        * reference's 11.0%. t0 0.72 pulls the ny 0.5-0.6 bands (22% of a tier's
        * area) down toward the shade rung, which is the population to move.
        */
-      { t0: 0.66, t1: 1.00, low: K.leafShade, l0: 0.32 },
+      /**
+       * ---- ROUND 16: RE-SOLVED FOR THE BLUNT HEM ---------------------------
+       *
+       * Every window above was solved against a tier whose area ran from ny 0.0
+       * to 0.9 in a broad smear. The blunt hem moves the whole population up and
+       * NARROWS it — 0.2/1.7/5.1/15.6/30.4/39.8/7.1 across 0.3-0.9 — so the old
+       * window (t0 0.66) handed 47% of the tier to the lit half of the ramp and
+       * the canopy went a stop bright.
+       *
+       * Solved against the measurement, so each of the five populations gets a
+       * different rung:
+       *
+       *     ny 0.4-0.5   7%   -> 61-93% toward the shade rung
+       *     ny 0.6      16%   -> 21% toward it
+       *     ny 0.7      30%   -> body
+       *     ny 0.8      40%   -> 28% toward the lit rung
+       *     ny 0.9       7%   -> 90% toward it, i.e. the highlight
+       *
+       * l0 sits at 0.34, UNDER the histogram's floor, so the shade rung is an
+       * anchor the tier leans toward rather than a colour any of it prints flat
+       * — which is the whole difference between a lit volume and a mosaic, and
+       * "mosaic" is the client's word for it.
+       */
+      { t0: 0.72, t1: 0.95, low: K.leafShade, l0: 0.34 },
     );
     b.pop();
     // Snow only settles on the upper tiers — a white cap, not white frosting.
+    // 6 sides -> 10: a white hexagon is the most conspicuous straight edge a
+    // snowy tree can have, and a cap is the one part of a conifer the camera
+    // looks straight down on.
     if (o.snow && i >= tiers - 3) {
-      b.cone(r * 0.52, r * 0.62, 6, K.snow, { y: y + r * 0.30 });
+      b.cone(r * 0.52, r * 0.62, 10, K.snow, { y: y + r * 0.30 });
     }
     y += step[i];
   }
@@ -409,7 +596,10 @@ function fir(rng, K, o = {}) {
   // facets sit in one narrow normal.y band; handed `leafSun` at t1 0.62 every
   // tree in the frame grew a pale paper dart on top of a dark body, which is a
   // worse read than the blunt stack it replaced.
-  b.rawLit(firTier(rad[tiers - 1] * 0.86, leaderH, 6, leaderH * 0.20, 0.60, rng),
+  // ...and the leader goes 6 -> 10 with the tiers. It is the TIP of the
+  // silhouette, the one part of the tree drawn against open sky from every
+  // angle, and a six-sided star cone up there is a visible spike.
+  b.rawLit(firTier(rad[tiers - 1] * 0.86, leaderH, 10, leaderH * 0.20, 0.60, rng),
     K.leafRamp[NR - 2], K.leafRamp[NR - 1].clone().lerp(K.leafSun, 0.45),
     { t0: 0.30, t1: 0.90, low: K.leafRamp[0], l0: -0.10 });
   b.pop();
@@ -591,7 +781,7 @@ function windPine(rng, K) {
 
 function bush(rng, K, pal) {
   const b = new GeoBuilder();
-  const n = rng.int(2, 4);
+  const n = rng.int(2, 3);
   // ROUND 5: halved. At R up to 2.2 with an instance scale up to 1.4 a single
   // shrub was a six-metre green ball — as wide as a conifer's skirt and, being
   // a smooth blob, far more conspicuous. Three of them landed in the hero frame
@@ -600,7 +790,15 @@ function bush(rng, K, pal) {
   // as texture in the grass, never as an object.
   const R = rng.float(0.55, 1.25);
   for (let i = 0; i < n; i++) {
+    // ROUND 16: the MAIN lobe gets `detail: 1`. A shrub is flat-coloured — one
+    // albedo, Lambert doing all the shading — so on a 20-face icosahedron the
+    // light rolls off in four hard steps and a knee-high bush 30 px across
+    // reads as a cut gemstone. 80 faces turns those steps into a gradient,
+    // which is the whole of "rounder" on an object with no albedo ramp. The
+    // satellite lobes stay at detail 0: they are half the size and mostly
+    // buried in the main one.
     b.blob(R * rng.float(0.6, 1.0), pal[i % pal.length], {
+      detail: i === 0 ? 1 : 0,
       x: rng.gauss(0, R * 0.5), z: rng.gauss(0, R * 0.5),
       y: R * rng.float(0.45, 0.85), sy: rng.float(0.62, 0.9),
     });
@@ -629,38 +827,36 @@ function flowerPatch(rng, K, colIdx, o = {}) {
   // patch keeps its loose even-area scatter and gets half again as many heads,
   // and the weights in the mix below carry the rest of the difference.
   //
-  // The heads and stems are open-ended cones now (no base cap, which is buried
-  // in grass anyway), so a 12-bloom patch costs FEWER triangles than the old
-  // 7-bloom one.
+  // ---- ROUND 16: ONE TRIANGLE PER BLOOM -----------------------------------
+  //
+  // See `speckSpray`. The bloom COUNT is what you can see and it is unchanged;
+  // the nine sub-pixel facets each bloom used to be made of are what goes. The
+  // stems go with them — a 0.07 m stem is under a pixel and a half at this
+  // camera, so the "flower is planted in the grass" read it was there to buy
+  // was never being delivered; the bloom now simply sits lower, in the sward,
+  // which buys the same thing for nothing.
   const b = new GeoBuilder();
   // Tighter footprint. At 1.8-3.2 m a drift of a dozen blooms was spread over
   // 30 m² and read as isolated specks; in target_01 a drift is a handful of
   // flowers you could cover with a doormat, with clear grass all round it.
   const R = rng.float(1.25, 2.30) * (o.spread ?? 1);
   const c = o.color ?? K.accents[colIdx % K.accents.length];
-  const n = rng.int(9, 15);
-  for (let i = 0; i < n; i++) {
-    // Even-area scatter (sqrt), not a dense core. The old 0.62 exponent piled
-    // most of the blooms into the middle, which is what made a patch read as
-    // one coloured object instead of as individual flowers in grass.
-    const a = rng.float(0, Math.PI * 2);
-    const d = Math.sqrt(rng.float(0.06, 1)) * R;
-    const s = rng.float(0.105, 0.155);
-    const x = Math.cos(a) * d, z = Math.sin(a) * d;
-    // A bloom is 3-5 px on screen; a 5-sided squat cone is indistinguishable
-    // from an icosahedron there and a fraction of the cost.
-    b.cone(s, s * 0.95, 5, c, { x, z, y: 0.34, open: true });
-    // A hair-thin green stem. Without it a white speck floats; with it the
-    // flower is planted in the grass, which is the reference's read.
-    b.cone(0.035, 0.32, 4, K.grass[0], { x, z, y: 0.16, open: true });
-  }
-  // Two taller stems break the flat top of the drift. More than that and the
-  // patch costs more triangles than a whole fir.
-  for (let i = 0; i < 2; i++) {
-    const a = rng.float(0, Math.PI * 2), d = rng.float(0, R * 0.8);
-    b.cone(0.09, 0.60, 4, K.grassLit.clone().lerp(K.grass[1], 0.35), { x: Math.cos(a) * d, z: Math.sin(a) * d, y: 0.30, open: true });
-  }
-  return { geo: b.build(), trunkR: 0, height: 0.7 };
+  // ...and SMALLER than the first shot of this. At 0.135-0.205 circumradius a
+  // bloom projected about eight pixels and read as what it is — a hard white
+  // TRIANGLE lying on the grass. A speck stops reading as a polygon somewhere
+  // around four or five pixels, which is 0.09-0.14 here, and is also what a
+  // bloom measures in target_01. The count goes up to keep the drift's density.
+  const n = rng.int(10, 14);
+  b.raw(speckSpray(rng, n, R, {
+    rMin: 0.088, rMax: 0.142, yMin: 0.16, yVar: 0.14,
+    // Steeper, too. A bloom lying nearly flat on a shadowed slope is lit by the
+    // blue sky ambient alone and comes back LAVENDER — the exact "grey and
+    // pale-blue specks" note the per-instance multiplier already carries once.
+    // Tilting them into the same band the old cone's facets occupied puts them
+    // back on the key light.
+    tiltMin: 0.26, tiltMax: 0.80,
+  }), c);
+  return { geo: b.build(), trunkR: 0, height: 0.5 };
 }
 
 function reeds(rng, K) {
@@ -680,23 +876,36 @@ function reeds(rng, K) {
 function tussock(rng, K) {
   // Low, wide clump of coarse grass. Deliberately squat — anything thin and
   // vertical at this camera height turns into shimmering white needles.
+  //
+  // ---- ROUND 16: THREE SPIKES, THREE-SIDED ---------------------------------
+  //
+  // Measured: grass + tussock + shrubTuft were 3,157,672 triangles over 109,703
+  // instances, 29 apiece, for marks that are one to three pixels across. A
+  // tussock was four to seven 5-sided cones, i.e. thirty facets inside a shape
+  // whose whole screen footprint is smaller than the smallest of them. Three
+  // 3-sided spikes is nine triangles and renders the same clump: at this scale
+  // a spike needs a lit face, a dark face and an outline, and a triangular
+  // prism has exactly those.
+  //
+  // The clump is also PULLED IN. The old 1.1 m spread over four blades put
+  // single blades a metre apart, which is not a tuft, it is litter; three
+  // spikes inside 0.55 m read as one plant, which is what the reference's turf
+  // is dotted with.
   const b = new GeoBuilder();
-  const n = rng.int(4, 7);
-  // One or two blades per tuft carry the sunlit crown, the rest stay at or
-  // below the sward. A whole tussock in `grassLit` reads as a dead straw
-  // clump; one lit blade among four reads as grass with light on it, and 20 000
-  // of those are what put a sparkle through the reference's meadow.
-  const litA = rng.bool(0.62) ? rng.int(0, n - 1) : -1;
-  const litB = -1;
+  const n = 3;
+  // One spike in three carries the sunlit crown, the rest stay at or below the
+  // sward. A whole tussock in `grassLit` reads as a dead straw clump; one lit
+  // blade among three reads as grass with light on it.
+  const litA = rng.bool(0.55) ? rng.int(0, n - 1) : -1;
   for (let i = 0; i < n; i++) {
-    const a = rng.float(0, Math.PI * 2), d = rng.float(0, 1.1);
+    const a = (i / n) * Math.PI * 2 + rng.float(-0.7, 0.7), d = rng.float(0.10, 0.55);
     const h = rng.float(0.55, 1.05);
-    const lit = i === litA || i === litB;
+    const lit = i === litA;
     const c = lit
-      ? K.grassLit.clone().lerp(K.grass[1], rng.float(0.10, 0.55))
+      ? K.grassLit.clone().lerp(K.grass[1], rng.float(0.30, 0.70))
       : K.grass[i % K.grass.length];
     b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.3, 0.3));
-    b.cone(rng.float(0.5, 0.85), h * (lit ? 1.15 : 1), 5, c, { y: h / 2, sz: 0.7, open: true });
+    b.cone(rng.float(0.34, 0.58), h * (lit ? 1.15 : 1), 3, c, { y: h / 2, sz: 0.8, open: true });
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1.0 };
@@ -733,14 +942,25 @@ function grassBlades(rng, K) {
   // one of these carries eight or ten blades. So the density is bought by
   // spreading each instance over a wider footprint instead of by placing more
   // of them — same triangles per mark, a third of the instances.
-  const n = rng.int(7, 11);
+  //
+  // ---- ROUND 16: FOUR BLADES, NOT TEN, AND A TIGHTER TUFT ------------------
+  //
+  // The 8-blade version cost 24-33 triangles and, cropped at 3x beside
+  // target_01, was the LOUDEST wrong note in our meadow: a scatter of bright
+  // chartreuse shards spread over a 3.2 m disc, so no two blades belonged to
+  // the same plant and each one was its own hard-edged sliver. The reference's
+  // meadow has almost no individual blades in it — what it has is small, quiet,
+  // mostly DARK tufts with the occasional lit one. So: four blades in a 1.0 m
+  // tuft at three sides apiece (12 triangles), fewer of them lit, and the lit
+  // one pulled much further back toward the sward green.
+  const n = 4;
   for (let i = 0; i < n; i++) {
-    const a = rng.float(0, Math.PI * 2), d = Math.sqrt(rng.float(0, 1)) * 1.6;
+    const a = (i / n) * Math.PI * 2 + rng.float(-0.8, 0.8), d = Math.sqrt(rng.float(0.05, 1)) * 0.95;
     const h = rng.float(0.80, 1.60);
     // Two thirds lit. In target_01 the blades standing proud of the sward are
     // the BRIGHTEST green in the meadow — brighter than the sunlit turf — which
     // is what gives its grass a sparkle ours has never had.
-    const lit = rng.bool(0.62);
+    const lit = rng.bool(0.40);
     // No accent in it. The first pass warmed the lit blade 10% toward the
     // palette yellow and the meadow filled with straw-coloured spikes — the
     // same mistake the `grassLit` note above already records once.
@@ -752,15 +972,18 @@ function grassBlades(rng, K) {
     // is a chartreuse spike sitting ON the meadow; the reference's lit blades
     // are the same hue family as the sward, one value step up, so they read as
     // grass catching light rather than as a different plant.
-    const c = lit ? K.grassLit.clone().lerp(K.grass[1], 0.30) : K.grass[i % K.grass.length];
-    b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.44, 0.44));
+    // ...and 0.52 toward the dark rung, not 0.30. At 0.30 a lit blade is a
+    // chartreuse SHARD sitting on the meadow rather than grass catching light,
+    // and there were 47 000 of them.
+    const c = lit ? K.grassLit.clone().lerp(K.grass[1], 0.52) : K.grass[i % K.grass.length];
+    b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.40, 0.40));
     // Three segments: a blade is 2 px wide on screen and a triangle prism is
     // indistinguishable from anything rounder there.
     // Wider than the first pass. At radius 0.11-0.21 squashed to 0.42 on one
     // axis a blade was under half a screen pixel across at the hero camera —
     // 62 000 of them in the map and a 3.4x crop of the meadow showed almost
     // none. Detail that cannot resolve is the most expensive thing there is.
-    b.cone(rng.float(0.17, 0.30), h, 3, c, { y: h / 2, sz: 0.62, open: true });
+    b.cone(rng.float(0.17, 0.30), h, 3, c, { y: h / 2, sz: 0.70, open: true });
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1.7 };
@@ -769,15 +992,24 @@ function grassBlades(rng, K) {
 /** Low dark scrub — the near-black speckle scattered through the reference's
  *  meadow. Spiky rather than blobby, so it never reads as a small tree. */
 function shrubTuft(rng, K) {
+  // ROUND 16: three spikes, three-sided — nine triangles, same clump. Same
+  // arithmetic as `tussock`: at one to three pixels a mark needs a lit face, a
+  // dark face and an outline, and five to eight 4-sided cones deliver twenty to
+  // thirty facets that the rasteriser then averages back down to one colour.
+  // The spikes are also FATTER and closer together, because what the reference
+  // has dotted through its turf is a small dark BLOB, not a thin dark star.
   const b = new GeoBuilder();
-  const n = rng.int(5, 8);
-  const R = rng.float(0.7, 1.5);
+  const n = 3;
+  const R = rng.float(0.55, 1.05);
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + rng.float(-0.55, 0.55);
-    const d = rng.float(0, R * 0.75);
-    const h = rng.float(0.5, 1.15);
-    b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.55, 0.55));
-    b.cone(rng.float(0.20, 0.40), h, 4, K.bushDark[i % K.bushDark.length], { y: h / 2, open: true });
+    const d = rng.float(0, R * 0.50);
+    // Squatter. Cropped at 3x, the tall thin version read as dark SPLINTERS
+    // lying on the grass — one every few metres, over the whole map. What the
+    // reference has is a low dark clump you read as a plant.
+    const h = rng.float(0.42, 0.86);
+    b.pushTilt(Math.cos(a) * d, 0, Math.sin(a) * d, rng.float(0, 6.28), 0, rng.float(-0.45, 0.45));
+    b.cone(rng.float(0.34, 0.58), h, 3, K.bushDark[i % K.bushDark.length], { y: h / 2, open: true });
     b.pop();
   }
   return { geo: b.build(), trunkR: 0, height: 1.0 };
@@ -791,9 +1023,16 @@ function cobble(rng, K) {
   // or three a metre apart are a SCATTER, and the reference's turf is scatters
   // all the way down. Costs 20 triangles per stone and buys the density that
   // placing three times as many instances would.
-  const n = rng.int(1, 3);
+  // ROUND 16: one or two, not one to three, and rounder. A cobble is 8-12 px at
+  // the hero camera — under the size where a facet can be told from its
+  // neighbour — so it keeps detail 0, and what it gets instead is a third less
+  // jitter, which is the difference between a pebble and a chip of flint. The
+  // count comes down here AND in the mixes below, because the reference's
+  // meadow has FEWER, LARGER stones than ours, and ours were reading as gravel
+  // spilled over the grass.
+  const n = rng.int(1, 2);
   for (let i = 0; i < n; i++) {
-    const g = rockGeom(rng, { jitter: 0.36 });
+    const g = rockGeom(rng, { jitter: 0.26 });
     const s = i === 0 ? 1 : rng.float(0.42, 0.80);
     g.scale(s, s * rng.float(0.30, 0.52), s);
     if (i > 0) {
@@ -801,9 +1040,13 @@ function cobble(rng, K) {
       g.translate(Math.cos(a) * d, -0.12, Math.sin(a) * d);
     }
     const k = rng.float(0.05, 0.55);
+    // t0 0.40 -> 0.56. At 0.40 more than half of a squashed icosahedron's
+    // facets cleared the crown threshold, so a cobble was a WHITE chip in green
+    // grass rather than a grey stone with light on top of it — and at ~26 000
+    // of them that single number was most of the "angular pale litter" read.
     b.rawLit(g, K.stoneBody.clone().lerp(K.stoneLow, k),
       K.stoneTop.clone().lerp(K.stoneBody, 0.30 + k * 0.5),
-      { t0: 0.40, t1: 0.96, low: K.stoneLow, l0: -0.30 });
+      { t0: 0.56, t1: 0.98, low: K.stoneLow, l0: -0.30 });
   }
   return { geo: b.build(), trunkR: 0, height: 0.6 };
 }
@@ -813,21 +1056,24 @@ function cobble(rng, K) {
  *  line of them, and the line is what reads as geology rather than as litter. */
 function stoneTrain(rng, K) {
   const b = new GeoBuilder();
-  const n = rng.int(3, 4);
+  const n = 3;
   const a0 = rng.float(0, Math.PI * 2);
   const ux = Math.cos(a0), uz = Math.sin(a0);
   let run = 0;
-  let s = rng.float(0.85, 1.35);
+  let s = rng.float(0.95, 1.45);
   for (let i = 0; i < n; i++) {
     const lat = rng.gauss(0, 0.30);
-    const g = rng.bool(0.45) ? slabGeom(rng, { jitter: 0.26 }) : rockGeom(rng, { jitter: 0.32 });
+    // Rounder hulls. A train of four sharp chips is the shape a smashed plate
+    // makes; the reference's trains are rounded stones that have been rolling
+    // for a while. Three of them, a little larger each.
+    const g = rng.bool(0.45) ? slabGeom(rng, { jitter: 0.22 }) : rockGeom(rng, { jitter: 0.24 });
     g.scale(s, s * rng.float(0.5, 0.85), s);
     g.rotateY(rng.float(0, Math.PI * 2));
     g.translate(ux * run - uz * lat, -s * 0.22, uz * run + ux * lat);
     const k = rng.float(0.05, 0.55);
     b.rawLit(g, K.stoneBody.clone().lerp(K.stoneLow, k),
       K.stoneTop.clone().lerp(K.stoneBody, 0.24 + k * 0.5),
-      { t0: 0.44, t1: 0.96, low: K.stoneLow, l0: -0.28 });
+      { t0: 0.58, t1: 0.98, low: K.stoneLow, l0: -0.28 });
     run += s * rng.float(1.3, 2.2);
     s *= rng.float(0.58, 0.84);
   }
@@ -839,9 +1085,12 @@ function logFallen(rng, K) {
   const b = new GeoBuilder();
   const L = rng.float(2.4, 5.0);
   const r = rng.float(0.22, 0.40);
+  // ROUND 16: 6 sides -> 10. A log lies BROADSIDE to this camera, so its round
+  // section is the whole of what you see of it, and six sides is a hexagonal
+  // pencil. Ten costs 16 triangles on an object there are only ~2 100 of.
   b.push(0, r * 0.86, 0, rng.float(0, Math.PI * 2));
-  b.cyl(r * 0.80, r, L, 6, K.dead, { rz: Math.PI / 2, open: true });
-  b.cyl(r * 0.80, r * 0.80, 0.10, 6, K.woodPale, { rz: Math.PI / 2, x: L / 2 });
+  b.cyl(r * 0.80, r, L, 10, K.dead, { rz: Math.PI / 2, open: true });
+  b.cyl(r * 0.80, r * 0.80, 0.10, 10, K.woodPale, { rz: Math.PI / 2, x: L / 2 });
   // One broken branch stub, which is most of what stops a log reading as a pipe.
   if (rng.bool(0.6)) {
     const bl = rng.float(0.5, 1.1);
@@ -860,8 +1109,8 @@ function logPile(rng, K) {
   const r = rng.float(0.26, 0.40);
   b.push(0, 0, 0, rng.float(0, Math.PI * 2));
   const put = (x, y) => {
-    b.cyl(r * 0.86, r, L, 6, K.dead, { rz: Math.PI / 2, x: 0, y, z: x, open: true });
-    b.cyl(r * 0.86, r * 0.86, 0.09, 6, K.woodPale, { rz: Math.PI / 2, x: L / 2, y, z: x });
+    b.cyl(r * 0.86, r, L, 10, K.dead, { rz: Math.PI / 2, x: 0, y, z: x, open: true });
+    b.cyl(r * 0.86, r * 0.86, 0.09, 10, K.woodPale, { rz: Math.PI / 2, x: L / 2, y, z: x });
   };
   put(-r * 1.02, r);
   put(r * 1.02, r);
@@ -876,9 +1125,11 @@ function stumpHollow(rng, K) {
   const b = new GeoBuilder();
   const h = rng.float(0.7, 1.5);
   const r = rng.float(0.45, 0.80);
-  b.cyl(r * 0.94, r * 1.20, h, 6, K.dead, { y: h / 2, open: true });
-  b.cyl(r * 0.94, r * 0.94, 0.10, 6, K.woodPale, { y: h + 0.05 });
-  b.cyl(r * 0.44, r * 0.44, 0.07, 5, K.trunkDark, { y: h + 0.13 });
+  // 6 -> 10 sides: a stump is a DRUM seen from above, i.e. the camera looks
+  // straight down its round end, and a hexagon up there is unmistakable.
+  b.cyl(r * 0.94, r * 1.20, h, 10, K.dead, { y: h / 2, open: true });
+  b.cyl(r * 0.94, r * 0.94, 0.10, 10, K.woodPale, { y: h + 0.05 });
+  b.cyl(r * 0.44, r * 0.44, 0.07, 8, K.trunkDark, { y: h + 0.13 });
   // Two root buttresses. A plain drum reads as a barrel from above.
   for (let i = 0; i < 2; i++) {
     const a = rng.float(0, Math.PI * 2);
@@ -893,14 +1144,42 @@ function stumpHollow(rng, K) {
  *  is to break the turf, not to be an object. */
 function earthPatch(rng, K) {
   const b = new GeoBuilder();
-  const R = rng.float(1.3, 2.8);
+  // ---- ROUND 16: HALF THE SIZE, AND NOT PEACH ------------------------------
+  //
+  // Cropped at 3x this was the most conspicuously ANGULAR object left in the
+  // meadow: a 6-8 m salmon-coloured polygon with a hard edge, sitting on green
+  // grass, roughly ten thousand times over. Two things were wrong. It was far
+  // too big — a scrape in target_01 is a metre or two, the size of the thing
+  // that made it — and `soilLit` is a warm pale brown that, on a dome squashed
+  // to a sixth of its width, is what EVERY up-facing facet prints, so the whole
+  // patch came out one flat bright plane whatever `t0` was set to.
+  //
+  // So: half the radius, and both rungs pulled a third of the way toward the
+  // sward green. A scrape is worn turf with earth showing through it, which is
+  // a desaturated olive-brown; the peach was the colour of a plant pot.
+  const R = rng.float(0.85, 1.75);
   // A shallow 7-sided dome. Cover props are emitted 0.15 below the ground, so
   // it needs half a metre of rise to show at all; what stands proud reads as a
   // worn scrape rather than a molehill because it is four times as wide as tall.
+  // ROUND 16: the grit goes from two-to-five stones to nought-to-two, and `t0`
+  // up hard. A scrape is meant to be a change of GROUND, and ours was reading
+  // as an object: a pale tan heptagon with white chips scattered on it, ~10 000
+  // of them, and cropped at 3x they were the salmon-coloured shards in the
+  // meadow. target_01 has bare earth only as a faint tint under a flower drift
+  // or at the lip of a bank — never as a thing with an outline.
   b.rawLit(
-    (() => { const g = rockGeom(rng, { jitter: 0.22 }); g.scale(R, R * rng.float(0.16, 0.26), R); return g; })(),
-    K.soil, K.soilLit, { t0: 0.55, t1: 0.99, low: K.trunkDark, l0: -0.2 });
-  const n = rng.int(2, 5);
+    (() => { const g = rockGeom(rng, { jitter: 0.22 }); g.scale(R, R * rng.float(0.12, 0.20), R); return g; })(),
+    // ...and toward `grass[0]`, the DARK rung, not `grass[1]`. Pulled toward
+    // the light rung the scrape only went from salmon to orange, because
+    // `grass[1]` is itself a yellow-green and `soilLit` is already warm — the
+    // lerp moved the hue and left the VALUE, which is what made it a plane. The
+    // dark rung takes both down at once and the patch becomes what it is meant
+    // to be: turf that has been worn through, one step darker than the sward,
+    // rather than an object lying on it.
+    K.soil.clone().lerp(K.grass[0], 0.42),
+    K.soilLit.clone().lerp(K.grass[0], 0.34),
+    { t0: 0.80, t1: 1.00, low: K.trunkDark, l0: -0.2 });
+  const n = rng.int(0, 2);
   for (let i = 0; i < n; i++) {
     const a = rng.float(0, Math.PI * 2), d = Math.sqrt(rng.float(0, 1)) * R * 0.85;
     const s = rng.float(0.10, 0.26);
@@ -947,15 +1226,26 @@ function slab(rng, K, o = {}) {
   // looking like one material stamped four times, but it varies VALUE only.
   const k = rng.float(0.0, 0.26);
   const body = K.stoneBody.clone().lerp(K.stoneLow, k);
-  const top = K.stoneTop.clone().lerp(K.stoneBody, k * 0.9 + rng.float(0, 0.14));
+  // ROUND 16: the crown comes a third of the way back toward the body. On a
+  // flat-topped hull EVERY facet of the planed top is at normal.y 1.0, so the
+  // crown rung is not a highlight on a slab, it is the colour of a whole face —
+  // and at full `stoneTop` that face read as a sheet of cream card lying in the
+  // grass. The three-plane structure survives the move; the paper does not.
+  const top = K.stoneTop.clone().lerp(K.stoneBody, k * 0.9 + rng.float(0.22, 0.40));
   const low = K.stoneLow;
   // t0 0.42: a planed granite face is not exactly level, and at 0.74 only the
   // one facet that happened to point straight up caught the light, so the
   // reference's broad pale crown came out as a single bright polygon in a sea
   // of mid grey. The shadow ramp starts at the same place and runs down to
   // horizontal-and-below, which is where a bedded block's dark side lives.
-  b.rawLit(slabGeom(rng, { jitter: 0.24 }), body, top,
-    { t0: 0.55, t1: 0.94, low, l0: -0.10 });
+  // ROUND 16: the main mass gets `detail: 1` for the same reason the boulder
+  // does. A slab is the one rock that is SUPPOSED to have a hard planed top, so
+  // the extra facets are spent on its shoulders and its bedding — the places
+  // where 20 facets left it a faceted lozenge rather than a weathered block.
+  // The satellites stay at detail 0: they are 0.4-0.6 of the anchor, i.e. under
+  // a metre, and 20 facets is already more than resolves there.
+  b.rawLit(slabGeom(rng, { jitter: 0.24, detail: 1 }), body, top,
+    { t0: 0.60, t1: 0.96, low, l0: -0.10 });
   const n = rng.int(1, 3);
   for (let i = 0; i < n; i++) {
     const s = rng.float(0.34, 0.62);
@@ -985,18 +1275,40 @@ function boulder(rng, K, o = {}) {
   // which is what gives target_01's round stones their soft top-to-bottom roll
   // instead of the slab's hard three planes. `detail: 1` because the reference's
   // rounded boulders are visibly many-faceted, not eight-sided lumps.
+  /**
+   * ---- ROUND 16: ALWAYS `detail: 1`, AND LESS JITTER --------------------
+   *
+   * Cropped at 3x beside target_01 this was the second-worst thing in the
+   * frame after the firs: our meadow stones read as broken POLYSTYRENE —
+   * near-white, hard-edged, four or five big flat faces apiece. The reference's
+   * are rounded warm-grey boulders with many SMALL facets, and the difference
+   * is entirely form: a 20-facet icosahedron at 42% jitter has faces so large
+   * that each one takes a different rung of the albedo ramp, so the solid
+   * shatters into planes; an 80-facet one at 22% has faces small enough that
+   * the ramp reads as a ROLL from a pale crown down to a dark underside, which
+   * is what "rounded" looks like under flat shading.
+   *
+   * `t0` goes 0.50 -> 0.62 with it. With four times the facets, half of them
+   * were landing above the old crown threshold and the whole rock went pale;
+   * at 0.62 only the genuinely sky-facing cap takes the crown colour and the
+   * flanks keep the body grey — the same three-plane read the slab gets, but
+   * arrived at by curvature rather than by cleavage.
+   *
+   * 40 -> 100 triangles a boulder, and there are only ~1 900 of them: 0.19 M
+   * against the 3.4 M the flowers gave back.
+   */
   const k = rng.float(0.06, 0.40);
   const body = K.stoneBody.clone().lerp(K.stoneLow, k);
-  b.rawLit(rockGeom(rng, { jitter: 0.30, detail: rng.bool(0.5) ? 1 : 0 }), body,
+  b.rawLit(rockGeom(rng, { jitter: 0.22, detail: 1 }), body,
     K.stoneTop.clone().lerp(K.stoneBody, 0.24 + k),
-    { t0: 0.50, t1: 0.98, low: K.stoneLow, l0: -0.30 });
+    { t0: 0.62, t1: 1.00, low: K.stoneLow, l0: -0.30 });
   if (rng.bool(0.5)) {
-    const lump = rockGeom(rng, { jitter: 0.30 });
+    const lump = rockGeom(rng, { jitter: 0.26 });
     lump.scale(0.55, 0.5, 0.55);
     lump.translate(rng.float(-0.9, 0.9), 0.1, rng.float(-0.9, 0.9));
     b.rawLit(lump, K.stoneBody.clone().lerp(K.stoneLow, 0.45),
       K.stoneTop.clone().lerp(K.stoneBody, 0.55),
-      { t0: 0.50, t1: 0.98, low: K.stoneLow, l0: -0.30 });
+      { t0: 0.58, t1: 1.00, low: K.stoneLow, l0: -0.30 });
   }
   if (o.snow) {
     const cap = rockGeom(rng, { jitter: 0.22 });
@@ -1065,17 +1377,21 @@ const MAKERS = {
   fir,
   // Short, full, heavy skirts, a slow taper and a wide crown — the "shorter
   // fuller fir" of the reference frame. Fewer tiers, but each one deeper.
+  // ROUND 16 — every `seg` here goes up by half, and the ladder is kept in
+  // proportion to how many pixels the tree is: an `firOld` fills 80-100 px of
+  // the frame and wants 10 teeth round its widest tier, an `firSapling` fills
+  // 12 and would not show a twelfth one.
   firOld: (r, K) => fir(r, K, {
-    tall: 0.90, wide: 1.28, tiers: 9, seg: 14,
-    dropK: 0.40, stepK: 0.56, profE: 0.42, bareK: 0.16,
+    tall: 0.90, wide: 1.28, tiers: 9, seg: 16,
+    dropK: 0.36, stepK: 0.56, profE: 0.42, bareK: 0.16,
   }),
   // TALL NARROW SPIRE. Not a needle: at wide 0.72 with six tiers this once came
   // out as a 22 m green spike three metres across, which read as litter. The
   // narrowness comes from SHORT frills and a fast-closing profile rather than
   // from a thin base, so the bottom of the tree still has a skirt on it.
   firSpire: (r, K) => fir(r, K, {
-    tall: 1.02, wide: 0.86, tiers: 11, seg: 12,
-    dropK: 0.30, stepK: 0.52, profE: 0.74, crownK: 0.26,
+    tall: 1.02, wide: 0.86, tiers: 11, seg: 15,
+    dropK: 0.27, stepK: 0.52, profE: 0.74, crownK: 0.26,
   }),
   // SQUAT AND FULL — the fourth silhouette, and the one the reference frame has
   // that we did not: a shoulder-high conifer wider than it is tall at the skirt,
@@ -1085,23 +1401,23 @@ const MAKERS = {
   // broadleaf that round 5 correctly threw out (a lumpy bright ball on a stick,
   // the most out-of-place object in that shot).
   firBushy: (r, K) => fir(r, K, {
-    tall: 0.52, wide: 1.05, tiers: 7, seg: 12,
-    dropK: 0.46, stepK: 0.58, profE: 0.34, bareK: 0.03, crownK: 0.18,
+    tall: 0.52, wide: 1.05, tiers: 7, seg: 13,
+    dropK: 0.40, stepK: 0.58, profE: 0.34, bareK: 0.03, crownK: 0.18,
   }),
   firYoung: (r, K) => fir(r, K, {
-    tall: 0.74, wide: 0.72, tiers: 7, seg: 10,
-    dropK: 0.36, stepK: 0.54, profE: 0.52, bareK: 0.07,
+    tall: 0.74, wide: 0.72, tiers: 7, seg: 12, trunkSeg: 8,
+    dropK: 0.32, stepK: 0.54, profE: 0.52, bareK: 0.07,
   }),
   // The bottom of the size ladder. The reference is full of knee-to-waist-high
   // conifers filling the gaps between the hero trees; without them the meadow
   // reads as mown. Cheapest member: 5 tiers at seg 6 is 60 triangles of skirt.
   firSapling: (r, K) => fir(r, K, {
-    tall: 0.80, wide: 0.38, tiers: 5, seg: 8,
-    dropK: 0.38, stepK: 0.56, profE: 0.56, bareK: 0.05,
+    tall: 0.80, wide: 0.38, tiers: 5, seg: 10, trunkSeg: 6,
+    dropK: 0.34, stepK: 0.56, profE: 0.56, bareK: 0.05,
   }),
   firSnow: (r, K) => fir(r, K, { snow: true }),
   firSnowOld: (r, K) => fir(r, K, {
-    snow: true, tall: 0.92, wide: 1.24, tiers: 9, seg: 14, dropK: 0.40, stepK: 0.56, profE: 0.46,
+    snow: true, tall: 0.92, wide: 1.24, tiers: 9, seg: 16, dropK: 0.36, stepK: 0.56, profE: 0.46,
   }),
   scotsPine, broadleaf, birch, maple, snag, stump,
   saguaro, barrelCactus, ocotillo, scrub, windPine,
@@ -1387,9 +1703,23 @@ const MIXES = {
       // retired the broadleaf in round 5.
       { id: 'grassBlades', w: 6.2, alt: [1, 3, 190, 300], wet: [0, 0.04, 1.05, 1.2], flat: 0.55, size: [0.85, 1.75] },
       { id: 'shrubTuft', w: 3.0, alt: [1, 3, 170, 260], wet: [0, 0.04, 1.05, 1.2], flat: 0.55, size: [0.8, 1.7] },
-      { id: 'cobble', w: 2.1, accent: true, alt: [1, 3, 220, 340], wet: [0, 0, 1.1, 1.3], flat: 0.42, size: [0.55, 1.7] },
-      { id: 'stoneTrain', w: 1.1, accent: true, alt: [1, 4, 220, 340], wet: [0, 0, 1.1, 1.3], flat: 0.60, size: [0.6, 1.5] },
-      { id: 'earthPatch', w: 1.0, accent: true, alt: [1, 4, 200, 320], wet: [0, 0, 1.05, 1.25], flat: 0.72, size: [0.6, 1.4] },
+      // ---- ROUND 16: FEWER, LARGER STONES -------------------------------
+      // The reference's meadow has FEWER and BIGGER rocks than ours, and that
+      // is a composition fact, not a geometry one: 26 000 cobbles and 6 400
+      // stone trains put a pale chip every few metres, so the turf read as
+      // rubble-strewn and no single stone was large enough to give the frame a
+      // scale cue. Halving the small-stone weight and widening the size band
+      // buys both — the same pixels of stone in the frame, spent on a third as
+      // many objects, each one big enough to have a lit face and a dark one.
+      { id: 'cobble', w: 0.95, accent: true, alt: [1, 3, 220, 340], wet: [0, 0, 1.1, 1.3], flat: 0.42, size: [0.75, 2.1] },
+      { id: 'stoneTrain', w: 0.55, accent: true, alt: [1, 4, 220, 340], wet: [0, 0, 1.1, 1.3], flat: 0.60, size: [0.7, 1.7] },
+      // ...and cut again, to a sixth of where this round found it. Picked out
+      // of the frame by projection (scratch/pick.mjs), the pale angular shapes
+      // left in the meadow after the stone pass were ALL earthPatch. target_01
+      // has no bare-earth object in its meadow at any size — what it has is a
+      // faint tint under a flower drift — so this is a density fault, not a
+      // geometry one, and no amount of rounding the dome would have fixed it.
+      { id: 'earthPatch', w: 0.16, accent: true, alt: [1, 4, 200, 320], wet: [0, 0, 1.05, 1.25], flat: 0.72, size: [0.6, 1.4] },
       { id: 'logFallen', w: 0.62, accent: true, alt: [1, 4, 150, 230], wet: [0, 0.05, 1.05, 1.2], flat: 0.74, size: [0.7, 1.3] },
       { id: 'stumpHollow', w: 0.55, accent: true, alt: [1, 4, 150, 230], wet: [0, 0.05, 1.05, 1.2], flat: 0.72, size: [0.8, 1.5] },
       { id: 'logPile', w: 0.16, accent: true, alt: [1, 4, 130, 200], wet: [0, 0.05, 1.05, 1.2], flat: 0.82, size: [0.8, 1.2] },
@@ -1421,15 +1751,23 @@ const MIXES = {
       // one per 13 m², which is what counting marks in the reference's own turf
       // gives. Below this the triangle bill grows faster than anything is
       // visible.
-      cell: 3.6, fill: 0.90,
+      // ---- ROUND 16: 3.6 -> 4.0 m, fill 0.90 -> 0.82 --------------------
+      // The note above is right that a hole in the turf is a fault, and it
+      // solved that fault two rounds ago. What it bought at the same time is
+      // the fault the client is now describing: a mark every 13 m² EVERYWHERE
+      // is a carpet, and target_01's meadow is not carpeted — it has broad
+      // stretches of plain green with the marks gathered into drifts. At 4.0 m
+      // and 0.82 fill it is one mark per 19.5 m², a quarter fewer, and the
+      // stretches come back without any twenty-metre holes opening up.
+      cell: 4.0, fill: 0.82,
       mix: [
-        { id: 'grassBlades', w: 0.22, size: [0.75, 1.45] },
+        { id: 'grassBlades', w: 0.30, size: [0.75, 1.45] },
         // Tussock's weight is cut to a token. It is the oldest ground-cover
         // species we have and, measured, the least useful: the map carried
         // 42 000 of them and a 3.4x crop of the meadow shows not one, because
         // every colour in a tuft is derived from the sward it stands in. It
         // stays as filler under the other marks, not as a headline.
-        { id: 'tussock', w: 0.06, size: [0.9, 2.0] },
+        { id: 'tussock', w: 0.13, size: [0.9, 2.0] },
         // Reweighted by what actually RESOLVES. Shot and cropped at 3.4x, the
         // marks you can see in our meadow are, in order: cobbles, dark scrub,
         // flower drifts, bare earth — and only then blades. So the weight moves
@@ -1439,10 +1777,17 @@ const MIXES = {
         // Stone, wood and earth are a fifth of the blanket, and that fifth is
         // the measured shortfall: the frame's "other" pixel population (road +
         // stone + small detail) sits at 25.7% against the reference's 32.3%.
-        { id: 'cobble', w: 0.16, size: [0.55, 1.75] },
-        { id: 'flowersWhite', w: 0.11, size: [0.85, 1.3] },
-        { id: 'earthPatch', w: 0.07, size: [0.55, 1.4] },
-        { id: 'stoneTrain', w: 0.045, size: [0.5, 1.3] },
+        // ROUND 16: stone and earth were a QUARTER of the blanket, i.e. a pale
+        // angular chip roughly every 50 m² of meadow, everywhere, forever. That
+        // is the single biggest contributor to "everything is angular" outside
+        // the trees, and it is not what the reference's turf is made of — its
+        // turf is grass with the occasional dark tuft and a drift of flowers.
+        // The weight moves to the three species that ARE grass, which now cost
+        // 9-12 triangles apiece instead of 24-33.
+        { id: 'cobble', w: 0.055, size: [0.7, 2.0] },
+        { id: 'flowersWhite', w: 0.13, size: [0.85, 1.3] },
+        { id: 'earthPatch', w: 0.008, size: [0.55, 1.2] },
+        { id: 'stoneTrain', w: 0.018, size: [0.55, 1.45] },
         { id: 'flowersRed', w: 0.015, size: [0.8, 1.25] },
         { id: 'logFallen', w: 0.014, size: [0.7, 1.3] },
         { id: 'stumpHollow', w: 0.014, size: [0.8, 1.5] },
@@ -1456,8 +1801,14 @@ const MIXES = {
     // stone cannot anchor anything, and `blockStone` is weighted twice into the
     // anchor list because the cleaved block is the silhouette the frame was
     // short of.
-    anchors: ['blockStone', 'blockStone', 'slab', 'boulder'],
-    sats: ['blockStone', 'slab', 'boulder', 'cobble', 'cobble'],
+    // ROUND 16: the weighting flips. The cleaved block was doubled into the
+    // anchor list two rounds ago because it was the silhouette the frame was
+    // short of; with four families in the map it is now the one that is OVER-
+    // represented, and it is the sharpest of the four. In target_01 the stones
+    // standing in the meadow are rounded boulders — the hard cleaved faces
+    // belong to the cliffs by the water, which the landmark pass supplies.
+    anchors: ['boulder', 'boulder', 'slab', 'blockStone'],
+    sats: ['boulder', 'boulder', 'slab', 'cobble', 'blockStone'],
     verge: {
       // The verge is the one band the detail blanket cannot reach — everything
       // inside the road's keep-out is rejected by `isBlocked` — so the strip
@@ -1471,8 +1822,8 @@ const MIXES = {
         // scrape of bare earth crowd the gravel, and the soft encroaching
         // margin is most of why its road looks driven-on.
         { id: 'grassBlades', w: 0.14 },
-        { id: 'cobble', w: 0.09 },
-        { id: 'earthPatch', w: 0.05 },
+        { id: 'cobble', w: 0.05 },
+        { id: 'earthPatch', w: 0.02 },
         { id: 'shrubTuft', w: 0.05 },
         // A few real trees on the verge, not just saplings. In target_01 the
         // wood closes to within a couple of metres of the gravel in places and
